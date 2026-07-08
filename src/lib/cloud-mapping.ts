@@ -1,0 +1,721 @@
+export type CloudMapping = {
+  serviceName: string;
+  alternatives: Array<{
+    serviceName: string;
+    reason: string;
+  }>;
+  costEstimate: {
+    min: number;
+    max: number;
+    assumptions: string;
+  };
+};
+
+export function getCloudMapping(
+  provider: string,
+  componentType: string,
+  componentId: string,
+  requirements: {
+    functional: string[];
+    nonFunctional: {
+      expectedScale: string;
+      readWritePattern: string;
+      dataNature: string;
+      latencySensitivity: string;
+      budget: string;
+      teamMaturity: string;
+      compliance: string;
+    };
+  }
+): CloudMapping {
+  const nfr = requirements.nonFunctional;
+  const scaleLower = nfr.expectedScale.toLowerCase();
+  const budgetLower = nfr.budget.toLowerCase();
+  const teamLower = nfr.teamMaturity.toLowerCase();
+
+  const isHighScale =
+    scaleLower.includes("high") ||
+    scaleLower.includes("million") ||
+    scaleLower.includes("100,000") ||
+    scaleLower.includes("10k") ||
+    scaleLower.includes("50k");
+
+  const isLowBudget =
+    budgetLower.includes("low") ||
+    budgetLower.includes("50") ||
+    budgetLower.includes("30") ||
+    budgetLower.includes("tight");
+
+  if (provider === "aws") {
+    switch (componentType) {
+      case "cdn":
+        return {
+          serviceName: "Amazon CloudFront",
+          alternatives: [
+            {
+              serviceName: "AWS Global Accelerator",
+              reason: "Chose CloudFront because it supports edge caching for static assets, whereas Global Accelerator is better suited for raw TCP/UDP latency optimizations.",
+            },
+          ],
+          costEstimate: {
+            min: isHighScale ? 20 : 0,
+            max: isHighScale ? 150 : 5,
+            assumptions: isHighScale
+              ? "CloudFront data transfer out costs for high volume traffic."
+              : "CloudFront free tier covers up to 1TB of data transfer out.",
+          },
+        };
+
+      case "compute":
+        if (componentId === "worker") {
+          if (isLowBudget) {
+            return {
+              serviceName: "AWS Lambda (Worker)",
+              alternatives: [
+                {
+                  serviceName: "Amazon ECS Fargate (Worker Task)",
+                  reason: "Chose Lambda because the team has low operational maturity and the budget is tight. Fargate tasks incur higher baseline costs for idle time.",
+                },
+              ],
+              costEstimate: {
+                min: 0,
+                max: isHighScale ? 30 : 5,
+                assumptions: "Lambda execution duration costs based on spiky background processing volume.",
+              },
+            };
+          } else {
+            return {
+              serviceName: "Amazon ECS Fargate (Worker)",
+              alternatives: [
+                {
+                  serviceName: "Amazon EC2 Worker Instance",
+                  reason: "Chose Fargate to eliminate instance patching and OS management overhead. EC2 would be cheaper but requires more operations effort.",
+                },
+              ],
+              costEstimate: {
+                min: 15,
+                max: isHighScale ? 120 : 30,
+                assumptions: "0.25 vCPU + 0.5 GB RAM container task running continuously for background jobs.",
+              },
+            };
+          }
+        }
+
+        // Primary Compute
+        const isServerlessRules =
+          isLowBudget &&
+          (teamLower.includes("junior") || teamLower.includes("small") || teamLower === "not_specified");
+        if (isServerlessRules) {
+          return {
+            serviceName: "AWS Lambda + API Gateway",
+            alternatives: [
+              {
+                serviceName: "Amazon ECS Fargate",
+                reason: "Chose Lambda to leverage pay-per-request pricing and zero management overhead. Fargate containers have a higher fixed monthly cost.",
+              },
+            ],
+            costEstimate: {
+              min: 0,
+              max: isHighScale ? 80 : 10,
+              assumptions: "API Gateway HTTP API requests ($1.00/million) + Lambda execution times (128MB RAM, 100ms duration).",
+            },
+          };
+        } else {
+          return {
+            serviceName: "Amazon ECS Fargate + ALB",
+            alternatives: [
+              {
+                serviceName: "AWS Lambda + API Gateway",
+                reason: "Chose Fargate because the application has long-running connections or consistent request streams. ALB provides better caching and SSL termination.",
+              },
+            ],
+            costEstimate: {
+              min: 25,
+              max: isHighScale ? 250 : 60,
+              assumptions: "Application Load Balancer baseline cost ($18/month) + 1-2 ECS Fargate tasks (0.5 vCPU, 1GB RAM) running 24/7.",
+            },
+          };
+        }
+
+      case "database":
+        if (componentId === "database") {
+          const isRelational =
+            nfr.dataNature.toLowerCase().includes("relational") ||
+            nfr.dataNature.toLowerCase().includes("sql") ||
+            nfr.dataNature.toLowerCase().includes("invoice");
+          if (isRelational) {
+            if (isLowBudget) {
+              return {
+                serviceName: "Amazon RDS PostgreSQL (db.t4g.micro)",
+                alternatives: [
+                  {
+                    serviceName: "Amazon Aurora Serverless v2",
+                    reason: "Chose RDS single instance because Aurora Serverless v2 has a minimum 0.5 ACU baseline cost (~$40/month), which exceeds the tight budget limit.",
+                  },
+                ],
+                costEstimate: {
+                  min: 15,
+                  max: 25,
+                  assumptions: "Single db.t4g.micro instance (2 vCPU, 1GB RAM) with 20GB GP3 storage.",
+                },
+              };
+            } else {
+              return {
+                serviceName: "Amazon Aurora PostgreSQL (Serverless v2)",
+                alternatives: [
+                  {
+                    serviceName: "Amazon RDS PostgreSQL (Multi-AZ)",
+                    reason: "Chose Aurora Serverless v2 to accommodate unpredictable scaling automatically. RDS Multi-AZ would provide HA but is less flexible.",
+                  },
+                ],
+                costEstimate: {
+                  min: 40,
+                  max: isHighScale ? 300 : 100,
+                  assumptions: "Aurora Serverless v2 scaling between 0.5 and 4 ACUs with Multi-AZ replication.",
+                },
+              };
+            }
+          } else {
+            return {
+              serviceName: "Amazon DynamoDB",
+              alternatives: [
+                {
+                  serviceName: "Amazon DocumentDB (MongoDB Compatible)",
+                  reason: "Chose DynamoDB because DocumentDB requires a running cluster instance (~$50/month minimum), whereas DynamoDB is serverless and pay-as-you-go.",
+                },
+              ],
+              costEstimate: {
+                min: 0,
+                max: isHighScale ? 100 : 15,
+                assumptions: "DynamoDB On-Demand read/write request units + storage capacity costs.",
+              },
+            };
+          }
+        }
+        return {
+          serviceName: "Amazon RDS PostgreSQL",
+          alternatives: [{ serviceName: "Amazon DynamoDB", reason: "Chose RDS for structured schemas." }],
+          costEstimate: { min: 15, max: 50, assumptions: "RDS DB instance." },
+        };
+
+      case "storage":
+        return {
+          serviceName: "Amazon S3",
+          alternatives: [
+            {
+              serviceName: "Amazon EFS (Elastic File System)",
+              reason: "Chose S3 because the files are unstructured media/blobs. EFS is better for POSIX-compliant file systems mounted directly onto EC2/Fargate.",
+            },
+          ],
+          costEstimate: {
+            min: 1,
+            max: isHighScale ? 80 : 15,
+            assumptions: "S3 Standard storage volume ($0.023/GB) + GET/PUT request API calls.",
+          },
+        };
+
+      case "queue":
+        return {
+          serviceName: "Amazon SQS (Simple Queue Service)",
+          alternatives: [
+            {
+              serviceName: "Amazon MSK (Managed Streaming for Apache Kafka)",
+              reason: "Chose SQS because the workload has simple message buffer requirements. Kafka (MSK) is designed for high-throughput log streams and has a high minimum instance cost (~$200/month).",
+            },
+          ],
+          costEstimate: {
+            min: 0,
+            max: isHighScale ? 30 : 5,
+            assumptions: "SQS request volume (first 1 million requests/month are free).",
+          },
+        };
+
+      case "cache":
+        return {
+          serviceName: "Amazon ElastiCache (Redis OSS)",
+          alternatives: [
+            {
+              serviceName: "Amazon DynamoDB Accelerator (DAX)",
+              reason: "Chose ElastiCache Redis because it supports versatile cache structures (sessions, query caches). DAX is specifically optimized only for DynamoDB key caching.",
+            },
+          ],
+          costEstimate: {
+            min: 12,
+            max: isHighScale ? 90 : 25,
+            assumptions: "Single cache.t4g.micro node running Redis OSS for session caching.",
+          },
+        };
+
+      case "auth":
+        return {
+          serviceName: "Amazon Cognito User Pools",
+          alternatives: [
+            {
+              serviceName: "Auth0 / Clerk (SaaS Provider)",
+              reason: "Chose Cognito for full AWS native integration and cost savings. Cognito is free for the first 50,000 monthly active users (MAUs), whereas Clerk/Auth0 have lower free limits.",
+            },
+          ],
+          costEstimate: {
+            min: 0,
+            max: isHighScale ? 40 : 0,
+            assumptions: "Cognito User Pools pricing: 50,000 MAUs free, then $0.0055 per MAU.",
+          },
+        };
+
+      default:
+        return {
+          serviceName: `AWS Mapped Service (${componentType})`,
+          alternatives: [],
+          costEstimate: { min: 0, max: 0, assumptions: "Generic AWS component." },
+        };
+    }
+  } else if (provider === "azure") {
+    switch (componentType) {
+      case "cdn":
+        return {
+          serviceName: "Azure Front Door",
+          alternatives: [
+            {
+              serviceName: "Azure Traffic Manager",
+              reason: "Chose Azure Front Door because it provides Global HTTP/HTTPS load balancing and edge asset caching, whereas Traffic Manager is purely DNS-based routing.",
+            },
+          ],
+          costEstimate: {
+            min: isHighScale ? 35 : 10,
+            max: isHighScale ? 160 : 35,
+            assumptions: "Azure Front Door Standard base fee ($35/mo) + data egress charges.",
+          },
+        };
+
+      case "compute":
+        if (componentId === "worker") {
+          if (isLowBudget) {
+            return {
+              serviceName: "Azure Functions (Consumption Worker)",
+              alternatives: [
+                {
+                  serviceName: "Azure Container Apps (Worker)",
+                  reason: "Chose Azure Functions because it scales down to zero dynamically for background triggers. Container Apps would require a persistent active container profile.",
+                },
+              ],
+              costEstimate: {
+                min: 0,
+                max: isHighScale ? 35 : 5,
+                assumptions: "Serverless execution duration pricing based on invocation volumes.",
+              },
+            };
+          } else {
+            return {
+              serviceName: "Azure Container Apps (Worker)",
+              alternatives: [
+                {
+                  serviceName: "Azure Virtual Machines (Scale Sets)",
+                  reason: "Chose Container Apps to avoid VM management, OS upgrades, and complex scale rules. VMs would be cheaper but require significant administrative overhead.",
+                },
+              ],
+              costEstimate: {
+                min: 15,
+                max: isHighScale ? 120 : 30,
+                assumptions: "Container profile allocating 0.25 vCPU and 0.5 GB RAM running continuously.",
+              },
+            };
+          }
+        }
+
+        // Primary API Compute
+        const isServerlessRules =
+          isLowBudget &&
+          (teamLower.includes("junior") || teamLower.includes("small") || teamLower === "not_specified");
+        if (isServerlessRules) {
+          return {
+            serviceName: "Azure Functions + API Management",
+            alternatives: [
+              {
+                serviceName: "Azure Container Apps",
+                reason: "Chose Azure Functions to minimize fixed costs, charging strictly per request. Container Apps has a slightly higher base footprint cost.",
+              },
+            ],
+            costEstimate: {
+              min: 0,
+              max: isHighScale ? 85 : 10,
+              assumptions: "API Management Consumption tier + Serverless Functions executions.",
+            },
+          };
+        } else {
+          return {
+            serviceName: "Azure Container Apps + App Gateway",
+            alternatives: [
+              {
+                serviceName: "Azure App Service (Linux Web App)",
+                reason: "Chose Container Apps for modern microservices packaging and simpler scale-to-zero settings compared to App Service plans.",
+              },
+            ],
+            costEstimate: {
+              min: 25,
+              max: isHighScale ? 260 : 65,
+              assumptions: "Azure App Gateway baseline costs ($18/mo) + Container App execution (1-2 replicas).",
+            },
+          };
+        }
+
+      case "database":
+        if (componentId === "database") {
+          const isRelational =
+            nfr.dataNature.toLowerCase().includes("relational") ||
+            nfr.dataNature.toLowerCase().includes("sql") ||
+            nfr.dataNature.toLowerCase().includes("invoice");
+          if (isRelational) {
+            if (isLowBudget) {
+              return {
+                serviceName: "Azure Database for PostgreSQL (Burstable B1ms)",
+                alternatives: [
+                  {
+                    serviceName: "Azure Cosmos DB (PostgreSQL API)",
+                    reason: "Chose Burstable PostgreSQL single instance because Cosmos DB distributed configurations have a high baseline cost structure (~$90/mo minimum).",
+                  },
+                ],
+                costEstimate: {
+                  min: 15,
+                  max: 25,
+                  assumptions: "Single burstable compute instance (B1ms, 1 vCPU, 2GB RAM) with 32GB Premium SSD storage.",
+                },
+              };
+            } else {
+              return {
+                serviceName: "Azure Database for PostgreSQL (Flexible Server)",
+                alternatives: [
+                  {
+                    serviceName: "Azure Cosmos DB for PostgreSQL",
+                    reason: "Chose PostgreSQL Flexible Server to provide high availability and replication zones without the complexity of a distributed Citus database layout.",
+                  },
+                ],
+                costEstimate: {
+                  min: 45,
+                  max: isHighScale ? 310 : 110,
+                  assumptions: "General Purpose D2ds_v5 instance (2 vCPU, 8GB RAM) with high availability configured.",
+                },
+              };
+            }
+          } else {
+            return {
+              serviceName: "Azure Cosmos DB (NoSQL)",
+              alternatives: [
+                {
+                  serviceName: "Azure Cache for Redis (Enterprise)",
+                  reason: "Chose Cosmos DB as the primary document store due to strict document query requirements. Redis is used primarily for fast transit caches.",
+                },
+              ],
+              costEstimate: {
+                min: 0,
+                max: isHighScale ? 110 : 15,
+                assumptions: "Cosmos DB Serverless provisioning (billing based on consumed Request Units).",
+              },
+            };
+          }
+        }
+        return {
+          serviceName: "Azure Database for PostgreSQL",
+          alternatives: [{ serviceName: "Azure Cosmos DB", reason: "Chose PostgreSQL for relational data model." }],
+          costEstimate: { min: 15, max: 50, assumptions: "Azure PostgreSQL Server." },
+        };
+
+      case "storage":
+        return {
+          serviceName: "Azure Blob Storage (LRS GPv2)",
+          alternatives: [
+            {
+              serviceName: "Azure Files",
+              reason: "Chose Blob Storage because the application requires flat block media objects. Azure Files is optimized for SMB/NFS file share mounts.",
+            },
+          ],
+          costEstimate: {
+            min: 1,
+            max: isHighScale ? 85 : 15,
+            assumptions: "Hot Tier blob storage capacity costs ($0.018/GB) + transactional operations.",
+          },
+        };
+
+      case "queue":
+        return {
+          serviceName: "Azure Service Bus (Standard)",
+          alternatives: [
+            {
+              serviceName: "Azure Queue Storage",
+              reason: "Chose Service Bus Standard because it supports advanced FIFO, transactions, and pub/sub routing. Queue Storage is cheaper but supports only basic queuing.",
+            },
+          ],
+          costEstimate: {
+            min: 10,
+            max: isHighScale ? 35 : 15,
+            assumptions: "Service Bus Standard base price ($10/mo) which includes 10 million transactions.",
+          },
+        };
+
+      case "cache":
+        return {
+          serviceName: "Azure Cache for Redis (Basic C0)",
+          alternatives: [
+            {
+              serviceName: "Azure Cosmos DB Integrated Cache",
+              reason: "Chose Redis because it supports multi-service session and schema caches. Cosmos DB integrated cache is restricted purely to Cosmos DB reads.",
+            },
+          ],
+          costEstimate: {
+            min: 16,
+            max: isHighScale ? 95 : 30,
+            assumptions: "Basic tier C0 instance (250MB RAM) for low latency key caching.",
+          },
+        };
+
+      case "auth":
+        return {
+          serviceName: "Microsoft Entra ID B2C",
+          alternatives: [
+            {
+              serviceName: "Auth0 / Clerk SaaS",
+              reason: "Chose Entra ID B2C due to its generous free tier limit (50,000 monthly active users) and direct Microsoft ecosystem integration.",
+            },
+          ],
+          costEstimate: {
+            min: 0,
+            max: isHighScale ? 40 : 0,
+            assumptions: "Entra ID B2C pricing: 50,000 MAUs free, then standard verification fees.",
+          },
+        };
+
+      default:
+        return {
+          serviceName: `Azure Mapped Service (${componentType})`,
+          alternatives: [],
+          costEstimate: { min: 0, max: 0, assumptions: "Generic Azure component." },
+        };
+    }
+  } else if (provider === "gcp") {
+    switch (componentType) {
+      case "cdn":
+        return {
+          serviceName: "Google Cloud CDN",
+          alternatives: [
+            {
+              serviceName: "Google Cloud Load Balancing (Anycast)",
+              reason: "Chose Cloud CDN because it caches static images and assets at Google edge nodes. Raw Load Balancing only handles request routing without caching.",
+            },
+          ],
+          costEstimate: {
+            min: isHighScale ? 15 : 5,
+            max: isHighScale ? 130 : 15,
+            assumptions: "Cache lookup costs + Cloud CDN data egress fees.",
+          },
+        };
+
+      case "compute":
+        if (componentId === "worker") {
+          if (isLowBudget) {
+            return {
+              serviceName: "Google Cloud Functions (Worker)",
+              alternatives: [
+                {
+                  serviceName: "Google Cloud Run (Worker Task)",
+                  reason: "Chose Cloud Functions because it is optimized for brief, event-driven processes. Cloud Run is better for microservices that handle web traffic.",
+                },
+              ],
+              costEstimate: {
+                min: 0,
+                max: isHighScale ? 30 : 5,
+                assumptions: "Cloud Functions executions duration billing based on request triggers.",
+              },
+            };
+          } else {
+            return {
+              serviceName: "Google Cloud Run (Worker)",
+              alternatives: [
+                {
+                  serviceName: "Google Compute Engine (VM Instances)",
+                  reason: "Chose Cloud Run to enjoy container management abstractions and automatic scaling down to zero. VMs require active operating system patching.",
+                },
+              ],
+              costEstimate: {
+                min: 12,
+                max: isHighScale ? 110 : 25,
+                assumptions: "Container instance with 0.25 vCPU and 0.5 GB RAM running continuously.",
+              },
+            };
+          }
+        }
+
+        // Primary API Compute
+        const isServerlessRules =
+          isLowBudget &&
+          (teamLower.includes("junior") || teamLower.includes("small") || teamLower === "not_specified");
+        if (isServerlessRules) {
+          return {
+            serviceName: "Google Cloud Functions + API Gateway",
+            alternatives: [
+              {
+                serviceName: "Google Cloud Run",
+                reason: "Chose Cloud Functions for minimal serverless orchestration overhead. Cloud Run is serverless but requires containerizing the API.",
+              },
+            ],
+            costEstimate: {
+              min: 0,
+              max: isHighScale ? 80 : 10,
+              assumptions: "API Gateway request pricing + Cloud Functions executions duration costs.",
+            },
+          };
+        } else {
+          return {
+            serviceName: "Google Cloud Run + HTTPS Load Balancer",
+            alternatives: [
+              {
+                serviceName: "Google Kubernetes Engine (GKE Autopilot)",
+                reason: "Chose Cloud Run for container deployment simplicity without GKE cluster management. GKE is better for complex multi-container pods.",
+              },
+            ],
+            costEstimate: {
+              min: 20,
+              max: isHighScale ? 240 : 60,
+              assumptions: "GCP Global HTTPS Load Balancer baseline cost ($18/mo) + Cloud Run CPU allocation.",
+            },
+          };
+        }
+
+      case "database":
+        if (componentId === "database") {
+          const isRelational =
+            nfr.dataNature.toLowerCase().includes("relational") ||
+            nfr.dataNature.toLowerCase().includes("sql") ||
+            nfr.dataNature.toLowerCase().includes("invoice");
+          if (isRelational) {
+            if (isLowBudget) {
+              return {
+                serviceName: "Google Cloud SQL for PostgreSQL (db-f1-micro)",
+                alternatives: [
+                  {
+                    serviceName: "Google Cloud Spanner",
+                    reason: "Chose Cloud SQL for small PostgreSQL database needs. Cloud Spanner is a globally distributed SQL DB with high minimum costs (~$60/mo).",
+                  },
+                ],
+                costEstimate: {
+                  min: 10,
+                  max: 20,
+                  assumptions: "Shared-core db-f1-micro instance (1 vCPU, 0.6GB RAM) with 20GB SSD storage.",
+                },
+              };
+            } else {
+              return {
+                serviceName: "Google Cloud SQL for PostgreSQL (db-custom-1-3840)",
+                alternatives: [
+                  {
+                    serviceName: "Google Cloud Spanner",
+                    reason: "Chose Cloud SQL Flexible PostgreSQL for high-performance relational features. Cloud Spanner is reserved for massive multi-region database replication.",
+                  },
+                ],
+                costEstimate: {
+                  min: 35,
+                  max: isHighScale ? 280 : 90,
+                  assumptions: "Dedicated custom vCPU instance (1 vCPU, 3.75GB RAM) with HA cluster configured.",
+                },
+              };
+            }
+          } else {
+            return {
+              serviceName: "Google Cloud Firestore",
+              alternatives: [
+                {
+                  serviceName: "Google Cloud Bigtable",
+                  reason: "Chose Firestore as the flexible NoSQL document database. Bigtable is a wide-column store designed for multi-terabyte analytical databases.",
+                },
+              ],
+              costEstimate: {
+                min: 0,
+                max: isHighScale ? 100 : 15,
+                assumptions: "Firestore serverless pricing based on read, write, and delete counts.",
+              },
+            };
+          }
+        }
+        return {
+          serviceName: "Google Cloud SQL for PostgreSQL",
+          alternatives: [{ serviceName: "Google Cloud Firestore", reason: "Chose Cloud SQL for relational storage." }],
+          costEstimate: { min: 10, max: 45, assumptions: "Cloud SQL PostgreSQL instance." },
+        };
+
+      case "storage":
+        return {
+          serviceName: "Google Cloud Storage (Standard)",
+          alternatives: [
+            {
+              serviceName: "Google Cloud Filestore",
+              reason: "Chose Cloud Storage Standard because the data is flat media/image uploads. Filestore provides POSIX network-attached storage mounts for VMs.",
+            },
+          ],
+          costEstimate: {
+            min: 1,
+            max: isHighScale ? 80 : 15,
+            assumptions: "Standard storage capacity cost ($0.020/GB) + egress network charges.",
+          },
+        };
+
+      case "queue":
+        return {
+          serviceName: "Google Cloud Pub/Sub",
+          alternatives: [
+            {
+              serviceName: "Google Cloud Tasks",
+              reason: "Chose Pub/Sub because it provides high-throughput, fan-out event pub/sub. Cloud Tasks is better for targeted queue HTTP executions (cron tasks).",
+            },
+          ],
+          costEstimate: {
+            min: 0,
+            max: isHighScale ? 30 : 5,
+            assumptions: "Pub/Sub message volume (first 10GB of data transfer is free/month).",
+          },
+        };
+
+      case "cache":
+        return {
+          serviceName: "Google Cloud Memorystore (Redis)",
+          alternatives: [
+            {
+              serviceName: "Google Cloud Bigtable",
+              reason: "Chose Memorystore for fast Redis caching. Bigtable can serve as a key-value store but is far more expensive and heavier than cache instances.",
+            },
+          ],
+          costEstimate: {
+            min: 15,
+            max: isHighScale ? 90 : 25,
+            assumptions: "Basic tier M1 Memorystore instance (1GB RAM capacity) running Redis.",
+          },
+        };
+
+      case "auth":
+        return {
+          serviceName: "Firebase Authentication",
+          alternatives: [
+            {
+              serviceName: "Google Cloud Identity Platform",
+              reason: "Chose Firebase Authentication due to its generous free tier (50,000 MAUs free) and easy setup. Identity Platform provides advanced enterprise features at cost.",
+            },
+          ],
+          costEstimate: {
+            min: 0,
+            max: isHighScale ? 40 : 0,
+            assumptions: "Firebase Authentication free for standard phone/email accounts up to 50k MAUs.",
+          },
+        };
+
+      default:
+        return {
+          serviceName: `GCP Mapped Service (${componentType})`,
+          alternatives: [],
+          costEstimate: { min: 0, max: 0, assumptions: "Generic GCP component." },
+        };
+    }
+  }
+
+  return {
+    serviceName: `Cloud Service (${componentType})`,
+    alternatives: [],
+    costEstimate: { min: 0, max: 0, assumptions: "Fallback." },
+  };
+}

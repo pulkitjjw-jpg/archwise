@@ -1,0 +1,219 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+
+type ConversationTurn = {
+  id: string;
+  role: string;
+  message: string;
+  stage: string;
+  createdAt: string | Date;
+};
+
+interface ChatAreaProps {
+  projectId: string;
+  initialConversations: ConversationTurn[];
+}
+
+export default function ChatArea({ projectId, initialConversations }: ChatAreaProps) {
+  const [messages, setMessages] = useState<ConversationTurn[]>(initialConversations);
+  const [input, setInput] = useState("");
+  const [sending, setSending] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // Scroll to bottom on new messages or typing indicator
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, sending]);
+
+  const latestMessage = messages[messages.length - 1];
+  const latestStage = latestMessage?.stage || "intake";
+  const isGrowthPhase = latestStage === "growth_trigger" || latestStage === "requirement_gathering";
+
+  const handleSend = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!input.trim() || sending) return;
+
+    const userMessageText = input.trim();
+    setInput("");
+    setSending(true);
+
+    const activeStage = isGrowthPhase ? "growth_trigger" : "brainstorm";
+
+    const tempMessage: ConversationTurn = {
+      id: Math.random().toString(),
+      role: "user",
+      message: userMessageText,
+      stage: activeStage,
+      createdAt: new Date(),
+    };
+
+    setMessages((prev) => [...prev, tempMessage]);
+
+    try {
+      const response = await fetch(`/api/projects/${projectId}/conversations`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          role: "user",
+          message: userMessageText,
+          stage: activeStage,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to save message");
+      }
+
+      const { userConversation, assistantConversation } = await response.json();
+
+      // Replace user temp message with database turn, and append assistant response
+      setMessages((prev) =>
+        prev
+          .map((msg) => (msg.id === tempMessage.id ? userConversation : msg))
+          .concat(assistantConversation)
+      );
+
+      // Auto-extract requirements if LLM confirms the change was clear
+      if (assistantConversation.stage === "requirement_gathering" && isGrowthPhase) {
+        try {
+          await fetch(`/api/projects/${projectId}/requirements`, {
+            method: "POST",
+          });
+          window.dispatchEvent(new Event("requirementsUpdated"));
+        } catch (err) {
+          console.error("Auto extraction failed:", err);
+        }
+      }
+    } catch (error) {
+      console.error("Error sending message:", error);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  // Calculate progress percentage
+  let progressPercent = 15;
+  let stageLabel = "Project Intake";
+  if (latestStage === "brainstorm") {
+    progressPercent = 60;
+    stageLabel = "Brainstorming Architecture Details";
+  } else if (latestStage === "growth_trigger") {
+    progressPercent = 85;
+    stageLabel = "Refining Growth Triggers / Changes";
+  } else if (latestStage === "requirement_gathering") {
+    progressPercent = 100;
+    stageLabel = "Discovery & Updates Concluded";
+  }
+
+  return (
+    <div className="flex h-[calc(100vh-12rem)] flex-col rounded-[2rem] border border-white/60 bg-white/70 shadow-xl backdrop-blur-md overflow-hidden">
+      {/* Chat Header */}
+      <div className="border-b border-slate-200 bg-slate-950 px-6 py-4 text-white">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="font-bold tracking-tight">Interactive Discovery Chat</h3>
+            <p className="text-xs text-cyan-300 font-semibold uppercase tracking-wider mt-0.5">
+              {stageLabel}
+            </p>
+          </div>
+          <span className="rounded-full bg-white/10 px-3 py-1 text-xs font-semibold">
+            {progressPercent}%
+          </span>
+        </div>
+
+        {/* Progress Bar */}
+        <div className="mt-3 h-1.5 w-full rounded-full bg-white/20 overflow-hidden">
+          <div
+            className="h-full bg-cyan-400 transition-all duration-500 ease-out"
+            style={{ width: `${progressPercent}%` }}
+          />
+        </div>
+      </div>
+
+      {/* Messages Scroll Area */}
+      <div className="flex-1 overflow-y-auto p-6 space-y-4">
+        {messages.map((msg) => {
+          const isUser = msg.role === "user";
+          return (
+            <div
+              key={msg.id}
+              className={`flex ${isUser ? "justify-end" : "justify-start"}`}
+            >
+              <div
+                className={`max-w-[80%] rounded-[1.5rem] px-5 py-3 text-sm leading-relaxed shadow-sm ${
+                  isUser
+                    ? "bg-cyan-600 text-white rounded-br-none"
+                    : "bg-slate-100 text-slate-900 rounded-bl-none border border-slate-200"
+                }`}
+              >
+                <div className="font-bold text-[10px] uppercase tracking-wider mb-1 opacity-75">
+                  {isUser ? "You" : "Assistant"}
+                </div>
+                <p className="whitespace-pre-wrap">{msg.message}</p>
+                <div className="text-[9px] text-right mt-1 opacity-60">
+                  {new Date(msg.createdAt).toLocaleTimeString([], {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+
+        {/* Typing Indicator */}
+        {sending && (
+          <div className="flex justify-start">
+            <div className="bg-slate-100 border border-slate-200 text-slate-900 rounded-[1.5rem] rounded-bl-none px-5 py-3 shadow-sm max-w-[80%]">
+              <div className="font-bold text-[10px] uppercase tracking-wider mb-1 opacity-75">
+                Assistant
+              </div>
+              <div className="flex items-center gap-1 py-1">
+                <span className="h-2 w-2 animate-bounce rounded-full bg-slate-400 [animation-delay:-0.3s]" />
+                <span className="h-2 w-2 animate-bounce rounded-full bg-slate-400 [animation-delay:-0.15s]" />
+                <span className="h-2 w-2 animate-bounce rounded-full bg-slate-400" />
+              </div>
+            </div>
+          </div>
+        )}
+        <div ref={chatEndRef} />
+      </div>
+
+      {/* Message Input Form */}
+      <div className="border-t border-slate-200 bg-slate-50/50 p-4 space-y-3">
+        {latestStage === "requirement_gathering" && (
+          <div className="rounded-xl bg-emerald-50/70 border border-emerald-100 p-2 text-center text-xs">
+            <span className="font-semibold text-emerald-950">Discovery concluded.</span>{" "}
+            <span className="text-emerald-800">Need to report changes? Type a growth trigger below.</span>
+          </div>
+        )}
+        <form onSubmit={handleSend}>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              placeholder={
+                latestStage === "requirement_gathering"
+                  ? "Report a change (e.g. 'scale increased to 50k users')..."
+                  : "Type your message here to answer or add context..."
+              }
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              disabled={sending}
+              className="flex-1 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500 disabled:opacity-50"
+            />
+            <button
+              type="submit"
+              disabled={!input.trim() || sending}
+              className="rounded-xl bg-slate-950 px-5 py-3 text-sm font-semibold text-white shadow-md transition-all hover:bg-slate-800 active:scale-95 disabled:opacity-50"
+            >
+              Send
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}

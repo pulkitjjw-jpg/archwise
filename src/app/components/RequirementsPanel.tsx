@@ -1,0 +1,335 @@
+"use client";
+
+import { useEffect, useState } from "react";
+
+type RequirementsData = {
+  functional: string[];
+  nonFunctional: {
+    expectedScale: string;
+    readWritePattern: string;
+    dataNature: string;
+    latencySensitivity: string;
+    budget: string;
+    teamMaturity: string;
+    compliance: string;
+  };
+};
+
+interface RequirementsPanelProps {
+  projectId: string;
+  isBrainstormComplete: boolean;
+  onSaveComplete?: () => void;
+  focusField?: string | null;
+  clearFocusField?: () => void;
+}
+
+export default function RequirementsPanel({
+  projectId,
+  isBrainstormComplete,
+  onSaveComplete,
+  focusField,
+  clearFocusField,
+}: RequirementsPanelProps) {
+  const [requirements, setRequirements] = useState<RequirementsData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [extracting, setExtracting] = useState(false);
+  const [editMode, setEditMode] = useState(false);
+  const [error, setError] = useState("");
+
+  // Edit states
+  const [editedFunctional, setEditedFunctional] = useState("");
+  const [editedNFR, setEditedNFR] = useState({
+    expectedScale: "",
+    readWritePattern: "",
+    dataNature: "",
+    latencySensitivity: "",
+    budget: "",
+    teamMaturity: "",
+    compliance: "",
+  });
+
+  const startEditing = () => {
+    if (!requirements) return;
+    setEditedFunctional(requirements.functional.join("\n"));
+    setEditedNFR({ ...requirements.nonFunctional });
+    setEditMode(true);
+  };
+
+  const handleExtract = async () => {
+    try {
+      setExtracting(true);
+      setError("");
+      const res = await fetch(`/api/projects/${projectId}/requirements`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        throw new Error("Failed to extract requirements");
+      }
+      const data = await res.json();
+      setRequirements(data.requirements);
+      if (onSaveComplete) onSaveComplete();
+    } catch (err: any) {
+      setError(err.message || "Extraction failed.");
+    } finally {
+      setExtracting(false);
+    }
+  };
+
+  const loadRequirements = async () => {
+    try {
+      setLoading(true);
+      const res = await fetch(`/api/projects/${projectId}/requirements`);
+      if (res.ok) {
+        const data = await res.json();
+        setRequirements(data.requirements);
+      } else if (res.status === 404 && isBrainstormComplete) {
+        // Auto-extract if brainstorm completed but no requirements exist yet
+        await handleExtract();
+      }
+    } catch (err) {
+      console.error("Failed to load requirements:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadRequirements();
+  }, [projectId, isBrainstormComplete]);
+
+  useEffect(() => {
+    if (focusField && requirements) {
+      startEditing();
+      const timer = setTimeout(() => {
+        const inputElement = document.getElementById(`nfr-input-${focusField}`);
+        if (inputElement) {
+          inputElement.focus();
+          inputElement.scrollIntoView({ behavior: "smooth", block: "center" });
+          inputElement.classList.add("ring-4", "ring-cyan-500/50");
+          setTimeout(() => {
+            inputElement.classList.remove("ring-4", "ring-cyan-500/50");
+          }, 1500);
+        }
+        clearFocusField?.();
+      }, 150);
+      return () => clearTimeout(timer);
+    }
+  }, [focusField, requirements]);
+
+  const handleSave = async () => {
+    if (!requirements) return;
+    setLoading(true);
+    setError("");
+
+    const updatedFunctional = editedFunctional
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+
+    try {
+      const res = await fetch(`/api/projects/${projectId}/requirements`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          functional: updatedFunctional,
+          nonFunctional: editedNFR,
+        }),
+      });
+
+      if (!res.ok) {
+        throw new Error("Failed to save changes");
+      }
+
+      const data = await res.json();
+      setRequirements(data.requirements);
+      setEditMode(false);
+      if (onSaveComplete) onSaveComplete();
+    } catch (err: any) {
+      setError(err.message || "Failed to save requirements.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Helper to render specified vs not specified fields
+  const renderNFRField = (label: string, value: string, fieldName: keyof typeof editedNFR) => {
+    const isNotSpecified = value.toLowerCase() === "not_specified" || value.toLowerCase() === "not specified";
+
+    if (editMode) {
+      return (
+        <div className="space-y-1">
+          <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">{label}</label>
+          <input
+            id={`nfr-input-${fieldName}`}
+            type="text"
+            value={editedNFR[fieldName]}
+            onChange={(e) =>
+              setEditedNFR((prev) => ({ ...prev, [fieldName]: e.target.value }))
+            }
+            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 shadow-sm focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500 transition-all duration-200"
+          />
+        </div>
+      );
+    }
+
+    return (
+      <div className="rounded-2xl border border-slate-100 bg-white p-4 shadow-sm">
+        <dt className="text-xs font-semibold text-slate-400 uppercase tracking-wider">{label}</dt>
+        <dd className="mt-2 text-sm">
+          {isNotSpecified ? (
+            <span className="flex items-center justify-between text-slate-400 italic">
+              <span>Not specified in brainstorm</span>
+              <button
+                onClick={startEditing}
+                className="text-[10px] font-bold text-cyan-600 uppercase tracking-wider hover:underline"
+              >
+                + specify
+              </button>
+            </span>
+          ) : (
+            <span className="text-slate-800 font-medium">{value}</span>
+          )}
+        </dd>
+      </div>
+    );
+  };
+
+  if (loading && !extracting) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center p-8 text-slate-500">
+        <div className="h-8 w-8 animate-spin rounded-full border-4 border-cyan-500 border-t-transparent" />
+        <span className="mt-4 text-sm font-semibold">Loading system requirements...</span>
+      </div>
+    );
+  }
+
+  if (extracting) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center p-8 text-slate-500 text-center">
+        <div className="h-10 w-10 animate-bounce rounded-full bg-cyan-600 flex items-center justify-center text-white font-bold text-xl shadow-md">
+          ⚙️
+        </div>
+        <span className="mt-4 text-base font-semibold text-slate-900">Synthesizing requirements...</span>
+        <span className="mt-2 text-xs text-slate-500 max-w-sm">
+          Analyzing the chat transcript to structure functional features and non-functional constraints.
+        </span>
+      </div>
+    );
+  }
+
+  if (!requirements) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center p-8 text-slate-500 text-center border-2 border-dashed border-slate-200 rounded-3xl">
+        <span className="text-4xl">🔒</span>
+        <h4 className="mt-4 font-bold text-slate-800">Requirements Locked</h4>
+        <p className="mt-2 text-sm text-slate-500 max-w-xs">
+          Please complete the discovery conversation on the left. The AI will extract requirements once brainstorming concludes.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full flex-col p-6 sm:p-8 overflow-y-auto">
+      {/* Panel Header */}
+      <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+        <div>
+          <h3 className="text-xl font-bold text-slate-950">System Requirements Workspace</h3>
+          <p className="text-xs text-slate-500 mt-1">
+            Review and refine the system parameters before generating high-level design recommendations.
+          </p>
+        </div>
+        {!editMode && (
+          <button
+            onClick={startEditing}
+            className="rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 active:scale-95"
+          >
+            Edit
+          </button>
+        )}
+      </div>
+
+      {error && <p className="mt-4 text-xs font-medium text-red-600">{error}</p>}
+
+      {/* Main Content */}
+      <div className="mt-6 flex-1 space-y-6">
+        {/* Functional Requirements */}
+        <div>
+          <h4 className="text-sm font-bold text-slate-950 mb-3 flex items-center gap-2">
+            <span>🚀</span> Functional Capabilities
+          </h4>
+          {editMode ? (
+            <div className="space-y-1">
+              <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                Capabilities (one per line)
+              </label>
+              <textarea
+                rows={5}
+                value={editedFunctional}
+                onChange={(e) => setEditedFunctional(e.target.value)}
+                className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500 resize-none"
+              />
+            </div>
+          ) : (
+            <ul className="grid gap-2 text-sm text-slate-700 rounded-3xl bg-slate-50 p-5">
+              {requirements.functional.map((func, index) => (
+                <li key={index} className="flex gap-3">
+                  <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-cyan-500" />
+                  <span className="leading-5">{func}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        {/* Non-Functional Requirements */}
+        <div>
+          <h4 className="text-sm font-bold text-slate-950 mb-4 flex items-center gap-2">
+            <span>⚙️</span> Architectural Constraints (NFRs)
+          </h4>
+          <div className="grid gap-4 md:grid-cols-2">
+            {renderNFRField("Expected Traffic / Scale", requirements.nonFunctional.expectedScale, "expectedScale")}
+            {renderNFRField("Read/Write Pattern", requirements.nonFunctional.readWritePattern, "readWritePattern")}
+            {renderNFRField("Data Types", requirements.nonFunctional.dataNature, "dataNature")}
+            {renderNFRField("Latency Sensitivity", requirements.nonFunctional.latencySensitivity, "latencySensitivity")}
+            {renderNFRField("Budget Range", requirements.nonFunctional.budget, "budget")}
+            {renderNFRField("Team Technical Maturity", requirements.nonFunctional.teamMaturity, "teamMaturity")}
+            {renderNFRField("Security & Compliance", requirements.nonFunctional.compliance, "compliance")}
+          </div>
+        </div>
+      </div>
+
+      {/* Edit Mode Actions */}
+      {editMode && (
+        <div className="mt-8 border-t border-slate-100 pt-4 flex justify-end gap-3">
+          <button
+            onClick={() => setEditMode(false)}
+            className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-semibold text-slate-700 shadow-sm hover:bg-slate-50"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSave}
+            className="rounded-xl bg-slate-950 px-4 py-2.5 text-xs font-semibold text-white shadow-md hover:bg-slate-800"
+          >
+            Save Requirements
+          </button>
+        </div>
+      )}
+
+      {/* Workspace Footer Action */}
+      {!editMode && (
+        <div className="mt-8 border-t border-slate-100 pt-6">
+          <button
+            className="flex w-full items-center justify-center rounded-2xl bg-cyan-600 px-5 py-3.5 text-sm font-semibold text-white shadow-md transition-all hover:bg-cyan-700 active:scale-[0.98]"
+            onClick={() => alert("HLD Generation (Step 4) will be implemented next!")}
+          >
+            Synthesize HLD Architecture Design ➜
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
