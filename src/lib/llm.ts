@@ -19,6 +19,104 @@ export type ExtractedRequirements = {
   };
 };
 
+type LLMMessage = { role: string; content: string };
+
+const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
+const MODEL = "google/gemini-2.5-flash";
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Calls OpenRouter with the given messages and parses the response as JSON, retrying on
+ * both request failures and JSON parse failures (Gemini 2.5 Flash occasionally returns a
+ * stray character that breaks JSON.parse despite response_format: json_object). On a parse
+ * failure specifically, the retry re-sends the conversation with the model's bad output plus
+ * a corrective note, rather than just repeating the original request.
+ *
+ * Throws a clear, human-readable error (never a raw exception) if all attempts are exhausted.
+ */
+async function callLLMWithRetry<T>(
+  apiKey: string,
+  messages: LLMMessage[],
+  options: { label: string; maxAttempts?: number; retryDelayMs?: number }
+): Promise<T> {
+  const maxAttempts = options.maxAttempts ?? 3;
+  const retryDelayMs = options.retryDelayMs ?? 500;
+
+  let currentMessages = messages;
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let contentStr: string | undefined;
+    try {
+      const response = await fetch(OPENROUTER_URL, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          "X-Title": "AI Cloud Architecture Generator",
+        },
+        body: JSON.stringify({
+          model: MODEL,
+          messages: currentMessages,
+          response_format: { type: "json_object" },
+        }),
+      });
+
+      if (!response.ok) {
+        const errBody = await response.text();
+        throw new Error(`OpenRouter API error: ${response.status} - ${errBody}`);
+      }
+
+      const data = await response.json();
+      const raw: string = data.choices[0].message.content.trim();
+      contentStr = raw;
+
+      try {
+        return JSON.parse(raw) as T;
+      } catch {
+        const cleaned = raw
+          .replace(/^```json\s*/i, "")
+          .replace(/^```\s*/i, "")
+          .replace(/\s*```$/, "")
+          .trim();
+        return JSON.parse(cleaned) as T;
+      }
+    } catch (err) {
+      lastError = err;
+      const isParseFailure = contentStr !== undefined;
+      console.error(
+        `[${options.label}] Attempt ${attempt}/${maxAttempts} failed (${isParseFailure ? "JSON parse error" : "request error"}):`,
+        err
+      );
+
+      if (attempt < maxAttempts) {
+        if (isParseFailure) {
+          // Show the model its own bad output plus a corrective note, rather than just
+          // blindly repeating the same prompt and risking the same mistake again.
+          currentMessages = [
+            ...messages,
+            { role: "assistant", content: contentStr! },
+            {
+              role: "user",
+              content:
+                "Your previous response could not be parsed as valid JSON. Return ONLY a single valid JSON object — no markdown code fences, no commentary, and no extra characters before or after the JSON.",
+            },
+          ];
+        } else {
+          currentMessages = messages;
+        }
+        await sleep(retryDelayMs);
+      }
+    }
+  }
+
+  const reason = lastError instanceof Error ? lastError.message : "the AI model did not return a valid response";
+  throw new Error(`${options.label} failed after ${maxAttempts} attempts: ${reason}. Please try again.`);
+}
+
 export async function getNextBrainstormTurn(
   history: Array<{ role: string; message: string; stage: string }>,
   projectName: string
@@ -80,44 +178,17 @@ Do not include markdown code block formatting (like \`\`\`json) in your raw resp
     })),
   ];
 
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      "X-Title": "AI Cloud Architecture Generator",
-    },
-    body: JSON.stringify({
-      model: "google/gemini-2.5-flash",
-      messages: messagesForApi,
-      response_format: { type: "json_object" },
-    }),
-  });
-
-  if (!response.ok) {
-    const errBody = await response.text();
-    throw new Error(`OpenRouter API error: ${response.status} - ${errBody}`);
-  }
-
-  const data = await response.json();
-  const contentStr = data.choices[0].message.content.trim();
-
   try {
-    const parsed: BrainstormResponse = JSON.parse(contentStr);
-    return parsed;
+    return await callLLMWithRetry<BrainstormResponse>(apiKey, messagesForApi, {
+      label: "Brainstorm turn generation",
+    });
   } catch (err) {
-    console.error("Failed to parse JSON from LLM response:", contentStr);
-    const cleanStr = contentStr.replace(/^```json\s*/i, "").replace(/\s*```$/, "");
-    try {
-      const parsed: BrainstormResponse = JSON.parse(cleanStr);
-      return parsed;
-    } catch {
-      return {
-        message: contentStr || "Thank you for the details. I am ready to prepare your architecture blueprint.",
-        isComplete: history.length >= 6,
-        stage: history.length >= 6 ? "requirement_gathering" : "brainstorm",
-      };
-    }
+    console.error("Brainstorm turn generation exhausted all retries, falling back to a generic question:", err);
+    return {
+      message: "Thank you for the details. Could you share a bit more about your scaling or compliance requirements?",
+      isComplete: history.length >= 6,
+      stage: history.length >= 6 ? "requirement_gathering" : "brainstorm",
+    };
   }
 }
 
@@ -142,7 +213,7 @@ Rules:
   - budget: expected cost limits.
   - teamMaturity: experience level of the development/ops team.
   - compliance: data privacy, encryption, residency, etc.
-  
+
 CRITICAL: If a non-functional item was NOT discussed in the conversation and cannot be reasonably and strongly inferred from context, set it EXACTLY to "not_specified". Do NOT guess or use silent defaults.
 
 You MUST respond with a raw JSON object matching this structure:
@@ -169,41 +240,9 @@ Do not include markdown code block formatting (like \`\`\`json) in your response
     })),
   ];
 
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      "X-Title": "AI Cloud Architecture Generator",
-    },
-    body: JSON.stringify({
-      model: "google/gemini-2.5-flash",
-      messages: messagesForApi,
-      response_format: { type: "json_object" },
-    }),
+  return callLLMWithRetry<ExtractedRequirements>(apiKey, messagesForApi, {
+    label: "Requirement extraction",
   });
-
-  if (!response.ok) {
-    const errBody = await response.text();
-    throw new Error(`OpenRouter API error: ${response.status} - ${errBody}`);
-  }
-
-  const data = await response.json();
-  const contentStr = data.choices[0].message.content.trim();
-
-  try {
-    const parsed: ExtractedRequirements = JSON.parse(contentStr);
-    return parsed;
-  } catch (err) {
-    console.error("Failed to parse JSON from LLM response:", contentStr);
-    const cleanStr = contentStr.replace(/^```json\s*/i, "").replace(/\s*```$/, "");
-    try {
-      const parsed: ExtractedRequirements = JSON.parse(cleanStr);
-      return parsed;
-    } catch {
-      throw new Error("Failed to extract valid JSON requirements from LLM output");
-    }
-  }
 }
 
 export async function validateAndGenerateArchitecture(
@@ -351,42 +390,12 @@ Do not use markdown code block formatting (like \`\`\`json) in your response, re
     previousArchitectureComponents: prevHldComponents || null,
   };
 
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      "X-Title": "AI Cloud Architecture Generator",
-    },
-    body: JSON.stringify({
-      model: "google/gemini-2.5-flash",
-      messages: [
-        { role: "system", content: systemInstruction },
-        { role: "user", content: JSON.stringify(inputContext) },
-      ],
-      response_format: { type: "json_object" },
-    }),
+  const messagesForApi = [
+    { role: "system", content: systemInstruction },
+    { role: "user", content: JSON.stringify(inputContext) },
+  ];
+
+  return callLLMWithRetry(apiKey, messagesForApi, {
+    label: "Architecture generation",
   });
-
-  if (!response.ok) {
-    const errBody = await response.text();
-    throw new Error(`OpenRouter API error: ${response.status} - ${errBody}`);
-  }
-
-  const data = await response.json();
-  const contentStr = data.choices[0].message.content.trim();
-
-  try {
-    const parsed = JSON.parse(contentStr);
-    return parsed;
-  } catch (err) {
-    console.error("Failed to parse JSON from architecture LLM response:", contentStr);
-    const cleanStr = contentStr.replace(/^```json\s*/i, "").replace(/\s*```$/, "");
-    try {
-      const parsed = JSON.parse(cleanStr);
-      return parsed;
-    } catch {
-      throw new Error("Failed to validate and generate architecture using LLM");
-    }
-  }
 }
