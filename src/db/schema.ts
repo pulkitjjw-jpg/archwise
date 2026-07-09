@@ -77,30 +77,33 @@ export type HldContent = {
     cloudMappings?: {
       aws: {
         serviceName: string;
-        alternatives: Array<{ serviceName: string; reason: string }>;
+        alternatives: Array<{ serviceName: string; reason: string; costEstimate?: { min: number; max: number; assumptions: string } }>;
         costEstimate: { min: number; max: number; assumptions: string };
         lld?: {
           config: Record<string, string>;
           reasoning: Record<string, string>;
         };
+        swapReasoning?: string;
       };
       azure: {
         serviceName: string;
-        alternatives: Array<{ serviceName: string; reason: string }>;
+        alternatives: Array<{ serviceName: string; reason: string; costEstimate?: { min: number; max: number; assumptions: string } }>;
         costEstimate: { min: number; max: number; assumptions: string };
         lld?: {
           config: Record<string, string>;
           reasoning: Record<string, string>;
         };
+        swapReasoning?: string;
       };
       gcp: {
         serviceName: string;
-        alternatives: Array<{ serviceName: string; reason: string }>;
+        alternatives: Array<{ serviceName: string; reason: string; costEstimate?: { min: number; max: number; assumptions: string } }>;
         costEstimate: { min: number; max: number; assumptions: string };
         lld?: {
           config: Record<string, string>;
           reasoning: Record<string, string>;
         };
+        swapReasoning?: string;
       };
     };
   }>;

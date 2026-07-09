@@ -9,6 +9,11 @@ type CloudMapping = {
   alternatives: Array<{
     serviceName: string;
     reason: string;
+    costEstimate?: {
+      min: number;
+      max: number;
+      assumptions: string;
+    };
   }>;
   costEstimate: {
     min: number;
@@ -19,6 +24,7 @@ type CloudMapping = {
     config: Record<string, string>;
     reasoning: Record<string, string>;
   };
+  swapReasoning?: string;
 };
 
 type ComponentData = {
@@ -118,6 +124,8 @@ export default function ArchitectureWorkspace({
   const [newEdgeFrom, setNewEdgeFrom] = useState("");
   const [newEdgeTo, setNewEdgeTo] = useState("");
   const [newEdgeProtocol, setNewEdgeProtocol] = useState("HTTPS");
+
+  const [swapReason, setSwapReason] = useState("");
 
   const [savingManualChanges, setSavingManualChanges] = useState(false);
 
@@ -401,6 +409,75 @@ export default function ArchitectureWorkspace({
       components: updatedComponents,
       connections: draftHld.connections,
     });
+  };
+
+  // Swap a component's bound cloud service to one of its already-computed "alternatives
+  // considered" entries. The demoted current service becomes a new alternative in its place
+  // (with its own cost band), so the swap is reversible, and the LLD config is recomputed for
+  // the newly chosen service rather than left stale from the previous one.
+  const handleSwapService = (nodeId: string, provider: "aws" | "azure" | "gcp", altIndex: number) => {
+    if (!draftHld) return;
+    const reasonText = swapReason.trim() || "Manually changed by user.";
+
+    const updatedComponents = draftHld.components.map((c) => {
+      if (c.id !== nodeId) return c;
+      const mapping = c.cloudMappings?.[provider];
+      const chosen = mapping?.alternatives[altIndex];
+      if (!mapping || !chosen || !chosen.costEstimate) return c;
+
+      const demotedAlternative = {
+        serviceName: mapping.serviceName,
+        reason: "Rule-engine default choice before this manual override.",
+        costEstimate: mapping.costEstimate,
+      };
+      const updatedAlternatives = mapping.alternatives.map((alt, idx) =>
+        idx === altIndex ? demotedAlternative : alt
+      );
+
+      const recomputedLld = runLldRulesEngine(
+        provider,
+        c.type,
+        c.id,
+        {
+          functional: requirements?.functional || [],
+          nonFunctional: requirements?.nonFunctional || {
+            expectedScale: "not_specified",
+            readWritePattern: "not_specified",
+            dataNature: "not_specified",
+            latencySensitivity: "not_specified",
+            budget: "not_specified",
+            teamMaturity: "not_specified",
+            compliance: "not_specified",
+          },
+        },
+        chosen.serviceName
+      );
+
+      return {
+        ...c,
+        metadata: {
+          ...c.metadata,
+          overrideSource: "user" as const,
+        },
+        cloudMappings: {
+          ...c.cloudMappings,
+          [provider]: {
+            ...mapping,
+            serviceName: chosen.serviceName,
+            costEstimate: chosen.costEstimate,
+            alternatives: updatedAlternatives,
+            lld: recomputedLld,
+            swapReasoning: reasonText,
+          },
+        },
+      } as ComponentData;
+    });
+
+    setDraftHld({
+      components: updatedComponents,
+      connections: draftHld.connections,
+    });
+    setSwapReason("");
   };
 
   const handleSaveManualChanges = async () => {
@@ -1412,14 +1489,43 @@ export default function ArchitectureWorkspace({
                   {selectedMapping?.alternatives && selectedMapping.alternatives.length > 0 && (
                     <div>
                       <h5 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Alternatives Considered</h5>
+
+                      {isEditing && (
+                        <input
+                          type="text"
+                          value={swapReason}
+                          onChange={(e) => setSwapReason(e.target.value)}
+                          placeholder="Optional: reason for switching service..."
+                          className="mt-2 w-full bg-white border border-slate-200 rounded-xl px-3 py-1.5 text-xs font-medium focus:outline-none focus:ring-1 focus:ring-cyan-500"
+                        />
+                      )}
+
                       <div className="mt-2 space-y-2">
                         {selectedMapping.alternatives.map((alt, idx) => (
                           <div
                             key={idx}
                             className="rounded-2xl border border-slate-200 bg-white p-3.5 text-xs text-slate-800 leading-normal"
                           >
-                            <div className="font-bold text-slate-950">Alternative: {alt.serviceName}</div>
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="font-bold text-slate-950">Alternative: {alt.serviceName}</div>
+                              {isEditing && (
+                                <button
+                                  type="button"
+                                  disabled={!alt.costEstimate}
+                                  onClick={() => handleSwapService(selectedNode.id, activeProvider, idx)}
+                                  title={!alt.costEstimate ? "Cost data unavailable for this alternative on this architecture version." : undefined}
+                                  className="shrink-0 rounded-lg bg-cyan-600 hover:bg-cyan-700 text-white px-2 py-1 text-[9px] font-extrabold uppercase tracking-wide transition shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
+                                >
+                                  Switch to this
+                                </button>
+                              )}
+                            </div>
                             <div className="text-slate-600 mt-1 font-medium leading-relaxed">{alt.reason}</div>
+                            {alt.costEstimate && (
+                              <div className="text-[11px] text-emerald-700 font-bold mt-1.5">
+                                ${alt.costEstimate.min} - ${alt.costEstimate.max}/mo
+                              </div>
+                            )}
                           </div>
                         ))}
                       </div>

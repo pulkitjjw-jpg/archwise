@@ -163,6 +163,22 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       latestArch ? (latestArch.hld as any).components : null
     );
 
+    // 7b. Re-attach the deterministic rule-engine's "alternatives" (each carrying its own
+    // costEstimate) onto the LLM's output. The LLM is intentionally not asked to reproduce
+    // cost data for alternatives (keeps its output smaller/faster and avoids drift); those
+    // alternatives + costs power the manual editor's cloud-service-swap feature, so every
+    // component must have them regardless of what the LLM returned.
+    const baselineById = new Map(mappedBaselineComponents.map((c) => [c.id, c]));
+    enriched.components.forEach((c: any) => {
+      const baselineComponent = baselineById.get(c.id);
+      if (!baselineComponent || !c.cloudMappings) return;
+      (["aws", "azure", "gcp"] as const).forEach((prov) => {
+        if (c.cloudMappings[prov] && baselineComponent.cloudMappings[prov]) {
+          c.cloudMappings[prov].alternatives = baselineComponent.cloudMappings[prov].alternatives;
+        }
+      });
+    });
+
     // 8. Save new architecture version with all three cloud mappings, recommendations, and LLD specs
     const [record] = await db
       .insert(architectures)

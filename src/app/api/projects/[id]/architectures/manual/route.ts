@@ -195,21 +195,48 @@ export async function POST(
         }
 
         (["aws", "azure", "gcp"] as const).forEach((prov) => {
-          const prevLld = prevC.cloudMappings?.[prov]?.lld?.config || {};
-          const newLld = newC.cloudMappings?.[prov]?.lld?.config || {};
+          const prevMapping = prevC.cloudMappings?.[prov];
+          const newMapping = newC.cloudMappings?.[prov];
+
+          // Service swap: the bound cloud service itself changed for this provider.
+          if (prevMapping && newMapping && prevMapping.serviceName !== newMapping.serviceName) {
+            changes.push({
+              parameter: `${prov.toUpperCase()} Service`,
+              oldVal: prevMapping.serviceName,
+              newVal: newMapping.serviceName,
+              reasoning: newMapping.swapReasoning || "Manually changed by user.",
+            });
+          }
+
+          const prevLld = prevMapping?.lld?.config || {};
+          const newLld = newMapping?.lld?.config || {};
 
           Object.keys(newLld).forEach((key) => {
             if (newLld[key] !== prevLld[key]) {
               const oldVal = prevLld[key] || "none";
               const newVal = newLld[key];
               const paramReason =
-                newC.cloudMappings?.[prov]?.lld?.reasoning?.[key] ||
+                newMapping?.lld?.reasoning?.[key] ||
                 "Manually updated by user.";
               changes.push({
                 parameter: `${prov.toUpperCase()} ${key}`,
                 oldVal,
                 newVal,
                 reasoning: paramReason,
+              });
+            }
+          });
+
+          // Config keys that existed under the previous service but no longer apply
+          // (e.g. serverless "memory"/"timeout" keys disappearing after swapping to a
+          // container-based service, which uses "instanceSize"/"minInstances" instead).
+          Object.keys(prevLld).forEach((key) => {
+            if (!(key in newLld)) {
+              changes.push({
+                parameter: `${prov.toUpperCase()} ${key}`,
+                oldVal: prevLld[key],
+                newVal: "removed",
+                reasoning: "No longer applicable after the service change.",
               });
             }
           });

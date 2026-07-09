@@ -18,7 +18,13 @@ export function runLldRulesEngine(
       teamMaturity: string;
       compliance: string;
     };
-  }
+  },
+  // When a user manually swaps a component to a specific alternative service (see
+  // ArchitectureWorkspace's service-swap editor), the requirements alone no longer
+  // determine which LLD shape applies (e.g. serverless vs container config keys) since
+  // the requirements haven't changed, only the chosen service has. This lets the caller
+  // force the correct branch based on the service name the user actually picked.
+  serviceNameOverride?: string
 ): LldConfig {
   const nfr = requirements.nonFunctional;
   const scaleLower = nfr.expectedScale.toLowerCase();
@@ -65,9 +71,27 @@ export function runLldRulesEngine(
         : "Disabled Origin Shield as scale is moderate, avoiding extra gateway pricing.";
       break;
 
-    case "compute":
+    case "compute": {
       const isWorker = componentId === "worker";
-      const isServerless = isLowBudget && (teamLower.includes("junior") || teamLower.includes("small") || teamLower === "not_specified");
+      let isServerless = isLowBudget && (teamLower.includes("junior") || teamLower.includes("small") || teamLower === "not_specified");
+
+      if (serviceNameOverride) {
+        const svcLower = serviceNameOverride.toLowerCase();
+        if (svcLower.includes("lambda") || svcLower.includes("function")) {
+          isServerless = true;
+        } else if (
+          svcLower.includes("fargate") ||
+          svcLower.includes("container app") ||
+          svcLower.includes("ecs") ||
+          svcLower.includes("cloud run") ||
+          svcLower.includes("kubernetes") ||
+          svcLower.includes("vm") ||
+          svcLower.includes("app service") ||
+          svcLower.includes("compute engine")
+        ) {
+          isServerless = false;
+        }
+      }
 
       if (isServerless && !isWorker) {
         config.memory = isHighScale ? "1024MB" : "512MB";
@@ -100,12 +124,34 @@ export function runLldRulesEngine(
       config.securityGroups = "Allows HTTPS ingress from CDN, outbound access to DB/Storage.";
       reasoning.vpcSubnet = "Isolated compute components from the public internet for security.";
       break;
+    }
 
-    case "database":
-      const isRelational =
+    case "database": {
+      let isRelational =
         nfr.dataNature.toLowerCase().includes("relational") ||
         nfr.dataNature.toLowerCase().includes("sql") ||
         nfr.dataNature.toLowerCase().includes("invoice");
+
+      if (serviceNameOverride) {
+        const svcLower = serviceNameOverride.toLowerCase();
+        if (
+          svcLower.includes("dynamo") ||
+          svcLower.includes("cosmos") ||
+          svcLower.includes("firestore") ||
+          svcLower.includes("bigtable") ||
+          svcLower.includes("documentdb")
+        ) {
+          isRelational = false;
+        } else if (
+          svcLower.includes("sql") ||
+          svcLower.includes("rds") ||
+          svcLower.includes("aurora") ||
+          svcLower.includes("postgres") ||
+          svcLower.includes("spanner")
+        ) {
+          isRelational = true;
+        }
+      }
 
       if (isRelational) {
         config.instanceClass = isHighScale
@@ -137,6 +183,7 @@ export function runLldRulesEngine(
       config.securityGroups = "Allows port 5432 ingress strictly from App Compute components.";
       reasoning.vpcSubnet = "Placed database in isolated subnets behind active security group rules.";
       break;
+    }
 
     case "storage":
       config.bucketStructure = "Single namespace bucket with folder partition.";

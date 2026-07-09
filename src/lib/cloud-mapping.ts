@@ -3,12 +3,18 @@ export type CloudMapping = {
   alternatives: Array<{
     serviceName: string;
     reason: string;
+    costEstimate: {
+      min: number;
+      max: number;
+      assumptions: string;
+    };
   }>;
   costEstimate: {
     min: number;
     max: number;
     assumptions: string;
   };
+  swapReasoning?: string;
 };
 
 export function getCloudMapping(
@@ -55,6 +61,11 @@ export function getCloudMapping(
             {
               serviceName: "AWS Global Accelerator",
               reason: "Chose CloudFront because it supports edge caching for static assets, whereas Global Accelerator is better suited for raw TCP/UDP latency optimizations.",
+              costEstimate: {
+                min: isHighScale ? 30 : 18,
+                max: isHighScale ? 200 : 40,
+                assumptions: "AWS Global Accelerator fixed hourly accelerator fee (~$18/mo) plus per-GB data processing charges.",
+              },
             },
           ],
           costEstimate: {
@@ -75,6 +86,11 @@ export function getCloudMapping(
                 {
                   serviceName: "Amazon ECS Fargate (Worker Task)",
                   reason: "Chose Lambda because the team has low operational maturity and the budget is tight. Fargate tasks incur higher baseline costs for idle time.",
+                  costEstimate: {
+                    min: 15,
+                    max: isHighScale ? 120 : 30,
+                    assumptions: "0.25 vCPU + 0.5 GB RAM container task running continuously for background jobs.",
+                  },
                 },
               ],
               costEstimate: {
@@ -90,6 +106,11 @@ export function getCloudMapping(
                 {
                   serviceName: "Amazon EC2 Worker Instance",
                   reason: "Chose Fargate to eliminate instance patching and OS management overhead. EC2 would be cheaper but requires more operations effort.",
+                  costEstimate: {
+                    min: 7,
+                    max: isHighScale ? 60 : 15,
+                    assumptions: "Amazon EC2 t3.micro/small instance running continuously, cheaper than Fargate but requires manual patching and scaling.",
+                  },
                 },
               ],
               costEstimate: {
@@ -112,6 +133,11 @@ export function getCloudMapping(
               {
                 serviceName: "Amazon ECS Fargate",
                 reason: "Chose Lambda to leverage pay-per-request pricing and zero management overhead. Fargate containers have a higher fixed monthly cost.",
+                costEstimate: {
+                  min: 25,
+                  max: isHighScale ? 250 : 60,
+                  assumptions: "Application Load Balancer baseline cost ($18/month) + 1-2 ECS Fargate tasks (0.5 vCPU, 1GB RAM) running 24/7.",
+                },
               },
             ],
             costEstimate: {
@@ -127,6 +153,11 @@ export function getCloudMapping(
               {
                 serviceName: "AWS Lambda + API Gateway",
                 reason: "Chose Fargate because the application has long-running connections or consistent request streams. ALB provides better caching and SSL termination.",
+                costEstimate: {
+                  min: 0,
+                  max: isHighScale ? 80 : 10,
+                  assumptions: "API Gateway HTTP API requests ($1.00/million) + Lambda execution times (128MB RAM, 100ms duration).",
+                },
               },
             ],
             costEstimate: {
@@ -151,6 +182,11 @@ export function getCloudMapping(
                   {
                     serviceName: "Amazon Aurora Serverless v2",
                     reason: "Chose RDS single instance because Aurora Serverless v2 has a minimum 0.5 ACU baseline cost (~$40/month), which exceeds the tight budget limit.",
+                    costEstimate: {
+                      min: 40,
+                      max: isHighScale ? 300 : 100,
+                      assumptions: "Aurora Serverless v2 scaling between 0.5 and 4 ACUs with Multi-AZ replication.",
+                    },
                   },
                 ],
                 costEstimate: {
@@ -166,6 +202,11 @@ export function getCloudMapping(
                   {
                     serviceName: "Amazon RDS PostgreSQL (Multi-AZ)",
                     reason: "Chose Aurora Serverless v2 to accommodate unpredictable scaling automatically. RDS Multi-AZ would provide HA but is less flexible.",
+                    costEstimate: {
+                      min: 15,
+                      max: 25,
+                      assumptions: "Single db.t4g.micro instance (2 vCPU, 1GB RAM) with 20GB GP3 storage.",
+                    },
                   },
                 ],
                 costEstimate: {
@@ -182,6 +223,11 @@ export function getCloudMapping(
                 {
                   serviceName: "Amazon DocumentDB (MongoDB Compatible)",
                   reason: "Chose DynamoDB because DocumentDB requires a running cluster instance (~$50/month minimum), whereas DynamoDB is serverless and pay-as-you-go.",
+                  costEstimate: {
+                    min: 50,
+                    max: isHighScale ? 250 : 80,
+                    assumptions: "Amazon DocumentDB db.t3.medium instance cluster (~$50/month minimum) plus storage/IO costs.",
+                  },
                 },
               ],
               costEstimate: {
@@ -194,7 +240,15 @@ export function getCloudMapping(
         }
         return {
           serviceName: "Amazon RDS PostgreSQL",
-          alternatives: [{ serviceName: "Amazon DynamoDB", reason: "Chose RDS for structured schemas." }],
+          alternatives: [{
+            serviceName: "Amazon DynamoDB",
+            reason: "Chose RDS for structured schemas.",
+            costEstimate: {
+              min: 0,
+              max: isHighScale ? 100 : 15,
+              assumptions: "DynamoDB On-Demand read/write request units + storage capacity costs.",
+            },
+          }],
           costEstimate: { min: 15, max: 50, assumptions: "RDS DB instance." },
         };
 
@@ -205,6 +259,11 @@ export function getCloudMapping(
             {
               serviceName: "Amazon EFS (Elastic File System)",
               reason: "Chose S3 because the files are unstructured media/blobs. EFS is better for POSIX-compliant file systems mounted directly onto EC2/Fargate.",
+              costEstimate: {
+                min: 5,
+                max: isHighScale ? 150 : 30,
+                assumptions: "Amazon EFS Standard storage ($0.30/GB) for POSIX-compliant file access, no request-based fees.",
+              },
             },
           ],
           costEstimate: {
@@ -221,6 +280,11 @@ export function getCloudMapping(
             {
               serviceName: "Amazon MSK (Managed Streaming for Apache Kafka)",
               reason: "Chose SQS because the workload has simple message buffer requirements. Kafka (MSK) is designed for high-throughput log streams and has a high minimum instance cost (~$200/month).",
+              costEstimate: {
+                min: 200,
+                max: isHighScale ? 600 : 250,
+                assumptions: "Amazon MSK provisioned broker cluster (minimum 2-3 kafka.t3.small brokers, ~$200/month baseline).",
+              },
             },
           ],
           costEstimate: {
@@ -237,6 +301,11 @@ export function getCloudMapping(
             {
               serviceName: "Amazon DynamoDB Accelerator (DAX)",
               reason: "Chose ElastiCache Redis because it supports versatile cache structures (sessions, query caches). DAX is specifically optimized only for DynamoDB key caching.",
+              costEstimate: {
+                min: 36,
+                max: isHighScale ? 150 : 60,
+                assumptions: "DAX requires a minimum 3-node cluster (dax.t3.small) for the built-in HA quorum.",
+              },
             },
           ],
           costEstimate: {
@@ -253,6 +322,11 @@ export function getCloudMapping(
             {
               serviceName: "Auth0 / Clerk (SaaS Provider)",
               reason: "Chose Cognito for full AWS native integration and cost savings. Cognito is free for the first 50,000 monthly active users (MAUs), whereas Clerk/Auth0 have lower free limits.",
+              costEstimate: {
+                min: isHighScale ? 99 : 0,
+                max: isHighScale ? 250 : 35,
+                assumptions: "Auth0/Clerk paid tier pricing kicks in above ~1,000 MAUs on the free plan, then per-MAU billing.",
+              },
             },
           ],
           costEstimate: {
@@ -278,6 +352,11 @@ export function getCloudMapping(
             {
               serviceName: "Azure Traffic Manager",
               reason: "Chose Azure Front Door because it provides Global HTTP/HTTPS load balancing and edge asset caching, whereas Traffic Manager is purely DNS-based routing.",
+              costEstimate: {
+                min: 1,
+                max: isHighScale ? 15 : 5,
+                assumptions: "Azure Traffic Manager DNS-based routing profile ($0.50/million DNS queries), no data transfer/caching fees since it does not proxy traffic.",
+              },
             },
           ],
           costEstimate: {
@@ -296,6 +375,11 @@ export function getCloudMapping(
                 {
                   serviceName: "Azure Container Apps (Worker)",
                   reason: "Chose Azure Functions because it scales down to zero dynamically for background triggers. Container Apps would require a persistent active container profile.",
+                  costEstimate: {
+                    min: 15,
+                    max: isHighScale ? 120 : 30,
+                    assumptions: "Container profile allocating 0.25 vCPU and 0.5 GB RAM running continuously.",
+                  },
                 },
               ],
               costEstimate: {
@@ -311,6 +395,11 @@ export function getCloudMapping(
                 {
                   serviceName: "Azure Virtual Machines (Scale Sets)",
                   reason: "Chose Container Apps to avoid VM management, OS upgrades, and complex scale rules. VMs would be cheaper but require significant administrative overhead.",
+                  costEstimate: {
+                    min: 8,
+                    max: isHighScale ? 65 : 18,
+                    assumptions: "Azure VM Scale Set with a single reserved B-series burstable instance, cheaper than Container Apps but requires manual patching and scaling.",
+                  },
                 },
               ],
               costEstimate: {
@@ -333,6 +422,11 @@ export function getCloudMapping(
               {
                 serviceName: "Azure Container Apps",
                 reason: "Chose Azure Functions to minimize fixed costs, charging strictly per request. Container Apps has a slightly higher base footprint cost.",
+                costEstimate: {
+                  min: 25,
+                  max: isHighScale ? 260 : 65,
+                  assumptions: "Azure App Gateway baseline costs ($18/mo) + Container App execution (1-2 replicas).",
+                },
               },
             ],
             costEstimate: {
@@ -348,6 +442,11 @@ export function getCloudMapping(
               {
                 serviceName: "Azure App Service (Linux Web App)",
                 reason: "Chose Container Apps for modern microservices packaging and simpler scale-to-zero settings compared to App Service plans.",
+                costEstimate: {
+                  min: 0,
+                  max: isHighScale ? 85 : 10,
+                  assumptions: "API Management Consumption tier + Serverless Functions executions.",
+                },
               },
             ],
             costEstimate: {
@@ -372,6 +471,11 @@ export function getCloudMapping(
                   {
                     serviceName: "Azure Cosmos DB (PostgreSQL API)",
                     reason: "Chose Burstable PostgreSQL single instance because Cosmos DB distributed configurations have a high baseline cost structure (~$90/mo minimum).",
+                    costEstimate: {
+                      min: 45,
+                      max: isHighScale ? 310 : 110,
+                      assumptions: "General Purpose D2ds_v5 instance (2 vCPU, 8GB RAM) with high availability configured.",
+                    },
                   },
                 ],
                 costEstimate: {
@@ -387,6 +491,11 @@ export function getCloudMapping(
                   {
                     serviceName: "Azure Cosmos DB for PostgreSQL",
                     reason: "Chose PostgreSQL Flexible Server to provide high availability and replication zones without the complexity of a distributed Citus database layout.",
+                    costEstimate: {
+                      min: 15,
+                      max: 25,
+                      assumptions: "Single burstable compute instance (B1ms, 1 vCPU, 2GB RAM) with 32GB Premium SSD storage.",
+                    },
                   },
                 ],
                 costEstimate: {
@@ -403,6 +512,11 @@ export function getCloudMapping(
                 {
                   serviceName: "Azure Cache for Redis (Enterprise)",
                   reason: "Chose Cosmos DB as the primary document store due to strict document query requirements. Redis is used primarily for fast transit caches.",
+                  costEstimate: {
+                    min: 100,
+                    max: isHighScale ? 500 : 200,
+                    assumptions: "Azure Cache for Redis Enterprise E10 tier minimum footprint for advanced modules and higher throughput.",
+                  },
                 },
               ],
               costEstimate: {
@@ -415,7 +529,15 @@ export function getCloudMapping(
         }
         return {
           serviceName: "Azure Database for PostgreSQL",
-          alternatives: [{ serviceName: "Azure Cosmos DB", reason: "Chose PostgreSQL for relational data model." }],
+          alternatives: [{
+            serviceName: "Azure Cosmos DB",
+            reason: "Chose PostgreSQL for relational data model.",
+            costEstimate: {
+              min: 0,
+              max: isHighScale ? 110 : 15,
+              assumptions: "Cosmos DB Serverless provisioning (billing based on consumed Request Units).",
+            },
+          }],
           costEstimate: { min: 15, max: 50, assumptions: "Azure PostgreSQL Server." },
         };
 
@@ -426,6 +548,11 @@ export function getCloudMapping(
             {
               serviceName: "Azure Files",
               reason: "Chose Blob Storage because the application requires flat block media objects. Azure Files is optimized for SMB/NFS file share mounts.",
+              costEstimate: {
+                min: 6,
+                max: isHighScale ? 160 : 35,
+                assumptions: "Azure Files Premium tier ($0.16/GB-provisioned) for SMB/NFS mounts, provisioned capacity billed regardless of usage.",
+              },
             },
           ],
           costEstimate: {
@@ -442,6 +569,11 @@ export function getCloudMapping(
             {
               serviceName: "Azure Queue Storage",
               reason: "Chose Service Bus Standard because it supports advanced FIFO, transactions, and pub/sub routing. Queue Storage is cheaper but supports only basic queuing.",
+              costEstimate: {
+                min: 0,
+                max: isHighScale ? 10 : 3,
+                assumptions: "Azure Queue Storage pay-per-operation pricing ($0.0036/10k operations), no fixed monthly base fee.",
+              },
             },
           ],
           costEstimate: {
@@ -458,6 +590,11 @@ export function getCloudMapping(
             {
               serviceName: "Azure Cosmos DB Integrated Cache",
               reason: "Chose Redis because it supports multi-service session and schema caches. Cosmos DB integrated cache is restricted purely to Cosmos DB reads.",
+              costEstimate: {
+                min: 0,
+                max: isHighScale ? 60 : 15,
+                assumptions: "Cosmos DB Integrated Cache billed as additional RU consumption on the existing Cosmos DB account, no standalone node cost.",
+              },
             },
           ],
           costEstimate: {
@@ -474,6 +611,11 @@ export function getCloudMapping(
             {
               serviceName: "Auth0 / Clerk SaaS",
               reason: "Chose Entra ID B2C due to its generous free tier limit (50,000 monthly active users) and direct Microsoft ecosystem integration.",
+              costEstimate: {
+                min: isHighScale ? 99 : 0,
+                max: isHighScale ? 250 : 35,
+                assumptions: "Auth0/Clerk paid tier pricing kicks in above ~1,000 MAUs on the free plan, then per-MAU billing.",
+              },
             },
           ],
           costEstimate: {
@@ -499,6 +641,11 @@ export function getCloudMapping(
             {
               serviceName: "Google Cloud Load Balancing (Anycast)",
               reason: "Chose Cloud CDN because it caches static images and assets at Google edge nodes. Raw Load Balancing only handles request routing without caching.",
+              costEstimate: {
+                min: isHighScale ? 18 : 5,
+                max: isHighScale ? 90 : 20,
+                assumptions: "Global external HTTPS Load Balancer forwarding rule + data processing fees, without edge cache offload.",
+              },
             },
           ],
           costEstimate: {
@@ -517,6 +664,11 @@ export function getCloudMapping(
                 {
                   serviceName: "Google Cloud Run (Worker Task)",
                   reason: "Chose Cloud Functions because it is optimized for brief, event-driven processes. Cloud Run is better for microservices that handle web traffic.",
+                  costEstimate: {
+                    min: 12,
+                    max: isHighScale ? 110 : 25,
+                    assumptions: "Container instance with 0.25 vCPU and 0.5 GB RAM running continuously.",
+                  },
                 },
               ],
               costEstimate: {
@@ -532,6 +684,11 @@ export function getCloudMapping(
                 {
                   serviceName: "Google Compute Engine (VM Instances)",
                   reason: "Chose Cloud Run to enjoy container management abstractions and automatic scaling down to zero. VMs require active operating system patching.",
+                  costEstimate: {
+                    min: 6,
+                    max: isHighScale ? 55 : 15,
+                    assumptions: "Google Compute Engine e2-micro/small instance running continuously, cheaper than Cloud Run but requires manual patching and scaling.",
+                  },
                 },
               ],
               costEstimate: {
@@ -554,6 +711,11 @@ export function getCloudMapping(
               {
                 serviceName: "Google Cloud Run",
                 reason: "Chose Cloud Functions for minimal serverless orchestration overhead. Cloud Run is serverless but requires containerizing the API.",
+                costEstimate: {
+                  min: 20,
+                  max: isHighScale ? 240 : 60,
+                  assumptions: "GCP Global HTTPS Load Balancer baseline cost ($18/mo) + Cloud Run CPU allocation.",
+                },
               },
             ],
             costEstimate: {
@@ -569,6 +731,11 @@ export function getCloudMapping(
               {
                 serviceName: "Google Kubernetes Engine (GKE Autopilot)",
                 reason: "Chose Cloud Run for container deployment simplicity without GKE cluster management. GKE is better for complex multi-container pods.",
+                costEstimate: {
+                  min: 70,
+                  max: isHighScale ? 400 : 150,
+                  assumptions: "GKE Autopilot cluster management fee ($0.10/hour, ~$73/mo) plus pod resource allocation.",
+                },
               },
             ],
             costEstimate: {
@@ -593,6 +760,11 @@ export function getCloudMapping(
                   {
                     serviceName: "Google Cloud Spanner",
                     reason: "Chose Cloud SQL for small PostgreSQL database needs. Cloud Spanner is a globally distributed SQL DB with high minimum costs (~$60/mo).",
+                    costEstimate: {
+                      min: 60,
+                      max: isHighScale ? 400 : 150,
+                      assumptions: "Cloud Spanner minimum 1 processing unit node (~$60/month), intended for globally distributed multi-region workloads.",
+                    },
                   },
                 ],
                 costEstimate: {
@@ -608,6 +780,11 @@ export function getCloudMapping(
                   {
                     serviceName: "Google Cloud Spanner",
                     reason: "Chose Cloud SQL Flexible PostgreSQL for high-performance relational features. Cloud Spanner is reserved for massive multi-region database replication.",
+                    costEstimate: {
+                      min: 60,
+                      max: isHighScale ? 400 : 150,
+                      assumptions: "Cloud Spanner minimum 1 processing unit node (~$60/month), intended for globally distributed multi-region workloads.",
+                    },
                   },
                 ],
                 costEstimate: {
@@ -624,6 +801,11 @@ export function getCloudMapping(
                 {
                   serviceName: "Google Cloud Bigtable",
                   reason: "Chose Firestore as the flexible NoSQL document database. Bigtable is a wide-column store designed for multi-terabyte analytical databases.",
+                  costEstimate: {
+                    min: 450,
+                    max: isHighScale ? 1500 : 600,
+                    assumptions: "Cloud Bigtable requires a minimum 1-node cluster (~$450/month) regardless of traffic, intended for multi-terabyte analytical workloads.",
+                  },
                 },
               ],
               costEstimate: {
@@ -636,7 +818,15 @@ export function getCloudMapping(
         }
         return {
           serviceName: "Google Cloud SQL for PostgreSQL",
-          alternatives: [{ serviceName: "Google Cloud Firestore", reason: "Chose Cloud SQL for relational storage." }],
+          alternatives: [{
+            serviceName: "Google Cloud Firestore",
+            reason: "Chose Cloud SQL for relational storage.",
+            costEstimate: {
+              min: 0,
+              max: isHighScale ? 100 : 15,
+              assumptions: "Firestore serverless pricing based on read, write, and delete counts.",
+            },
+          }],
           costEstimate: { min: 10, max: 45, assumptions: "Cloud SQL PostgreSQL instance." },
         };
 
@@ -647,6 +837,11 @@ export function getCloudMapping(
             {
               serviceName: "Google Cloud Filestore",
               reason: "Chose Cloud Storage Standard because the data is flat media/image uploads. Filestore provides POSIX network-attached storage mounts for VMs.",
+              costEstimate: {
+                min: 200,
+                max: isHighScale ? 600 : 250,
+                assumptions: "Filestore Basic tier requires a minimum 1TB provisioned instance (~$200/month) for POSIX network-attached storage.",
+              },
             },
           ],
           costEstimate: {
@@ -663,6 +858,11 @@ export function getCloudMapping(
             {
               serviceName: "Google Cloud Tasks",
               reason: "Chose Pub/Sub because it provides high-throughput, fan-out event pub/sub. Cloud Tasks is better for targeted queue HTTP executions (cron tasks).",
+              costEstimate: {
+                min: 0,
+                max: isHighScale ? 15 : 5,
+                assumptions: "Cloud Tasks per-operation pricing ($0.40/million operations after the free tier), intended for targeted HTTP-triggered queues.",
+              },
             },
           ],
           costEstimate: {
@@ -679,6 +879,11 @@ export function getCloudMapping(
             {
               serviceName: "Google Cloud Bigtable",
               reason: "Chose Memorystore for fast Redis caching. Bigtable can serve as a key-value store but is far more expensive and heavier than cache instances.",
+              costEstimate: {
+                min: 450,
+                max: isHighScale ? 1500 : 600,
+                assumptions: "Cloud Bigtable requires a minimum 1-node cluster (~$450/month), far exceeding typical cache-node costs.",
+              },
             },
           ],
           costEstimate: {
@@ -695,6 +900,11 @@ export function getCloudMapping(
             {
               serviceName: "Google Cloud Identity Platform",
               reason: "Chose Firebase Authentication due to its generous free tier (50,000 MAUs free) and easy setup. Identity Platform provides advanced enterprise features at cost.",
+              costEstimate: {
+                min: isHighScale ? 99 : 0,
+                max: isHighScale ? 250 : 35,
+                assumptions: "Identity Platform enterprise features (SAML/OIDC federation, MFA) billed per-MAU above the free Firebase Auth tier.",
+              },
             },
           ],
           costEstimate: {
