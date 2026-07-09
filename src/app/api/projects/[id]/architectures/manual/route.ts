@@ -60,6 +60,7 @@ export async function POST(
       functional: reqs.functional as string[],
       nonFunctional: reqs.nonFunctional as any,
     };
+    const industryContext = reqs.industryContext;
 
     // 3. Compile manual components (resolve missing cloud mappings and LLD baselines)
     const compiledComponents = components.map((c: any) => {
@@ -68,14 +69,16 @@ export async function POST(
         return c;
       }
 
-      // Automatically generate mappings & LLD defaults for a new node
+      // Automatically generate mappings & LLD defaults for a new node. Passing industryContext
+      // keeps a manually-added component (e.g. a second database) subject to the same
+      // compliance-mandated config (encryption in transit, etc.) as the auto-generated baseline.
       const awsMapping = getCloudMapping("aws", c.type, c.id, reqsContext);
       const azureMapping = getCloudMapping("azure", c.type, c.id, reqsContext);
       const gcpMapping = getCloudMapping("gcp", c.type, c.id, reqsContext);
 
-      const awsLld = runLldRulesEngine("aws", c.type, c.id, reqsContext);
-      const azureLld = runLldRulesEngine("azure", c.type, c.id, reqsContext);
-      const gcpLld = runLldRulesEngine("gcp", c.type, c.id, reqsContext);
+      const awsLld = runLldRulesEngine("aws", c.type, c.id, reqsContext, undefined, industryContext);
+      const azureLld = runLldRulesEngine("azure", c.type, c.id, reqsContext, undefined, industryContext);
+      const gcpLld = runLldRulesEngine("gcp", c.type, c.id, reqsContext, undefined, industryContext);
 
       return {
         ...c,

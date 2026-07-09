@@ -4,6 +4,8 @@ export type BrainstormResponse = {
   message: string;
   isComplete: boolean;
   stage: "brainstorm" | "requirement_gathering" | "growth_trigger";
+  detectedIndustry?: "fintech" | "healthtech" | "none";
+  industryRationale?: string;
 };
 
 export type ExtractedRequirements = {
@@ -16,6 +18,16 @@ export type ExtractedRequirements = {
     budget: string;
     teamMaturity: string;
     compliance: string;
+  };
+  industryContext: {
+    industry: "fintech" | "healthtech" | "none";
+    rationale: string;
+    complianceAnswers: Array<{ question: string; answer: string }>;
+    flags: {
+      handlesCardDataDirectly?: boolean;
+      storesPHI?: boolean;
+      dataResidency?: string;
+    };
   };
 };
 
@@ -141,7 +153,9 @@ You MUST respond with a raw JSON object matching this TypeScript structure:
 {
   "message": string (your conversational follow-up question or update confirmation),
   "isComplete": boolean (set to true ONLY when you have enough details or are transitioning to requirement_gathering),
-  "stage": "growth_trigger" | "requirement_gathering" (set to "requirement_gathering" when isComplete is true, otherwise "growth_trigger")
+  "stage": "growth_trigger" | "requirement_gathering" (set to "requirement_gathering" when isComplete is true, otherwise "growth_trigger"),
+  "detectedIndustry": "fintech" | "healthtech" | "none",
+  "industryRationale": string (one short sentence — reuse your prior assessment if nothing new changes it)
 }
 Do not include markdown code block formatting (like \`\`\`json) in your raw response, return only the JSON object.
 `
@@ -155,6 +169,14 @@ Keep the conversation focused. Ask exactly ONE clear, specific question at a tim
 3. Operational maturity / budget (serverless/low cost vs. managed containerized cluster).
 4. Key security or compliance requirements (data privacy, B2B SSO, audit logs).
 
+Industry detection (do this silently on every turn, alongside the numbered topics above):
+- Classify the product idea into one of: "fintech" (payments, banking, card processing, lending, insurance, trading, or other financial services), "healthtech" (medical records, patient data, clinical workflows, healthcare providers, or health data processing), or "none" (anything else, or not enough signal yet).
+- The FIRST time you detect "fintech" or "healthtech" in this conversation, your next question MUST be the relevant one below INSTEAD OF a generic compliance question (this satisfies topic 4 above, it does not add an extra turn):
+  - fintech: "Will you be handling card payments directly, or through a processor like Stripe or Braintree?"
+  - healthtech: "Will your system store or process Protected Health Information (PHI), such as medical records or clinical data?"
+- You may ask AT MOST ONE further brief industry-specific follow-up later in the conversation if the answer above needs clarification (e.g., healthtech: "Which country or region's data residency rules apply to your users?"). Never ask more than 2 industry-specific questions total across the whole conversation, and never let them replace more than one of the 4 numbered topics.
+- If industry is "none", proceed with the 4 topics exactly as before — nothing about the flow changes.
+
 Rules:
 - Do NOT dump a list of questions. Ask ONLY ONE follow-up question in each turn.
 - Be conversational. Acknowledge their previous answer and build on it.
@@ -165,7 +187,9 @@ You MUST respond with a raw JSON object matching this TypeScript structure:
 {
   "message": string (your conversational follow-up question or concluding summary),
   "isComplete": boolean (set to true ONLY when you have enough details or are wrapping up after max turns),
-  "stage": "brainstorm" | "requirement_gathering" (set to "requirement_gathering" when isComplete is true, otherwise "brainstorm")
+  "stage": "brainstorm" | "requirement_gathering" (set to "requirement_gathering" when isComplete is true, otherwise "brainstorm"),
+  "detectedIndustry": "fintech" | "healthtech" | "none",
+  "industryRationale": string (one short sentence explaining the classification, even if "none")
 }
 Do not include markdown code block formatting (like \`\`\`json) in your raw response, return only the JSON object.
 `;
@@ -213,8 +237,16 @@ Rules:
   - budget: expected cost limits.
   - teamMaturity: experience level of the development/ops team.
   - compliance: data privacy, encryption, residency, etc.
+- For industryContext: classify the whole conversation into a regulated industry, by meaning and context — not by matching keywords:
+  - "industry": "fintech" (payments, banking, card processing, lending, insurance, trading, other financial services), "healthtech" (medical records, patient data, clinical workflows, healthcare providers, health data), or "none" (anything else).
+  - "rationale": one sentence explaining why.
+  - "complianceAnswers": every industry-specific compliance question that was asked and answered anywhere in the conversation (about card data handling, PHI, data residency, etc.), as { "question": string, "answer": string } pairs. Empty array if industry is "none" or none were asked.
+  - "flags": derive from the complianceAnswers —
+    - "handlesCardDataDirectly": boolean, fintech only, true if the user handles card data directly, false if only through a processor like Stripe. Omit the key entirely if not fintech or not discussed.
+    - "storesPHI": boolean, healthtech only, true if the user stores/processes PHI. Omit the key entirely if not healthtech or not discussed.
+    - "dataResidency": string, healthtech only, the country/region mentioned, or "not_specified" if healthtech but never discussed. Omit the key entirely if not healthtech.
 
-CRITICAL: If a non-functional item was NOT discussed in the conversation and cannot be reasonably and strongly inferred from context, set it EXACTLY to "not_specified". Do NOT guess or use silent defaults.
+CRITICAL: If a non-functional item was NOT discussed in the conversation and cannot be reasonably and strongly inferred from context, set it EXACTLY to "not_specified". Do NOT guess or use silent defaults. The same applies to industryContext — do not infer a regulated industry from weak signal.
 
 You MUST respond with a raw JSON object matching this structure:
 {
@@ -227,6 +259,16 @@ You MUST respond with a raw JSON object matching this structure:
     "budget": string,
     "teamMaturity": string,
     "compliance": string
+  },
+  "industryContext": {
+    "industry": "fintech" | "healthtech" | "none",
+    "rationale": string,
+    "complianceAnswers": [ { "question": string, "answer": string } ],
+    "flags": {
+      "handlesCardDataDirectly": boolean,
+      "storesPHI": boolean,
+      "dataResidency": string
+    }
   }
 }
 Do not include markdown code block formatting (like \`\`\`json) in your response, return only the raw JSON.
@@ -298,6 +340,7 @@ Your task is to:
 2. For EVERY component, write:
    - A detailed 'reasoning' trace explaining why this component is necessary and its primary design trade-offs.
    - Inside 'cloudMappings.aws.lld.reasoning', 'cloudMappings.azure.lld.reasoning', and 'cloudMappings.gcp.lld.reasoning': write custom, short (one-line) rationale strings explaining why the specific LLD configuration values (e.g., memory size, instance class, Multi-AZ setting) are appropriate based on the requirements.
+   - EXCEPTION: for compliance components (type 'tokenization', 'audit-log', 'phi-vault', 'deidentification'), the baseline 'reasoning' and 'lld.reasoning' were already written by a deterministic compliance rule engine citing the specific regulation (PCI-DSS/HIPAA) that mandated them. Keep those as-is unless you have a specific correction — do not rewrite them at length, to keep your output concise.
 3. List any 'assumptions' or 'risks' that are present in the design due to requirements being marked as "not_specified".
 4. Determine the Recommended Cloud Provider ('aws', 'azure', or 'gcp') and write a short paragraph rationale explaining why it is recommended over the others, along with a list of key trade-offs.
 5. If the previous version's components list is provided:

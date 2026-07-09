@@ -1,3 +1,5 @@
+import { IndustryContext } from "@/db/schema";
+
 export type LldConfig = {
   config: Record<string, string>;
   reasoning: Record<string, string>;
@@ -24,7 +26,11 @@ export function runLldRulesEngine(
   // determine which LLD shape applies (e.g. serverless vs container config keys) since
   // the requirements haven't changed, only the chosen service has. This lets the caller
   // force the correct branch based on the service name the user actually picked.
-  serviceNameOverride?: string
+  serviceNameOverride?: string,
+  // Layers compliance-mandated config on top of the scale/budget-driven baseline below —
+  // see the block right before the return statement. Optional and additive: omitting it
+  // (the default for every pre-Phase-4 call site) reproduces the exact prior behavior.
+  industryContext?: IndustryContext
 ): LldConfig {
   const nfr = requirements.nonFunctional;
   const scaleLower = nfr.expectedScale.toLowerCase();
@@ -234,10 +240,65 @@ export function runLldRulesEngine(
         : "Disabled mandatory MFA to ease user onboard friction.";
       break;
 
+    case "tokenization":
+      config.encryptionStandard = "FIPS 140-2 Level 3 (HSM-backed)";
+      config.tokenFormat = "Format-Preserving Encryption (FPE)";
+      config.pciScope = "Isolated CDE — reduces PCI-DSS scope for connected systems";
+      config.rawDataLogging = "Disabled";
+
+      reasoning.encryptionStandard = "HSM-backed key storage is required to keep cryptographic material for cardholder data out of reach of application-layer compromise.";
+      reasoning.rawDataLogging = "PCI-DSS explicitly prohibits logging full PAN (Primary Account Number) data in application or debug logs.";
+      break;
+
+    case "audit-log":
+      config.retentionPeriod = isHighSecurity ? "7 Years (regulatory)" : "3 Years";
+      config.immutability = "Enabled (WORM / Object Lock)";
+      config.accessControl = "Write-only for application roles, read-only for auditors";
+
+      reasoning.immutability = "Audit trails must be tamper-evident — write-once storage prevents after-the-fact edits to covers unauthorized access.";
+      reasoning.retentionPeriod = isHighSecurity
+        ? "Extended retention aligns with stricter regulatory record-keeping expectations."
+        : "Standard multi-year retention to support incident investigation and periodic compliance review.";
+      break;
+
+    case "phi-vault":
+      config.encryptionAtRest = "AES-256 (Customer-Managed KMS Key)";
+      config.accessLogging = "Enabled — every read/write logged with authenticated user identity";
+      config.baaRequired = "true (Business Associate Agreement with cloud provider required)";
+      config.networkIsolation = "Private subnet, no direct internet route";
+
+      reasoning.encryptionAtRest = "HIPAA's Security Rule requires PHI to be encrypted at rest using keys the covered entity controls, not just provider-managed defaults.";
+      reasoning.baaRequired = "Any cloud provider processing PHI on your behalf must sign a Business Associate Agreement (BAA) before this component can legally hold real patient data.";
+      break;
+
+    case "deidentification":
+      config.method = "Safe Harbor De-identification (18 HIPAA identifiers removed)";
+      config.triggerMode = "Batch (nightly) — not real-time inline";
+
+      reasoning.method = "Safe Harbor is the more auditable of HIPAA's two de-identification standards and doesn't require a statistician's expert determination.";
+      break;
+
     default:
       config.genericType = "Generic Config";
       reasoning.genericType = "Standard deployment config.";
       break;
+  }
+
+  // Compliance-mandated config additions, layered on top of whatever the scale/budget-driven
+  // rules above already decided. These are ADDED keys, never overrides of the existing scale
+  // logic, so a generic (industryContext undefined/"none") call is byte-for-byte unaffected.
+  if (industryContext && industryContext.industry !== "none") {
+    const standard = industryContext.industry === "fintech" ? "PCI-DSS" : "HIPAA";
+
+    if (["database", "storage", "cache"].includes(componentType)) {
+      config.encryptionInTransit = "TLS 1.2+ (Enforced)";
+      reasoning.encryptionInTransit = `Mandatory for ${standard} compliance — encryption in transit is not optional for regulated data, regardless of scale.`;
+    }
+
+    if (componentType === "database" && industryContext.industry === "fintech") {
+      config.multiAZ = "true (Primary/Standby)";
+      reasoning.multiAZ = "Forced to enabled for PCI-DSS compliance — regulated payment workloads require high availability regardless of stated scale.";
+    }
   }
 
   return { config, reasoning };

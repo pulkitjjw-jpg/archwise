@@ -623,6 +623,9 @@ export default function ArchitectureWorkspace({
     return ` (${signMin}$${minDelta} - ${signMax}$${maxDelta}/mo)`;
   };
 
+  const COMPLIANCE_TYPES = ["tokenization", "audit-log", "phi-vault", "deidentification"];
+  const isComplianceNode = (type: string) => COMPLIANCE_TYPES.includes(type);
+
   const getNodeColor = (type: string, isSelected: boolean) => {
     const base = isSelected ? "stroke-cyan-500 stroke-[3px]" : "stroke-slate-200";
     let bg = "fill-slate-50";
@@ -634,8 +637,16 @@ export default function ArchitectureWorkspace({
     else if (type === "queue") bg = "fill-pink-50";
     else if (type === "cache") bg = "fill-rose-50";
     else if (type === "auth") bg = "fill-indigo-50";
+    // Compliance nodes get their own warm, visually distinct palette so they stand out from
+    // regular infra at a glance, on top of the shield badge drawn separately on each node.
+    else if (type === "tokenization") bg = "fill-orange-50";
+    else if (type === "audit-log") bg = "fill-stone-100";
+    else if (type === "phi-vault") bg = "fill-red-50";
+    else if (type === "deidentification") bg = "fill-teal-50";
 
-    return { border: base, bg };
+    const border = isComplianceNode(type) && !isSelected ? "stroke-amber-400/70" : base;
+
+    return { border, bg };
   };
 
   const getNodeEmoji = (type: string) => {
@@ -646,6 +657,10 @@ export default function ArchitectureWorkspace({
     if (type === "queue") return "📥";
     if (type === "cache") return "⚡";
     if (type === "auth") return "🔑";
+    if (type === "tokenization") return "🔐";
+    if (type === "audit-log") return "🧾";
+    if (type === "phi-vault") return "🏥";
+    if (type === "deidentification") return "🕶️";
     return "🧩";
   };
 
@@ -1001,6 +1016,10 @@ export default function ArchitectureWorkspace({
                               <option value="storage">Object Storage</option>
                               <option value="auth">Auth</option>
                               <option value="lb">Load Balancer</option>
+                              <option value="tokenization">Tokenization Layer</option>
+                              <option value="audit-log">Audit Log Store</option>
+                              <option value="phi-vault">PHI Data Vault</option>
+                              <option value="deidentification">De-identification Pipeline</option>
                             </select>
                             <input
                               type="text"
@@ -1329,6 +1348,17 @@ export default function ArchitectureWorkspace({
                               <circle r="6" className="fill-amber-500 stroke-white stroke-1" />
                               <text y="2" textAnchor="middle" className="text-[6px] fill-white font-black select-none">
                                 U
+                              </text>
+                            </g>
+                          )}
+
+                          {/* Compliance Component Badge — marks nodes added by industry rules
+                              (audit log, tokenization, PHI vault, de-identification) */}
+                          {isComplianceNode(node.type) && (
+                            <g transform="translate(58, 16)" className="pointer-events-none">
+                              <circle r="7" className="fill-white stroke-amber-500 stroke-[1.5]" />
+                              <text y="3" textAnchor="middle" className="text-[8px] select-none">
+                                🛡️
                               </text>
                             </g>
                           )}

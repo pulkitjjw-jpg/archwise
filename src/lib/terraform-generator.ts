@@ -1,10 +1,80 @@
 export type TerraformFileSet = Record<string, string>;
 
+type IndustryContextForExport = {
+  industry: "fintech" | "healthtech" | "none";
+  rationale?: string;
+  flags?: {
+    handlesCardDataDirectly?: boolean;
+    storesPHI?: boolean;
+    dataResidency?: string;
+  };
+} | null | undefined;
+
+function buildComplianceSection(industryContext: IndustryContextForExport, components: any[]): string {
+  if (!industryContext || industryContext.industry === "none") {
+    return "";
+  }
+
+  const complianceComponents = components.filter((c) =>
+    ["tokenization", "audit-log", "phi-vault", "deidentification"].includes(c.type)
+  );
+  const componentLines = complianceComponents
+    .map((c) => `*   **${c.name}** (\`${c.type}\`): ${c.reasoning || c.description || "Compliance component."}`)
+    .join("\n");
+
+  if (industryContext.industry === "fintech") {
+    return `
+---
+
+> [!IMPORTANT]
+> ## Compliance: PCI-DSS
+
+This project was flagged as **fintech** during discovery${industryContext.rationale ? ` (${industryContext.rationale})` : ""}. The following compliance-driven infrastructure was added on top of the baseline architecture:
+
+${componentLines || "*   No dedicated compliance components were added — verify this is expected for your payment flow."}
+
+**What this Terraform does for you:**
+*   Provisions an immutable, write-once audit log store for all cardholder-data-adjacent activity (PCI-DSS Requirement 10).
+*   Enforces TLS 1.2+ on data stores in the transaction path (PCI-DSS Requirement 4).
+${industryContext.flags?.handlesCardDataDirectly ? "*   Provisions a dedicated tokenization layer so raw card data (PAN) never touches application compute or the primary database, shrinking your PCI-DSS scope." : "*   Card data is handled via a third-party processor — this Terraform does not provision cardholder-data storage, but the systems that call the processor are still in scope."}
+
+**What you are still responsible for:**
+*   Achieving PCI-DSS certification requires a third-party Qualified Security Assessor (QSA) audit or a completed Self-Assessment Questionnaire (SAQ) — this Terraform is a starting point, not a certification.
+*   Network segmentation, firewall rule review, and penetration testing are not automated by this configuration.
+*   Key rotation policies, incident response procedures, and employee access reviews must be established operationally.
+`;
+  }
+
+  // healthtech
+  return `
+---
+
+> [!IMPORTANT]
+> ## Compliance: HIPAA
+
+This project was flagged as **healthtech** during discovery${industryContext.rationale ? ` (${industryContext.rationale})` : ""}. The following compliance-driven infrastructure was added on top of the baseline architecture:
+
+${componentLines || "*   No dedicated compliance components were added — verify this is expected if PHI is involved."}
+
+**What this Terraform does for you:**
+*   Provisions an immutable, write-once audit log store recording all access to systems containing PHI (HIPAA Security Rule, 45 CFR 164.312(b)).
+*   Enforces TLS 1.2+ on data stores handling regulated data (encryption in transit).
+${industryContext.flags?.storesPHI ? "*   Provisions a dedicated, encrypted PHI Data Vault isolated from general application data, with mandatory access logging." : "*   PHI storage was not confirmed during discovery — if patient-identifiable data is added later, re-run generation with that confirmed so a dedicated PHI vault is provisioned."}
+${industryContext.flags?.dataResidency && industryContext.flags.dataResidency !== "not_specified" ? `*   Data residency was specified as **${industryContext.flags.dataResidency}** — verify every provisioned region and any managed service's underlying data location honors this before deployment.` : ""}
+
+**What you are still responsible for:**
+*   **A signed Business Associate Agreement (BAA) with your cloud provider is required before any real PHI touches this infrastructure.** This Terraform does not and cannot establish that agreement — it is a legal contract between you and the provider.
+*   Achieving full HIPAA compliance requires a documented risk assessment, workforce training, and breach notification procedures — this Terraform addresses infrastructure controls only, not administrative or physical safeguards.
+*   Verify every managed service used here is on your cloud provider's list of HIPAA-eligible services before deploying real patient data.
+`;
+}
+
 export function generateTerraformCode(
   provider: "aws" | "azure" | "gcp",
   projectName: string,
   components: any[],
-  connections: any[]
+  connections: any[],
+  industryContext?: IndustryContextForExport
 ): TerraformFileSet {
   const files: TerraformFileSet = {};
   const safeName = projectName.toLowerCase().replace(/[^a-z0-9]/g, "-");
@@ -917,9 +987,9 @@ This Terraform configuration script was automatically synthesized by the **AI Cl
 
 > [!WARNING]
 > ## Deployment Security Disclaimer
-> This configuration represents a starting point. It has been derived automatically based on design rules and client brainstorming. 
+> This configuration represents a starting point. It has been derived automatically based on design rules and client brainstorming.
 > You MUST review instance profiles, security group configurations, IAM roles, and pricing implications before running \`terraform apply\` in any real staging or production environments.
-
+${buildComplianceSection(industryContext, components)}
 ---
 
 ## State Management Configuration

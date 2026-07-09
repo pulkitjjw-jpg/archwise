@@ -336,6 +336,90 @@ export function getCloudMapping(
           },
         };
 
+      case "tokenization":
+        return {
+          serviceName: "AWS KMS + Dedicated Tokenization Microservice (ECS Fargate)",
+          alternatives: [
+            {
+              serviceName: "Third-Party Tokenization Vault (e.g. Basis Theory, VGS)",
+              reason: "Chose a self-managed KMS-backed microservice to keep full control of the tokenization boundary. A third-party vault offloads PCI-DSS scope entirely but adds a recurring per-transaction vendor fee and an external dependency in the payment path.",
+              costEstimate: {
+                min: 200,
+                max: isHighScale ? 1500 : 500,
+                assumptions: "Third-party tokenization vault per-transaction/per-token pricing plus a monthly platform fee.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: 40,
+            max: isHighScale ? 300 : 100,
+            assumptions: "KMS key usage fees + a small dedicated Fargate task (0.25 vCPU, 0.5GB RAM) running the tokenization service continuously.",
+          },
+        };
+
+      case "audit-log":
+        return {
+          serviceName: "Amazon S3 (Object Lock — Compliance Mode) + CloudTrail",
+          alternatives: [
+            {
+              serviceName: "Amazon QLDB (Quantum Ledger Database)",
+              reason: "Chose S3 Object Lock for cost-effective, provably immutable storage at scale. QLDB offers cryptographic verification of the full change history but at a materially higher baseline cost for simple append-only audit logging.",
+              costEstimate: {
+                min: 60,
+                max: isHighScale ? 400 : 150,
+                assumptions: "QLDB ledger with a small number of I/O request units and journal storage.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: 3,
+            max: isHighScale ? 60 : 15,
+            assumptions: "S3 Standard storage with Object Lock (Compliance mode) + CloudTrail management event logging (first trail free).",
+          },
+        };
+
+      case "phi-vault":
+        return {
+          serviceName: "AWS HealthLake (FHIR-native PHI Store)",
+          alternatives: [
+            {
+              serviceName: "Amazon RDS PostgreSQL (KMS-Encrypted, Dedicated PHI Instance)",
+              reason: "Chose HealthLake because it's purpose-built for healthcare data (FHIR R4) with built-in HIPAA-eligible encryption and query tooling. A dedicated encrypted RDS instance is cheaper and simpler if the data isn't already FHIR-structured.",
+              costEstimate: {
+                min: 20,
+                max: isHighScale ? 250 : 80,
+                assumptions: "Dedicated db.t4g.medium instance (KMS-encrypted) with 50GB storage, isolated from the general application database.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: 90,
+            max: isHighScale ? 600 : 200,
+            assumptions: "HealthLake data store charges based on stored FHIR resources plus API request volume.",
+          },
+        };
+
+      case "deidentification":
+        return {
+          serviceName: "Amazon Comprehend Medical (PHI Detection & De-identification)",
+          alternatives: [
+            {
+              serviceName: "AWS Glue DataBrew (Custom Masking Rules)",
+              reason: "Chose Comprehend Medical because it uses NLP trained specifically to detect the 18 HIPAA identifiers in unstructured clinical text. DataBrew is cheaper for simple structured-field masking but requires hand-authored rules per field.",
+              costEstimate: {
+                min: 5,
+                max: isHighScale ? 80 : 25,
+                assumptions: "DataBrew job runs on a nightly batch schedule processing the PHI vault export.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: 10,
+            max: isHighScale ? 150 : 40,
+            assumptions: "Comprehend Medical priced per unit of text processed ($0.0010/100 characters), run as a nightly batch job over new PHI records.",
+          },
+        };
+
       default:
         return {
           serviceName: `AWS Mapped Service (${componentType})`,
@@ -625,6 +709,90 @@ export function getCloudMapping(
           },
         };
 
+      case "tokenization":
+        return {
+          serviceName: "Azure Key Vault + Dedicated Tokenization Microservice (Container Apps)",
+          alternatives: [
+            {
+              serviceName: "Third-Party Tokenization Vault (e.g. Basis Theory, VGS)",
+              reason: "Chose a self-managed Key Vault-backed microservice to keep full control of the tokenization boundary. A third-party vault offloads PCI-DSS scope entirely but adds a recurring per-transaction vendor fee and an external dependency in the payment path.",
+              costEstimate: {
+                min: 200,
+                max: isHighScale ? 1500 : 500,
+                assumptions: "Third-party tokenization vault per-transaction/per-token pricing plus a monthly platform fee.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: 45,
+            max: isHighScale ? 310 : 110,
+            assumptions: "Key Vault Premium (HSM-backed keys) + a small dedicated Container App (0.25 vCPU, 0.5GB RAM) running the tokenization service continuously.",
+          },
+        };
+
+      case "audit-log":
+        return {
+          serviceName: "Azure Blob Storage (Immutable/WORM Policy) + Azure Monitor",
+          alternatives: [
+            {
+              serviceName: "Azure Data Explorer (Audit Log Analytics)",
+              reason: "Chose Blob Storage with an immutability policy for cost-effective, provably immutable storage at scale. Data Explorer offers rich query analytics over the log history but at a materially higher baseline cost for simple append-only audit logging.",
+              costEstimate: {
+                min: 60,
+                max: isHighScale ? 400 : 150,
+                assumptions: "Data Explorer cluster with minimum compute SKU running continuously for log ingestion and query.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: 3,
+            max: isHighScale ? 60 : 15,
+            assumptions: "Blob Storage Hot tier with a time-based immutability policy + Azure Monitor log ingestion.",
+          },
+        };
+
+      case "phi-vault":
+        return {
+          serviceName: "Azure Health Data Services (FHIR API)",
+          alternatives: [
+            {
+              serviceName: "Azure Database for PostgreSQL (Encrypted, Dedicated PHI Instance)",
+              reason: "Chose Health Data Services because it's purpose-built for healthcare data (FHIR R4) with built-in HIPAA-eligible encryption and query tooling. A dedicated encrypted PostgreSQL instance is cheaper and simpler if the data isn't already FHIR-structured.",
+              costEstimate: {
+                min: 20,
+                max: isHighScale ? 250 : 80,
+                assumptions: "Dedicated Burstable B2ms instance (KMS-encrypted) with 50GB storage, isolated from the general application database.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: 90,
+            max: isHighScale ? 600 : 200,
+            assumptions: "Health Data Services FHIR service charges based on stored resources plus API request volume.",
+          },
+        };
+
+      case "deidentification":
+        return {
+          serviceName: "Azure Health Data De-identification Service",
+          alternatives: [
+            {
+              serviceName: "Azure Purview (Data Classification + Masking)",
+              reason: "Chose the purpose-built Health Data De-identification service because it directly implements the HIPAA Safe Harbor and Expert Determination methods. Purview is a more general data-governance/classification tool that needs custom masking rules configured per field.",
+              costEstimate: {
+                min: 5,
+                max: isHighScale ? 80 : 25,
+                assumptions: "Purview data map + classification scan running on a nightly batch schedule over the PHI vault export.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: 10,
+            max: isHighScale ? 150 : 40,
+            assumptions: "De-identification service priced per document/text unit processed, run as a nightly batch job over new PHI records.",
+          },
+        };
+
       default:
         return {
           serviceName: `Azure Mapped Service (${componentType})`,
@@ -911,6 +1079,90 @@ export function getCloudMapping(
             min: 0,
             max: isHighScale ? 40 : 0,
             assumptions: "Firebase Authentication free for standard phone/email accounts up to 50k MAUs.",
+          },
+        };
+
+      case "tokenization":
+        return {
+          serviceName: "Google Cloud KMS + Dedicated Tokenization Microservice (Cloud Run)",
+          alternatives: [
+            {
+              serviceName: "Third-Party Tokenization Vault (e.g. Basis Theory, VGS)",
+              reason: "Chose a self-managed KMS-backed microservice to keep full control of the tokenization boundary. A third-party vault offloads PCI-DSS scope entirely but adds a recurring per-transaction vendor fee and an external dependency in the payment path.",
+              costEstimate: {
+                min: 200,
+                max: isHighScale ? 1500 : 500,
+                assumptions: "Third-party tokenization vault per-transaction/per-token pricing plus a monthly platform fee.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: 35,
+            max: isHighScale ? 280 : 90,
+            assumptions: "Cloud KMS key usage fees + a small dedicated Cloud Run service (0.25 vCPU, 0.5GB RAM) running the tokenization service continuously.",
+          },
+        };
+
+      case "audit-log":
+        return {
+          serviceName: "Google Cloud Storage (Bucket Lock — Immutable) + Cloud Audit Logs",
+          alternatives: [
+            {
+              serviceName: "Google Cloud Logging (Log Analytics)",
+              reason: "Chose Cloud Storage with Bucket Lock for cost-effective, provably immutable storage at scale. Log Analytics offers rich SQL-based querying over the log history but at a materially higher baseline cost for simple append-only audit logging.",
+              costEstimate: {
+                min: 60,
+                max: isHighScale ? 400 : 150,
+                assumptions: "Log Analytics-linked bucket with extended retention and BigQuery-style query volume.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: 3,
+            max: isHighScale ? 60 : 15,
+            assumptions: "Cloud Storage Standard tier with a Bucket Lock retention policy + Cloud Audit Logs (Admin Activity logs are free).",
+          },
+        };
+
+      case "phi-vault":
+        return {
+          serviceName: "Google Cloud Healthcare API (FHIR Store)",
+          alternatives: [
+            {
+              serviceName: "Google Cloud SQL for PostgreSQL (Encrypted, Dedicated PHI Instance)",
+              reason: "Chose the Healthcare API because it's purpose-built for healthcare data (FHIR/HL7v2/DICOM) with built-in HIPAA-eligible encryption and query tooling. A dedicated encrypted Cloud SQL instance is cheaper and simpler if the data isn't already FHIR-structured.",
+              costEstimate: {
+                min: 20,
+                max: isHighScale ? 250 : 80,
+                assumptions: "Dedicated db-custom-1-3840 instance (KMS-encrypted) with 50GB storage, isolated from the general application database.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: 90,
+            max: isHighScale ? 600 : 200,
+            assumptions: "Healthcare API FHIR store charges based on stored resources plus API request/storage volume.",
+          },
+        };
+
+      case "deidentification":
+        return {
+          serviceName: "Google Cloud DLP API (De-identification Templates)",
+          alternatives: [
+            {
+              serviceName: "Cloud Healthcare API De-identify Operation",
+              reason: "Chose the standalone DLP API for flexible, reusable de-identification templates across any text/structured source. The Healthcare API's built-in de-identify operation is more convenient when the PHI is already stored as FHIR resources in the same service.",
+              costEstimate: {
+                min: 8,
+                max: isHighScale ? 120 : 35,
+                assumptions: "Healthcare API de-identify operation priced per FHIR resource processed, run as a nightly batch job.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: 10,
+            max: isHighScale ? 150 : 40,
+            assumptions: "Cloud DLP API priced per unit of data inspected/transformed, run as a nightly batch job over new PHI records.",
           },
         };
 

@@ -1,5 +1,5 @@
 import { db } from "@/db";
-import { conversations, requirements } from "@/db/schema";
+import { conversations, DEFAULT_INDUSTRY_CONTEXT, requirements } from "@/db/schema";
 import { extractRequirementsFromHistory } from "@/lib/llm";
 import { asc, desc, eq } from "drizzle-orm";
 import { NextResponse } from "next/server";
@@ -62,6 +62,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
         projectId: id,
         functional: extracted.functional,
         nonFunctional: extracted.nonFunctional,
+        industryContext: extracted.industryContext,
         version: nextVersion,
       })
       .returning();
@@ -92,6 +93,10 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
 
     const nextVersion = latest ? latest.version + 1 : 1;
 
+    // Manual edits via the requirements panel don't touch industry context — carry the
+    // latest detected value forward rather than letting the column default silently wipe it.
+    const industryContext = latest?.industryContext ?? DEFAULT_INDUSTRY_CONTEXT;
+
     // Always insert a new record for version history
     const [record] = await db
       .insert(requirements)
@@ -99,6 +104,7 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
         projectId: id,
         functional,
         nonFunctional,
+        industryContext,
         version: nextVersion,
       })
       .returning();

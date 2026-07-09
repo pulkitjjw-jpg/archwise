@@ -1,9 +1,10 @@
 import { db } from "@/db";
-import { architectures, projects, requirements } from "@/db/schema";
+import { architectures, DEFAULT_INDUSTRY_CONTEXT, projects, requirements } from "@/db/schema";
 import { validateAndGenerateArchitecture } from "@/lib/llm";
 import { getCloudMapping } from "@/lib/cloud-mapping";
 import { runRulesEngine } from "@/lib/rules-engine";
 import { runLldRulesEngine } from "@/lib/lld-rules";
+import { runIndustryRules } from "@/lib/industry-rules";
 import { desc, eq } from "drizzle-orm";
 import { NextResponse } from "next/server";
 
@@ -67,20 +68,30 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       functional: reqs.functional as string[],
       nonFunctional: reqs.nonFunctional as any,
     };
+    const industryContext = reqs.industryContext ?? DEFAULT_INDUSTRY_CONTEXT;
 
-    // 3. Run rules engine to produce baseline HLD
+    // 3. Run rules engine to produce baseline HLD, then layer industry-specific compliance
+    // components on top (audit log, tokenization, PHI vault, de-identification pipeline —
+    // see industry-rules.ts). A generic project (industry: "none") gets nothing extra here.
     const baseline = runRulesEngine(reqsContext);
+    const industryResult = runIndustryRules(industryContext, reqsContext.functional);
+
+    const allComponents = [...baseline.components, ...industryResult.components];
+    const allConnections = [...baseline.connections, ...industryResult.connections];
+    const allRulesTrace = [...baseline.rulesTrace, ...industryResult.rulesTrace];
 
     // 4. Resolve mappings, costs, and LLD baselines for AWS, Azure, and GCP for each component
-    const mappedBaselineComponents = baseline.components.map((c) => {
+    const mappedBaselineComponents = allComponents.map((c) => {
       const awsMapping = getCloudMapping("aws", c.type, c.id, reqsContext);
       const azureMapping = getCloudMapping("azure", c.type, c.id, reqsContext);
       const gcpMapping = getCloudMapping("gcp", c.type, c.id, reqsContext);
 
-      // Run LLD rules for all three clouds
-      const awsLld = runLldRulesEngine("aws", c.type, c.id, reqsContext);
-      const azureLld = runLldRulesEngine("azure", c.type, c.id, reqsContext);
-      const gcpLld = runLldRulesEngine("gcp", c.type, c.id, reqsContext);
+      // Run LLD rules for all three clouds. Passing industryContext lets the LLD engine add
+      // compliance-mandated config (encryption in transit, forced Multi-AZ for fintech, etc.)
+      // on top of whatever the scale/budget-driven baseline config already decided.
+      const awsLld = runLldRulesEngine("aws", c.type, c.id, reqsContext, undefined, industryContext);
+      const azureLld = runLldRulesEngine("azure", c.type, c.id, reqsContext, undefined, industryContext);
+      const gcpLld = runLldRulesEngine("gcp", c.type, c.id, reqsContext, undefined, industryContext);
 
       return {
         ...c,
@@ -154,14 +165,18 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     // 7. Validate, enrich and recommend provider with LLM, passing HLD + LLD baselines & previous components
     const enriched = await validateAndGenerateArchitecture(
       project.name,
-      reqsContext,
+      { ...reqsContext, industryContext },
       {
         components: mappedBaselineComponents,
-        connections: baseline.connections,
+        connections: allConnections,
       },
       providerCosts,
       latestArch ? (latestArch.hld as any).components : null
     );
+
+    // Merge deterministic industry-rule risks (e.g. data residency, processor-scope caveats)
+    // in alongside whatever risks the LLM itself surfaced from unspecified requirement fields.
+    enriched.risks = [...(enriched.risks || []), ...industryResult.risks];
 
     // 7b. Re-attach the deterministic rule-engine's "alternatives" (each carrying its own
     // costEstimate) onto the LLM's output. The LLM is intentionally not asked to reproduce
@@ -190,7 +205,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
           connections: enriched.connections,
         } as any,
         reasoning: {
-          decisions: baseline.rulesTrace.map((rule) => ({
+          decisions: allRulesTrace.map((rule) => ({
             component: "system",
             choice: rule,
             rationale: "Matched deterministic rule pattern in system requirements.",

@@ -1,5 +1,5 @@
 import { db } from "@/db";
-import { architectures, projects } from "@/db/schema";
+import { architectures, projects, requirements } from "@/db/schema";
 import { generateTerraformCode } from "@/lib/terraform-generator";
 import { desc, eq } from "drizzle-orm";
 import JSZip from "jszip";
@@ -36,12 +36,22 @@ export async function GET(
       return NextResponse.json({ error: "No architecture design found. Please generate one first." }, { status: 404 });
     }
 
-    // 3. Generate Terraform files map
+    // 3. Fetch the latest requirements to know if industry-specific compliance framing
+    // (PCI-DSS / HIPAA) belongs in the generated README.
+    const [reqs] = await db
+      .select()
+      .from(requirements)
+      .where(eq(requirements.projectId, id))
+      .orderBy(desc(requirements.version))
+      .limit(1);
+
+    // 4. Generate Terraform files map
     const filesMap = generateTerraformCode(
       providerParam,
       project.name,
       record.hld.components,
-      record.hld.connections
+      record.hld.connections,
+      reqs?.industryContext
     );
 
     // 4. Create ZIP archive using JSZip

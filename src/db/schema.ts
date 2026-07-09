@@ -25,6 +25,24 @@ export type RequirementContent = {
   [key: string]: any;
 };
 
+export type IndustryContext = {
+  industry: "fintech" | "healthtech" | "none";
+  rationale: string;
+  complianceAnswers: Array<{ question: string; answer: string }>;
+  flags: {
+    handlesCardDataDirectly?: boolean; // fintech
+    storesPHI?: boolean; // healthtech
+    dataResidency?: string; // healthtech
+  };
+};
+
+export const DEFAULT_INDUSTRY_CONTEXT: IndustryContext = {
+  industry: "none",
+  rationale: "",
+  complianceAnswers: [],
+  flags: {},
+};
+
 export const requirements = pgTable("requirements", {
   id: uuid("id").defaultRandom().primaryKey(),
   projectId: uuid("project_id")
@@ -32,6 +50,7 @@ export const requirements = pgTable("requirements", {
     .notNull(),
   functional: jsonb("functional").$type<RequirementContent>().notNull().default({}),
   nonFunctional: jsonb("non_functional").$type<RequirementContent>().notNull().default({}),
+  industryContext: jsonb("industry_context").$type<IndustryContext>().notNull().default(DEFAULT_INDUSTRY_CONTEXT),
   version: integer("version").notNull().default(1),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
