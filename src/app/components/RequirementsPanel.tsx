@@ -13,6 +13,17 @@ type RequirementsData = {
     teamMaturity: string;
     compliance: string;
   };
+  industryContext?: {
+    industry: "fintech" | "healthtech" | "none";
+    rationale: string;
+    complianceAnswers: Array<{ question: string; answer: string }>;
+    flags: Record<string, unknown>;
+  };
+};
+
+const INDUSTRY_BADGE: Record<"fintech" | "healthtech", { label: string; emoji: string }> = {
+  fintech: { label: "Fintech", emoji: "💳" },
+  healthtech: { label: "Healthtech", emoji: "🏥" },
 };
 
 interface RequirementsPanelProps {
@@ -81,10 +92,12 @@ export default function RequirementsPanel({
       const res = await fetch(`/api/projects/${projectId}/requirements`);
       if (res.ok) {
         const data = await res.json();
-        setRequirements(data.requirements);
-      } else if (res.status === 404 && isBrainstormComplete) {
-        // Auto-extract if brainstorm completed but no requirements exist yet
-        await handleExtract();
+        if (data.requirements) {
+          setRequirements(data.requirements);
+        } else if (isBrainstormComplete) {
+          // Auto-extract if brainstorm completed but no requirements exist yet
+          await handleExtract();
+        }
       }
     } catch (err) {
       console.error("Failed to load requirements:", err);
@@ -236,7 +249,16 @@ export default function RequirementsPanel({
       {/* Panel Header */}
       <div className="flex items-center justify-between border-b border-slate-100 pb-4">
         <div>
-          <h3 className="text-xl font-bold text-slate-950">System Requirements Workspace</h3>
+          <div className="flex items-center gap-2">
+            <h3 className="text-xl font-bold text-slate-950">System Requirements Workspace</h3>
+            {requirements.industryContext &&
+              requirements.industryContext.industry !== "none" && (
+                <span className="inline-flex items-center gap-1 rounded-full bg-cyan-50 border border-cyan-200 px-2.5 py-1 text-[10px] font-bold text-cyan-700 uppercase tracking-wider">
+                  {INDUSTRY_BADGE[requirements.industryContext.industry].emoji} Industry:{" "}
+                  {INDUSTRY_BADGE[requirements.industryContext.industry].label}
+                </span>
+              )}
+          </div>
           <p className="text-xs text-slate-500 mt-1">
             Review and refine the system parameters before generating high-level design recommendations.
           </p>

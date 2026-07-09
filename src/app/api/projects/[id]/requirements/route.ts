@@ -15,8 +15,11 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       .orderBy(desc(requirements.version))
       .limit(1);
 
+    // No requirements extracted yet is an expected, common state (e.g. brainstorm still in
+    // progress) — respond 200 with a null payload rather than 404, so routine polling from the
+    // client doesn't surface as a failed-request error in the browser console.
     if (!record) {
-      return NextResponse.json({ error: "Requirements not found" }, { status: 404 });
+      return NextResponse.json({ requirements: null });
     }
 
     return NextResponse.json({ requirements: record });

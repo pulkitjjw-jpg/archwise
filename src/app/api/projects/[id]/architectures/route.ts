@@ -5,6 +5,7 @@ import { getCloudMapping } from "@/lib/cloud-mapping";
 import { runRulesEngine } from "@/lib/rules-engine";
 import { runLldRulesEngine } from "@/lib/lld-rules";
 import { runIndustryRules } from "@/lib/industry-rules";
+import { computeArchitectureDiff } from "@/lib/architecture-diff";
 import { desc, eq } from "drizzle-orm";
 import { NextResponse } from "next/server";
 
@@ -31,8 +32,11 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       .orderBy(desc(architectures.createdAt))
       .limit(1);
 
+    // No architecture generated yet is an expected, common state (e.g. still gathering
+    // requirements) — respond 200 with a null payload rather than 404, so routine polling from
+    // the client doesn't surface as a failed-request error in the browser console.
     if (!record) {
-      return NextResponse.json({ error: "Architecture not found" }, { status: 404 });
+      return NextResponse.json({ architecture: null });
     }
 
     return NextResponse.json({ architecture: record });
@@ -231,7 +235,17 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       }
     });
 
-    // 8. Save new architecture version with all three cloud mappings, recommendations, and LLD specs
+    // 8. Compute the version-to-version diff deterministically in TypeScript (never from the
+    // LLM) so costDelta is always present and before/after values always come from the actual
+    // stored previous/new component records.
+    const diff = latestArch
+      ? computeArchitectureDiff(enriched.components, (latestArch.hld as any).components || [], {
+          defaultAddedReasoning: "Added in response to updated requirements.",
+          defaultChangeReasoning: "Updated in response to requirement changes.",
+        })
+      : undefined;
+
+    // 9. Save new architecture version with all three cloud mappings, recommendations, and LLD specs
     const [record] = await db
       .insert(architectures)
       .values({
@@ -252,13 +266,13 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
           assumptions: enriched.assumptions,
           risks: enriched.risks,
           recommendation: enriched.recommendation, // Persist recommended provider details
-          diff: enriched.diff, // Cache the calculated delta diff
+          diff, // Cache the calculated delta diff
         } as any,
         cloudProvider: "aws", // default display config
       })
       .returning();
 
-    // 9. Update project's current version
+    // 10. Update project's current version
     await db
       .update(projects)
       .set({ currentVersion: nextVersion })

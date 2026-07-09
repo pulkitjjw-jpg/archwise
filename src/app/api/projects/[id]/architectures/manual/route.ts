@@ -3,22 +3,9 @@ import { architectures, projects, requirements } from "@/db/schema";
 import { getCloudMapping } from "@/lib/cloud-mapping";
 import { runLldRulesEngine } from "@/lib/lld-rules";
 import { validateArchitectureLayout } from "@/lib/validation";
+import { calculateTotalCost, computeArchitectureDiff } from "@/lib/architecture-diff";
 import { desc, eq } from "drizzle-orm";
 import { NextResponse } from "next/server";
-
-// Helper to compute cost for a component mapping list
-function calculateTotalCost(components: any[], provider: "aws" | "azure" | "gcp") {
-  let min = 0;
-  let max = 0;
-  components.forEach((c) => {
-    const mapping = c.cloudMappings?.[provider];
-    if (mapping?.costEstimate) {
-      min += mapping.costEstimate.min || 0;
-      max += mapping.costEstimate.max || 0;
-    }
-  });
-  return { min, max };
-}
 
 export async function POST(
   request: Request,
@@ -176,118 +163,10 @@ export async function POST(
     }
 
     // 6. Compute diff against previous architecture version
-    const diff = {
-      added: [] as any[],
-      removed: [] as any[],
-      modified: [] as any[],
-      costDelta: {
-        aws: { min: 0, max: 0 },
-        azure: { min: 0, max: 0 },
-        gcp: { min: 0, max: 0 },
-      },
-    };
-
     const prevComponents = latestArch ? (latestArch.hld as any).components || [] : [];
-    const prevAwsTotal = latestArch ? calculateTotalCost(prevComponents, "aws") : { min: 0, max: 0 };
-    const prevAzureTotal = latestArch ? calculateTotalCost(prevComponents, "azure") : { min: 0, max: 0 };
-    const prevGcpTotal = latestArch ? calculateTotalCost(prevComponents, "gcp") : { min: 0, max: 0 };
-
-    diff.costDelta.aws = { min: awsCosts.min - prevAwsTotal.min, max: awsCosts.max - prevAwsTotal.max };
-    const newAzureTotal = calculateTotalCost(compiledComponents, "azure");
-    diff.costDelta.azure = { min: newAzureTotal.min - prevAzureTotal.min, max: newAzureTotal.max - prevAzureTotal.max };
-    const newGcpTotal = calculateTotalCost(compiledComponents, "gcp");
-    diff.costDelta.gcp = { min: newGcpTotal.min - prevGcpTotal.min, max: newGcpTotal.max - prevGcpTotal.max };
-
-    // Find Added & Modified
-    compiledComponents.forEach((newC: any) => {
-      const prevC = prevComponents.find((p: any) => p.id === newC.id);
-      if (!prevC) {
-        diff.added.push({
-          id: newC.id,
-          name: newC.name,
-          type: newC.type,
-          reasoning: newC.reasoning || "Manually added by user.",
-        });
-      } else {
-        const changes: any[] = [];
-        if (newC.name !== prevC.name) {
-          changes.push({
-            parameter: "Name",
-            oldVal: prevC.name,
-            newVal: newC.name,
-            reasoning: "Component renamed by user.",
-          });
-        }
-
-        (["aws", "azure", "gcp"] as const).forEach((prov) => {
-          const prevMapping = prevC.cloudMappings?.[prov];
-          const newMapping = newC.cloudMappings?.[prov];
-
-          // Service swap: the bound cloud service itself changed for this provider.
-          if (prevMapping && newMapping && prevMapping.serviceName !== newMapping.serviceName) {
-            changes.push({
-              parameter: `${prov.toUpperCase()} Service`,
-              oldVal: prevMapping.serviceName,
-              newVal: newMapping.serviceName,
-              reasoning: newMapping.swapReasoning || "Manually changed by user.",
-            });
-          }
-
-          const prevLld = prevMapping?.lld?.config || {};
-          const newLld = newMapping?.lld?.config || {};
-
-          Object.keys(newLld).forEach((key) => {
-            if (newLld[key] !== prevLld[key]) {
-              const oldVal = prevLld[key] || "none";
-              const newVal = newLld[key];
-              const paramReason =
-                newMapping?.lld?.reasoning?.[key] ||
-                "Manually updated by user.";
-              changes.push({
-                parameter: `${prov.toUpperCase()} ${key}`,
-                oldVal,
-                newVal,
-                reasoning: paramReason,
-              });
-            }
-          });
-
-          // Config keys that existed under the previous service but no longer apply
-          // (e.g. serverless "memory"/"timeout" keys disappearing after swapping to a
-          // container-based service, which uses "instanceSize"/"minInstances" instead).
-          Object.keys(prevLld).forEach((key) => {
-            if (!(key in newLld)) {
-              changes.push({
-                parameter: `${prov.toUpperCase()} ${key}`,
-                oldVal: prevLld[key],
-                newVal: "removed",
-                reasoning: "No longer applicable after the service change.",
-              });
-            }
-          });
-        });
-
-        if (changes.length > 0) {
-          diff.modified.push({
-            id: newC.id,
-            name: newC.name,
-            type: newC.type,
-            changes,
-          });
-        }
-      }
-    });
-
-    // Find Removed
-    prevComponents.forEach((prevC: any) => {
-      const newC = compiledComponents.find((n: any) => n.id === prevC.id);
-      if (!newC) {
-        diff.removed.push({
-          id: prevC.id,
-          name: prevC.name,
-          type: prevC.type,
-        });
-      }
+    const diff = computeArchitectureDiff(compiledComponents, prevComponents, {
+      defaultAddedReasoning: "Manually added by user.",
+      defaultChangeReasoning: "Manually changed by user.",
     });
 
     // 7. Save manual architecture version

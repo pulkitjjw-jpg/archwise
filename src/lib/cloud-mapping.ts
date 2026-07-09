@@ -1,3 +1,5 @@
+import { isRelationalDataNature } from "./rules-engine";
+
 export type CloudMapping = {
   serviceName: string;
   alternatives: Array<{
@@ -170,10 +172,7 @@ export function getCloudMapping(
 
       case "database":
         if (componentId === "database") {
-          const isRelational =
-            nfr.dataNature.toLowerCase().includes("relational") ||
-            nfr.dataNature.toLowerCase().includes("sql") ||
-            nfr.dataNature.toLowerCase().includes("invoice");
+          const isRelational = isRelationalDataNature(requirements);
           if (isRelational) {
             if (isLowBudget) {
               return {
@@ -543,10 +542,7 @@ export function getCloudMapping(
 
       case "database":
         if (componentId === "database") {
-          const isRelational =
-            nfr.dataNature.toLowerCase().includes("relational") ||
-            nfr.dataNature.toLowerCase().includes("sql") ||
-            nfr.dataNature.toLowerCase().includes("invoice");
+          const isRelational = isRelationalDataNature(requirements);
           if (isRelational) {
             if (isLowBudget) {
               return {
@@ -916,10 +912,7 @@ export function getCloudMapping(
 
       case "database":
         if (componentId === "database") {
-          const isRelational =
-            nfr.dataNature.toLowerCase().includes("relational") ||
-            nfr.dataNature.toLowerCase().includes("sql") ||
-            nfr.dataNature.toLowerCase().includes("invoice");
+          const isRelational = isRelationalDataNature(requirements);
           if (isRelational) {
             if (isLowBudget) {
               return {

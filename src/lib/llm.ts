@@ -40,6 +40,13 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Gemini occasionally apologizes for a previous malformed-JSON attempt even after a
+// successful retry, since the corrective note lives earlier in the same conversation.
+// That apology has no business reaching the user-facing chat message.
+function looksLikeLeakedApology(message: string): boolean {
+  return /^\s*(apolog|i apologize|i'm sorry|my apologies|sorry[,!]? )/i.test(message);
+}
+
 /**
  * Calls OpenRouter with the given messages and parses the response as JSON, retrying on
  * both request failures and JSON parse failures (Gemini 2.5 Flash occasionally returns a
@@ -149,6 +156,8 @@ Evaluate the user's reported changes:
 1. If the reported changes are clear and you have enough details to update the requirements, respond with a confirmation message outlining what you've understood and state that you are updating the design. In this case, set "isComplete" to true and transition "stage" to "requirement_gathering".
 2. If some aspects are unclear or you need more context (e.g., they ask for real-time notifications but you don't know the expected throughput, or they mention scaling but no user count), ask exactly ONE follow-up question to clarify. Set "isComplete" to false and keep "stage" as "growth_trigger".
 
+Never apologize or reference previous attempts, formatting issues, or corrections in your response — respond naturally as if this is the only attempt.
+
 You MUST respond with a raw JSON object matching this TypeScript structure:
 {
   "message": string (your conversational follow-up question or update confirmation),
@@ -182,6 +191,7 @@ Rules:
 - Be conversational. Acknowledge their previous answer and build on it.
 - Stop Condition: If the user provides sufficient details on these points, or if the conversation history has reached 6 or more turns (count the messages in history), set "isComplete" to true and transition "stage" to "requirement_gathering". Give a warm concluding message summarizing that you are ready to synthesize requirements.
 - If the user gives very short or vague answers repeatedly, do not get stuck. Pivot and wrap up the brainstorm after a maximum of 6 turns total.
+- Never apologize or reference previous attempts, formatting issues, or corrections in your response — respond naturally as if this is the only attempt.
 
 You MUST respond with a raw JSON object matching this TypeScript structure:
 {
@@ -203,9 +213,20 @@ Do not include markdown code block formatting (like \`\`\`json) in your raw resp
   ];
 
   try {
-    return await callLLMWithRetry<BrainstormResponse>(apiKey, messagesForApi, {
+    let result = await callLLMWithRetry<BrainstormResponse>(apiKey, messagesForApi, {
       label: "Brainstorm turn generation",
     });
+
+    if (looksLikeLeakedApology(result.message)) {
+      console.error(
+        "[Brainstorm turn generation] Detected leaked apology text in response, re-requesting with a clean prompt"
+      );
+      result = await callLLMWithRetry<BrainstormResponse>(apiKey, messagesForApi, {
+        label: "Brainstorm turn generation (apology cleanup)",
+      });
+    }
+
+    return result;
   } catch (err) {
     console.error("Brainstorm turn generation exhausted all retries, falling back to a generic question:", err);
     return {
@@ -310,21 +331,6 @@ export async function validateAndGenerateArchitecture(
     rationale: string;
     keyTradeoffs: string[];
   };
-  diff?: {
-    added: Array<{ id: string; name: string; type: string; reasoning: string }>;
-    removed: Array<{ id: string; name: string; type: string }>;
-    modified: Array<{
-      id: string;
-      name: string;
-      type: string;
-      changes: Array<{ parameter: string; oldVal: string; newVal: string; reasoning: string }>;
-    }>;
-    costDelta: {
-      aws: { min: number; max: number };
-      azure: { min: number; max: number };
-      gcp: { min: number; max: number };
-    };
-  };
 }> {
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) {
@@ -343,13 +349,7 @@ Your task is to:
    - EXCEPTION: for compliance components (type 'tokenization', 'audit-log', 'phi-vault', 'deidentification'), the baseline 'reasoning' and 'lld.reasoning' were already written by a deterministic compliance rule engine citing the specific regulation (PCI-DSS/HIPAA) that mandated them. Keep those as-is unless you have a specific correction — do not rewrite them at length, to keep your output concise.
 3. List any 'assumptions' or 'risks' that are present in the design due to requirements being marked as "not_specified".
 4. Determine the Recommended Cloud Provider ('aws', 'azure', or 'gcp') and write a short paragraph rationale explaining why it is recommended over the others, along with a list of key trade-offs.
-5. If the previous version's components list is provided:
-   - Compare the newly generated architecture components against the previous ones by matching their component 'id'.
-   - Identify structural and configuration changes and output a 'diff' block:
-     * 'added': components present in the new set but not in the previous set. Provide a 'reasoning' string explaining why this new component was introduced in response to the user's growth trigger.
-     * 'removed': components present in the previous set but not in the new set.
-     * 'modified': components present in both, but where cloud service names, cost bands, or LLD configuration parameters (like instances, memory size) have changed. Compile a list of these 'changes', detailing the parameter name, old value, new value, and a short 'reasoning' explaining why it was modified (e.g. "Scaled instances to handle 10x traffic increase").
-     * 'costDelta': Calculate the monthly cost difference (New Min - Prev Min, New Max - Prev Max) for each of the three cloud providers.
+   - If the previous version's components list is provided, that's for your context only (e.g. to avoid contradicting a prior decision) — the server computes the version-to-version diff itself; do not attempt to summarize or list changes yourself.
 
 You MUST respond with a raw JSON object matching this structure:
 {
@@ -401,25 +401,6 @@ You MUST respond with a raw JSON object matching this structure:
     "recommendedProvider": "aws" | "azure" | "gcp",
     "rationale": string,
     "keyTradeoffs": [string, string, ...]
-  },
-  "diff": {
-    "added": [ { "id": string, "name": string, "type": string, "reasoning": string } ],
-    "removed": [ { "id": string, "name": string, "type": string } ],
-    "modified": [
-      {
-        "id": string,
-        "name": string,
-        "type": string,
-        "changes": [
-          { "parameter": string, "oldVal": string, "newVal": string, "reasoning": string }
-        ]
-      }
-    ],
-    "costDelta": {
-      "aws": { "min": number, "max": number },
-      "azure": { "min": number, "max": number },
-      "gcp": { "min": number, "max": number }
-    }
   }
 }
 Do not use markdown code block formatting (like \`\`\`json) in your response, return only the raw JSON.

@@ -19,6 +19,25 @@ export type AbstractArchitecture = {
   rulesTrace: string[];
 };
 
+// Shared with cloud-mapping.ts so the abstract component's label ("Relational Database" vs.
+// "Document Database") and the cloud service actually selected for it never disagree — both
+// must derive the relational-vs-NoSQL decision from the exact same signal.
+export function isRelationalDataNature(requirements: {
+  functional: string[];
+  nonFunctional: { dataNature: string };
+}): boolean {
+  const dataLower = requirements.nonFunctional.dataNature.toLowerCase();
+  const funcStr = requirements.functional.join(" ").toLowerCase();
+  return (
+    dataLower.includes("relational") ||
+    dataLower.includes("transaction") ||
+    dataLower.includes("invoice") ||
+    dataLower.includes("sql") ||
+    funcStr.includes("invoice") ||
+    funcStr.includes("transaction")
+  );
+}
+
 export function runRulesEngine(requirements: {
   functional: string[];
   nonFunctional: {
@@ -103,14 +122,7 @@ export function runRulesEngine(requirements: {
   }
 
   // 3. Storage & Database
-  const dataLower = nfr.dataNature.toLowerCase();
-  const isRelational =
-    dataLower.includes("relational") ||
-    dataLower.includes("transaction") ||
-    dataLower.includes("invoice") ||
-    dataLower.includes("sql") ||
-    funcStr.includes("invoice") ||
-    funcStr.includes("transaction");
+  const isRelational = isRelationalDataNature(requirements);
 
   if (isRelational) {
     components.push({
@@ -136,6 +148,7 @@ export function runRulesEngine(requirements: {
   connections.push({ from: "compute", to: "database", protocol: "SQL/TCP" });
 
   // 4. Object Storage (if upload media)
+  const dataLower = nfr.dataNature.toLowerCase();
   const needsObjectStore =
     dataLower.includes("media") ||
     dataLower.includes("file") ||

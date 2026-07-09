@@ -14,6 +14,19 @@ const PROVIDER_LABELS: Record<CloudProviderKey, string> = {
   private: "Private",
 };
 
+// Honest, staged descriptions of what the generation call is actually doing server-side —
+// shown progressively (not tied to real server progress events) to make the ~30-45s wait
+// legible instead of a single unmoving spinner.
+const GENERATION_STAGES = [
+  "Analyzing your requirements...",
+  "Running architecture rules engine...",
+  "Validating decisions with AI...",
+  "Mapping to cloud services (AWS/Azure/GCP)...",
+  "Computing LLD configurations...",
+  "Finalizing cost estimates...",
+];
+const GENERATION_STAGE_INTERVAL_MS = 8000;
+
 type CloudMapping = {
   serviceName: string;
   alternatives: Array<{
@@ -115,6 +128,7 @@ export default function ArchitectureWorkspace({
   const [architecture, setArchitecture] = useState<ArchitectureData | null>(null);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
+  const [generationStageIndex, setGenerationStageIndex] = useState(0);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [activeProvider, setActiveProvider] = useState<CloudProviderKey>("aws");
   const [viewMode, setViewMode] = useState<"diagram" | "comparison">("diagram");
@@ -168,7 +182,7 @@ export default function ArchitectureWorkspace({
       const res = await fetch(`/api/projects/${projectId}/architectures`);
       if (res.ok) {
         const data = await res.json();
-        setArchitecture(data.architecture);
+        setArchitecture(data.architecture || null);
       } else {
         setArchitecture(null);
       }
@@ -187,6 +201,20 @@ export default function ArchitectureWorkspace({
   useEffect(() => {
     setIsLldExpanded(false);
   }, [selectedNodeId]);
+
+  // Advance the staged loading message every few seconds while a generation call is
+  // in-flight. These stages are honest labels for what the server is doing during the call,
+  // not real progress events — they just make the long single-request wait legible.
+  useEffect(() => {
+    if (!generating) {
+      setGenerationStageIndex(0);
+      return;
+    }
+    const interval = setInterval(() => {
+      setGenerationStageIndex((prev) => Math.min(prev + 1, GENERATION_STAGES.length - 1));
+    }, GENERATION_STAGE_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [generating]);
 
   // Determine if critical fields are specified
   const isScaleUnspecified =
@@ -622,6 +650,8 @@ export default function ArchitectureWorkspace({
   const awsTotal = calculateTotalCost("aws");
   const azureTotal = calculateTotalCost("azure");
   const gcpTotal = calculateTotalCost("gcp");
+  const k8sTotal = calculateTotalCost("kubernetes");
+  const privateTotal = calculateTotalCost("private");
 
   const totalMinCost = calculateTotalCost(activeProvider).min;
   const totalMaxCost = calculateTotalCost(activeProvider).max;
@@ -697,7 +727,9 @@ export default function ArchitectureWorkspace({
         <div className="h-10 w-10 animate-spin rounded-full border-4 border-cyan-600 border-t-transparent flex items-center justify-center shadow-md">
           🌀
         </div>
-        <span className="mt-4 text-base font-semibold text-slate-900 font-bold">Synthesizing Architecture Comparison...</span>
+        <span className="mt-4 text-base font-semibold text-slate-900 font-bold">
+          {GENERATION_STAGES[generationStageIndex]}
+        </span>
         <span className="mt-2 text-xs text-slate-500 max-w-sm">
           Generating cost metrics and resolving senior architect cloud recommendations across AWS, Azure, and GCP.
         </span>
@@ -1651,7 +1683,7 @@ export default function ArchitectureWorkspace({
             {/* Side-by-Side Comparison Table */}
             <div className="rounded-[2rem] border border-slate-200 bg-white shadow-sm overflow-hidden">
               <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse table-fixed min-w-[700px]">
+                <table className="w-full text-left border-collapse table-fixed min-w-[1100px]">
                   <thead>
                     <tr className="bg-slate-50 border-b border-slate-200">
                       <th className="p-4 text-xs font-bold text-slate-500 uppercase tracking-wider w-[180px]">
@@ -1666,6 +1698,12 @@ export default function ArchitectureWorkspace({
                       <th className="p-4 text-xs font-bold text-slate-500 uppercase tracking-wider">
                         Google Cloud Platform (GCP)
                       </th>
+                      <th className="p-4 text-xs font-bold text-slate-500 uppercase tracking-wider">
+                        Kubernetes
+                      </th>
+                      <th className="p-4 text-xs font-bold text-slate-500 uppercase tracking-wider">
+                        Private Cloud
+                      </th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-xs font-medium text-slate-700">
@@ -1673,6 +1711,8 @@ export default function ArchitectureWorkspace({
                       const awsM = getMappingForProvider(c, "aws");
                       const azureM = getMappingForProvider(c, "azure");
                       const gcpM = getMappingForProvider(c, "gcp");
+                      const k8sM = getMappingForProvider(c, "kubernetes");
+                      const privateM = getMappingForProvider(c, "private");
 
                       return (
                         <tr key={c.id} className="hover:bg-slate-50/40">
@@ -1728,6 +1768,36 @@ export default function ArchitectureWorkspace({
                               </div>
                             )}
                           </td>
+
+                          {/* Kubernetes Column */}
+                          <td className="p-4 align-top space-y-1">
+                            <div className="font-extrabold text-slate-900">{k8sM?.serviceName || "—"}</div>
+                            {k8sM?.costEstimate && (
+                              <div className="text-[11px] text-emerald-700 font-bold">
+                                ${k8sM.costEstimate.min} - ${k8sM.costEstimate.max}/mo
+                              </div>
+                            )}
+                            {k8sM?.costEstimate.assumptions && (
+                              <div className="text-[10px] text-slate-400 leading-normal font-medium">
+                                {k8sM.costEstimate.assumptions}
+                              </div>
+                            )}
+                          </td>
+
+                          {/* Private Cloud Column */}
+                          <td className="p-4 align-top space-y-1">
+                            <div className="font-extrabold text-slate-900">{privateM?.serviceName || "—"}</div>
+                            {privateM?.costEstimate && (
+                              <div className="text-[11px] text-emerald-700 font-bold">
+                                ${privateM.costEstimate.min} - ${privateM.costEstimate.max}/mo
+                              </div>
+                            )}
+                            {privateM?.costEstimate.assumptions && (
+                              <div className="text-[10px] text-slate-400 leading-normal font-medium">
+                                {privateM.costEstimate.assumptions}
+                              </div>
+                            )}
+                          </td>
                         </tr>
                       );
                     })}
@@ -1758,6 +1828,12 @@ export default function ArchitectureWorkspace({
                             {getProviderCostDeltaString("gcp")}
                           </div>
                         )}
+                      </td>
+                      <td className="p-4 text-xs text-emerald-800 font-extrabold">
+                        <div>${k8sTotal.min} - ${k8sTotal.max}/mo</div>
+                      </td>
+                      <td className="p-4 text-xs text-emerald-800 font-extrabold">
+                        <div>${privateTotal.min} - ${privateTotal.max}/mo</div>
                       </td>
                     </tr>
                   </tbody>
