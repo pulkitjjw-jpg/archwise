@@ -75,10 +75,14 @@ export async function POST(
       const awsMapping = getCloudMapping("aws", c.type, c.id, reqsContext);
       const azureMapping = getCloudMapping("azure", c.type, c.id, reqsContext);
       const gcpMapping = getCloudMapping("gcp", c.type, c.id, reqsContext);
+      const k8sMapping = getCloudMapping("kubernetes", c.type, c.id, reqsContext);
+      const privateMapping = getCloudMapping("private", c.type, c.id, reqsContext);
 
       const awsLld = runLldRulesEngine("aws", c.type, c.id, reqsContext, undefined, industryContext);
       const azureLld = runLldRulesEngine("azure", c.type, c.id, reqsContext, undefined, industryContext);
       const gcpLld = runLldRulesEngine("gcp", c.type, c.id, reqsContext, undefined, industryContext);
+      const k8sLld = runLldRulesEngine("kubernetes", c.type, c.id, reqsContext, undefined, industryContext);
+      const privateLld = runLldRulesEngine("private", c.type, c.id, reqsContext, undefined, industryContext);
 
       return {
         ...c,
@@ -114,6 +118,24 @@ export async function POST(
             lld: {
               config: gcpLld.config,
               reasoning: gcpLld.reasoning,
+            },
+          },
+          kubernetes: {
+            serviceName: k8sMapping.serviceName,
+            alternatives: k8sMapping.alternatives,
+            costEstimate: k8sMapping.costEstimate,
+            lld: {
+              config: k8sLld.config,
+              reasoning: k8sLld.reasoning,
+            },
+          },
+          private: {
+            serviceName: privateMapping.serviceName,
+            alternatives: privateMapping.alternatives,
+            costEstimate: privateMapping.costEstimate,
+            lld: {
+              config: privateLld.config,
+              reasoning: privateLld.reasoning,
             },
           },
         },

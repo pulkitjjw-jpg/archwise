@@ -164,3 +164,37 @@ export function validateArchitectureLayout(
     warnings,
   };
 }
+
+// Same soft-warning philosophy as validateArchitectureLayout above (informational, never
+// blocking) but scoped to a single concern — the currently-selected deployment target versus
+// the team's stated operational maturity — so it can be checked independently of whether the
+// user is actively editing the diagram. Kubernetes and private cloud both trade managed-service
+// simplicity for self-managed operational surface area; a low-maturity/small team taking that on
+// is exactly the kind of judgment call this tool should flag, not silently allow.
+export function getProviderMaturityWarning(
+  activeProvider: string,
+  requirements?: {
+    nonFunctional: {
+      teamMaturity: string;
+      budget: string;
+    };
+  }
+): string | null {
+  if (activeProvider !== "kubernetes" && activeProvider !== "private") return null;
+  if (!requirements?.nonFunctional) return null;
+
+  const teamLower = requirements.nonFunctional.teamMaturity.toLowerCase();
+  const budgetLower = requirements.nonFunctional.budget.toLowerCase();
+
+  const isLowMaturity =
+    teamLower.includes("junior") ||
+    teamLower.includes("small") ||
+    teamLower.includes("new") ||
+    teamLower === "not_specified";
+  const isTightBudget = budgetLower.includes("tight") || budgetLower.includes("low");
+
+  if (!isLowMaturity && !isTightBudget) return null;
+
+  const platform = activeProvider === "kubernetes" ? "Kubernetes" : "a private cloud/on-premises deployment";
+  return `${platform} significantly increases operational complexity — self-managed failover, patching, backups, and scaling all become your team's responsibility instead of a managed service's. Given your stated team size/maturity, consider a managed cloud provider (AWS/Azure/GCP) unless there's a specific reason (compliance, cost at extreme scale, existing infrastructure) that requires this.`;
+}

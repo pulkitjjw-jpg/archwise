@@ -1173,6 +1173,562 @@ export function getCloudMapping(
           costEstimate: { min: 0, max: 0, assumptions: "Generic GCP component." },
         };
     }
+  } else if (provider === "kubernetes") {
+    // Cloud-agnostic — costs here are infrastructure share (pod resource requests, PVs) on
+    // top of cluster capacity you provision separately (EKS/GKE/AKS/self-hosted), not managed
+    // service billing. isLowOpsCapacity mirrors rules-engine.ts's isTeamJunior/isBudgetTight
+    // logic to decide when to steer toward an external managed dependency instead of
+    // self-hosting stateful workloads on the cluster.
+    const isLowOpsCapacity =
+      isLowBudget || teamLower.includes("junior") || teamLower.includes("small") || teamLower === "not_specified";
+
+    switch (componentType) {
+      case "cdn":
+        return {
+          serviceName: "Ingress-NGINX + cert-manager (Cluster-Level TLS)",
+          alternatives: [
+            {
+              serviceName: "External CDN (Cloudflare/Fastly) in Front of Ingress",
+              reason: "Chose in-cluster Ingress-NGINX for a fully self-contained setup. An external CDN adds real edge caching/offload for static assets but introduces a dependency outside the cluster and its own billing.",
+              costEstimate: {
+                min: isHighScale ? 20 : 0,
+                max: isHighScale ? 150 : 20,
+                assumptions: "Third-party CDN usage-based pricing layered in front of the cluster Ingress for static asset offload.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: 5,
+            max: isHighScale ? 40 : 15,
+            assumptions: "Ingress-NGINX controller (2 replicas) + cert-manager pods running within existing cluster capacity — incremental infra cost only, no edge network.",
+          },
+        };
+
+      case "compute":
+        if (componentId === "worker") {
+          return {
+            serviceName: "Deployment (Worker Pool) + KEDA (Event-Driven Autoscaling)",
+            alternatives: [
+              {
+                serviceName: "CronJob (Scheduled/Batch-Only Workers)",
+                reason: "Chose KEDA to scale worker pods in direct response to queue depth. A CronJob is simpler and cheaper but only suits fixed-schedule batch work, not reactive queue processing.",
+                costEstimate: {
+                  min: 5,
+                  max: isHighScale ? 60 : 20,
+                  assumptions: "CronJob pods only run on their configured schedule, so cost is proportional to job duration rather than continuous replica count.",
+                },
+              },
+            ],
+            costEstimate: {
+              min: 10,
+              max: isHighScale ? 150 : 40,
+              assumptions: "Worker pod resource requests scaled by KEDA based on queue depth, plus the KEDA operator's own small footprint.",
+            },
+          };
+        }
+
+        return {
+          serviceName: "Deployment + HorizontalPodAutoscaler (HPA)",
+          alternatives: [
+            {
+              serviceName: "Knative Serving (Scale-to-Zero)",
+              reason: "Chose standard Deployment+HPA for predictable steady-state load. Knative Serving scales pods to zero when idle, which suits spiky/intermittent traffic better, but adds cold-start latency and an extra control-plane component to operate.",
+              costEstimate: {
+                min: 0,
+                max: isHighScale ? 300 : 80,
+                assumptions: "Knative Serving scales to zero replicas when idle, so cost tracks actual request volume rather than a constant baseline.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: isHighScale ? 60 : 15,
+            max: isHighScale ? 400 : 100,
+            assumptions: "Pod resource requests (CPU/memory) as a share of overall cluster node cost; assumes cluster capacity is provisioned/billed separately.",
+          },
+        };
+
+      case "database":
+        if (isLowOpsCapacity) {
+          return {
+            serviceName: "External Managed Database (e.g. RDS/Cloud SQL) + K8s Secret Binding",
+            alternatives: [
+              {
+                serviceName: "StatefulSet (Self-Managed PostgreSQL, e.g. CloudNativePG)",
+                reason: "Strongly recommended external managed database given the team's low operational maturity/tight budget — self-managing a stateful database on Kubernetes (failover, backups, patching, upgrades) is a significant ops burden that a managed service absorbs for you.",
+                costEstimate: {
+                  min: 20,
+                  max: isHighScale ? 200 : 60,
+                  assumptions: "Persistent volume storage + pod resource requests for a self-managed PostgreSQL StatefulSet (e.g. via the CloudNativePG operator); excludes managed-service reliability guarantees.",
+                },
+              },
+            ],
+            costEstimate: {
+              min: 15,
+              max: isHighScale ? 300 : 100,
+              assumptions: "External managed database service billed by whichever cloud host the cluster runs on, connected in via an ExternalName Service + Kubernetes Secret.",
+            },
+          };
+        }
+        return {
+          serviceName: "StatefulSet (Self-Managed PostgreSQL, e.g. CloudNativePG)",
+          alternatives: [
+            {
+              serviceName: "External Managed Database (e.g. RDS/Cloud SQL) + K8s Secret Binding",
+              reason: "Chose self-managed for full control and to avoid a dependency outside the cluster, given adequate operational maturity to run it. A managed database removes failover/backup/patching burden entirely at the cost of that control.",
+              costEstimate: {
+                min: 15,
+                max: isHighScale ? 300 : 100,
+                assumptions: "External managed database service billed by whichever cloud host the cluster runs on, connected in via an ExternalName Service + Kubernetes Secret.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: 20,
+            max: isHighScale ? 200 : 60,
+            assumptions: "Persistent volume storage + pod resource requests for a self-managed PostgreSQL StatefulSet (e.g. via the CloudNativePG operator); excludes managed-service reliability guarantees.",
+          },
+        };
+
+      case "storage":
+        return {
+          serviceName: "MinIO (Self-Hosted S3-Compatible, Helm Chart)",
+          alternatives: [
+            {
+              serviceName: "External Object Storage (e.g. S3/GCS) via K8s Secret",
+              reason: "Chose MinIO to keep object storage inside the cluster's own infrastructure footprint. An external provider removes disk capacity planning and backup responsibility for the object store entirely.",
+              costEstimate: {
+                min: 1,
+                max: isHighScale ? 80 : 15,
+                assumptions: "External object storage billed by the cloud host, connected in via a Kubernetes Secret holding provider credentials.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: 10,
+            max: isHighScale ? 120 : 40,
+            assumptions: "MinIO StatefulSet with persistent volumes for object storage; requires its own disk capacity provisioning and backup strategy.",
+          },
+        };
+
+      case "queue":
+        return {
+          serviceName: "RabbitMQ (Helm Chart, Bitnami)",
+          alternatives: [
+            {
+              serviceName: "NATS JetStream (Helm Chart)",
+              reason: "Chose RabbitMQ for its mature tooling and broad client library support. NATS JetStream is lighter-weight and higher-throughput but has a smaller operational ecosystem and less mature management tooling.",
+              costEstimate: {
+                min: 8,
+                max: isHighScale ? 100 : 30,
+                assumptions: "NATS JetStream StatefulSet (3-node cluster) with persistent volumes — generally lighter resource footprint than RabbitMQ.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: 15,
+            max: isHighScale ? 150 : 40,
+            assumptions: "RabbitMQ StatefulSet (3-node cluster for HA) via the Bitnami Helm chart, with persistent volumes.",
+          },
+        };
+
+      case "cache":
+        return {
+          serviceName: "Redis (Helm Chart, Bitnami)",
+          alternatives: [
+            {
+              serviceName: "External Managed Cache (e.g. ElastiCache/Memorystore)",
+              reason: "Chose self-managed Redis to avoid a dependency outside the cluster. A managed cache removes node failover and version-upgrade responsibility at the cost of that independence.",
+              costEstimate: {
+                min: 12,
+                max: isHighScale ? 90 : 25,
+                assumptions: "Managed cache service billed by the cloud host, reached from in-cluster pods over a private network path.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: 10,
+            max: isHighScale ? 100 : 30,
+            assumptions: "Redis StatefulSet (Bitnami Helm chart) with a persistent volume for optional AOF persistence.",
+          },
+        };
+
+      case "auth":
+        return {
+          serviceName: "Keycloak (Helm Chart)",
+          alternatives: [
+            {
+              serviceName: "External OIDC Provider (e.g. Auth0/Cognito)",
+              reason: "Chose self-hosted Keycloak to keep identity fully inside the cluster's own infrastructure. An external OIDC provider removes the operational burden of running and patching an identity server at the cost of a per-MAU vendor fee.",
+              costEstimate: {
+                min: 0,
+                max: isHighScale ? 250 : 35,
+                assumptions: "External OIDC provider (e.g. Auth0/Cognito) paid-tier pricing above its free-tier MAU threshold.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: 15,
+            max: isHighScale ? 100 : 35,
+            assumptions: "Keycloak Deployment (2+ replicas for HA) backed by its own small PostgreSQL StatefulSet, via the Keycloak Operator or Bitnami Helm chart.",
+          },
+        };
+
+      case "tokenization":
+        return {
+          serviceName: "HashiCorp Vault (Helm Chart) + Dedicated Tokenization Deployment",
+          alternatives: [
+            {
+              serviceName: "External Tokenization Vault (e.g. Basis Theory, VGS)",
+              reason: "Chose self-hosted Vault to keep the tokenization boundary and key material entirely inside cluster-managed infrastructure. A third-party vault offloads PCI-DSS scope entirely but adds a recurring per-transaction vendor fee and an external dependency in the payment path.",
+              costEstimate: {
+                min: 200,
+                max: isHighScale ? 1500 : 500,
+                assumptions: "Third-party tokenization vault per-transaction/per-token pricing plus a monthly platform fee.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: 40,
+            max: isHighScale ? 350 : 120,
+            assumptions: "Vault StatefulSet in HA mode (3 replicas, Raft storage backend) + a small dedicated tokenization Deployment.",
+          },
+        };
+
+      case "audit-log":
+        return {
+          serviceName: "Falco + Audit Sink (Fluentd → Immutable Object Store)",
+          alternatives: [
+            {
+              serviceName: "Self-Hosted SIEM (e.g. Wazuh)",
+              reason: "Chose Falco for its purpose-built Kubernetes runtime security/audit event detection. A full SIEM like Wazuh offers broader correlation and alerting but is materially heavier to operate for audit-log-only needs.",
+              costEstimate: {
+                min: 30,
+                max: isHighScale ? 250 : 90,
+                assumptions: "Wazuh manager + indexer StatefulSets with persistent volumes for the full SIEM stack.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: 15,
+            max: isHighScale ? 150 : 50,
+            assumptions: "Falco DaemonSet (one pod per node, runtime audit events) + a Fluentd sidecar shipping logs to an immutable MinIO bucket or external object store.",
+          },
+        };
+
+      case "phi-vault":
+        return {
+          serviceName: "Encrypted PVC (StorageClass: Encrypted) + Sealed Secrets",
+          alternatives: [
+            {
+              serviceName: "External HIPAA-Eligible Managed Database",
+              reason: "Chose an in-cluster encrypted PersistentVolumeClaim with Sealed Secrets for credential management to keep PHI inside cluster-managed infrastructure. An external managed database shifts encryption/backup/patching responsibility to the provider at the cost of a dependency outside the cluster.",
+              costEstimate: {
+                min: 20,
+                max: isHighScale ? 250 : 80,
+                assumptions: "External HIPAA-eligible managed database service billed by the cloud host, isolated in its own private subnet.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: 25,
+            max: isHighScale ? 250 : 80,
+            assumptions: "Dedicated StatefulSet backed by an encrypted-at-rest StorageClass (e.g. cloud-provider EBS/PD with KMS, or LUKS-encrypted local storage) + Sealed Secrets for credential management.",
+          },
+        };
+
+      case "deidentification":
+        return {
+          serviceName: "Microsoft Presidio (Self-Hosted, Helm/Deployment)",
+          alternatives: [
+            {
+              serviceName: "Batch CronJob with Custom NLP Masking Rules",
+              reason: "Chose Presidio because it's a purpose-built open-source PHI/PII detection and anonymization toolkit. A hand-rolled CronJob with custom masking rules is cheaper to run but requires maintaining detection logic yourselves.",
+              costEstimate: {
+                min: 5,
+                max: isHighScale ? 80 : 25,
+                assumptions: "Lightweight CronJob pod running custom masking rules on a nightly schedule, no dedicated NLP model serving.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: 10,
+            max: isHighScale ? 120 : 35,
+            assumptions: "Presidio Analyzer + Anonymizer Deployments, invoked by a nightly CronJob-triggered batch process over new PHI records.",
+          },
+        };
+
+      default:
+        return {
+          serviceName: `Kubernetes Mapped Workload (${componentType})`,
+          alternatives: [],
+          costEstimate: { min: 0, max: 0, assumptions: "Generic in-cluster workload." },
+        };
+    }
+  } else if (provider === "private") {
+    // On-premises / private cloud (VMware, OpenStack, bare-metal). Conservative by design:
+    // no elastic autoscaling, no managed-service fallbacks — every stateful/managed dependency
+    // that a public cloud would absorb becomes an explicit, flagged ops burden here. Cost bands
+    // are amortized monthly hardware/licensing estimates, not cloud spend.
+    switch (componentType) {
+      case "cdn":
+        return {
+          serviceName: "Reverse Proxy (NGINX/HAProxy) — No CDN Edge Network On-Premises",
+          alternatives: [
+            {
+              serviceName: "Hybrid: External CDN in Front of On-Prem Origin",
+              reason: "Chose a plain reverse proxy since private infrastructure has no edge network of its own. Layering a commercial CDN (e.g. Cloudflare) in front of your on-prem origin restores edge caching at the cost of routing public traffic through a third party.",
+              costEstimate: {
+                min: isHighScale ? 20 : 0,
+                max: isHighScale ? 150 : 20,
+                assumptions: "Third-party CDN usage-based pricing layered in front of the on-prem origin.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: 5,
+            max: 20,
+            assumptions: "NGINX/HAProxy reverse-proxy VM(s). No edge caching network — static assets are served from origin unless a hybrid CDN is added in front.",
+          },
+        };
+
+      case "compute":
+        if (componentId === "worker") {
+          return {
+            serviceName: "Dedicated Worker VM Pool (Manual Scaling)",
+            alternatives: [
+              {
+                serviceName: "Shared Compute Pool (Time-Sliced with API Workload)",
+                reason: "Chose a dedicated worker VM pool for predictable background-job capacity. Sharing the compute pool with the API workload is cheaper but risks background jobs starving user-facing request latency during load spikes.",
+                costEstimate: {
+                  min: isHighScale ? 100 : 40,
+                  max: isHighScale ? 400 : 150,
+                  assumptions: "No dedicated worker hardware — background jobs compete with API workload on the same VM pool.",
+                },
+              },
+            ],
+            costEstimate: {
+              min: isHighScale ? 150 : 60,
+              max: isHighScale ? 600 : 200,
+              assumptions: "Amortized monthly hardware + hypervisor licensing for dedicated worker VM capacity, manually sized for expected background job volume.",
+            },
+          };
+        }
+        return {
+          serviceName: "Virtual Machines (VMware vSphere / OpenStack Nova) — Manual Scaling",
+          alternatives: [
+            {
+              serviceName: "Bare-Metal Servers",
+              reason: "Chose virtualized compute for easier capacity re-allocation between workloads. Bare-metal offers maximum performance with no hypervisor overhead, but has the longest procurement lead time and zero flexibility to reallocate capacity later.",
+              costEstimate: {
+                min: isHighScale ? 500 : 200,
+                max: isHighScale ? 2500 : 700,
+                assumptions: "Amortized monthly hardware cost for dedicated bare-metal servers, sized for peak load with no ability to burst.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: isHighScale ? 400 : 150,
+            max: isHighScale ? 2000 : 500,
+            assumptions: "Amortized monthly hardware + hypervisor licensing (e.g. VMware vSphere/vCenter) for dedicated VM capacity. No elastic autoscaling — capacity must be pre-provisioned for peak load.",
+          },
+        };
+
+      case "database":
+        return {
+          serviceName: "Self-Managed PostgreSQL on Dedicated VM (Manual HA/Failover)",
+          alternatives: [
+            {
+              serviceName: "Licensed Enterprise Database Appliance (e.g. Oracle On-Prem)",
+              reason: "Chose open-source PostgreSQL to avoid per-core licensing costs. An enterprise database appliance offers vendor support and turnkey HA tooling at a significant licensing premium.",
+              costEstimate: {
+                min: isHighScale ? 800 : 300,
+                max: isHighScale ? 3000 : 1200,
+                assumptions: "Per-core enterprise database licensing plus dedicated hardware — HA/failover tooling included but at a substantial premium.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: isHighScale ? 300 : 100,
+            max: isHighScale ? 1200 : 400,
+            assumptions: "Dedicated VM(s) plus storage array allocation. Flag: no managed failover — HA, backups, and patching are fully manual operational responsibilities.",
+          },
+        };
+
+      case "storage":
+        return {
+          serviceName: "MinIO on Dedicated Storage Array",
+          alternatives: [
+            {
+              serviceName: "SAN/NAS Object Storage Gateway",
+              reason: "Chose MinIO for an S3-compatible API without a proprietary storage vendor lock-in. A SAN/NAS gateway may already exist in your data center and can be repurposed, but usually speaks a narrower protocol set.",
+              costEstimate: {
+                min: isHighScale ? 300 : 100,
+                max: isHighScale ? 1000 : 350,
+                assumptions: "Allocated capacity on existing SAN/NAS infrastructure, amortized monthly.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: isHighScale ? 200 : 80,
+            max: isHighScale ? 800 : 300,
+            assumptions: "Dedicated storage array capacity + server(s) running MinIO. Backup/replication strategy is a manual operational responsibility.",
+          },
+        };
+
+      case "queue":
+        return {
+          serviceName: "RabbitMQ Self-Managed on Dedicated VM",
+          alternatives: [
+            {
+              serviceName: "NATS Self-Managed on Dedicated VM",
+              reason: "Chose RabbitMQ for mature tooling. NATS has a lighter footprint but the same fundamental caveat applies either way.",
+              costEstimate: {
+                min: isHighScale ? 80 : 30,
+                max: isHighScale ? 300 : 100,
+                assumptions: "Dedicated VM(s) running a self-managed NATS cluster.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: isHighScale ? 100 : 40,
+            max: isHighScale ? 350 : 120,
+            assumptions: "Flag: no managed queue available on-premises — RabbitMQ self-managed requires dedicated ops capacity for clustering, HA, and upgrades.",
+          },
+        };
+
+      case "cache":
+        return {
+          serviceName: "Redis Self-Managed on Dedicated VM",
+          alternatives: [
+            {
+              serviceName: "Shared Cache Instance (Multi-Tenant)",
+              reason: "Chose a dedicated Redis VM for predictable latency and no noisy-neighbor risk. A shared instance is cheaper but risks contention with other workloads.",
+              costEstimate: {
+                min: isHighScale ? 40 : 15,
+                max: isHighScale ? 150 : 50,
+                assumptions: "Shared allocation on a multi-tenant cache VM.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: isHighScale ? 80 : 30,
+            max: isHighScale ? 250 : 90,
+            assumptions: "Dedicated VM running self-managed Redis. Failover and version upgrades are manual operational responsibilities.",
+          },
+        };
+
+      case "auth":
+        return {
+          serviceName: "Keycloak Self-Managed on Dedicated VM",
+          alternatives: [
+            {
+              serviceName: "Integrate with Existing On-Prem Active Directory / LDAP",
+              reason: "Chose Keycloak for a modern OIDC-compliant identity layer. If your organization already runs Active Directory/LDAP, federating through it avoids standing up a new identity system entirely.",
+              costEstimate: {
+                min: 0,
+                max: isHighScale ? 60 : 20,
+                assumptions: "Incremental integration effort against existing AD/LDAP infrastructure — no new dedicated hardware.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: isHighScale ? 60 : 25,
+            max: isHighScale ? 200 : 70,
+            assumptions: "Dedicated VM(s) running Keycloak backed by its own PostgreSQL instance.",
+          },
+        };
+
+      case "tokenization":
+        return {
+          serviceName: "HashiCorp Vault Self-Managed (HA Cluster on Dedicated VMs)",
+          alternatives: [
+            {
+              serviceName: "Hardware Security Module (HSM) Appliance",
+              reason: "Chose a software Vault HA cluster for lower cost and faster deployment. A dedicated HSM appliance offers stronger, certified key protection guarantees but at a much higher hardware cost and longer procurement time.",
+              costEstimate: {
+                min: 2000,
+                max: 8000,
+                assumptions: "Dedicated HSM appliance purchase/lease, amortized monthly — a significant capital expense.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: isHighScale ? 250 : 100,
+            max: isHighScale ? 900 : 350,
+            assumptions: "3-node Vault HA cluster on dedicated VMs (Raft storage backend) + a small dedicated tokenization service VM.",
+          },
+        };
+
+      case "audit-log":
+        return {
+          serviceName: "Self-Managed SIEM (e.g. Wazuh/ELK Stack) on Dedicated VMs",
+          alternatives: [
+            {
+              serviceName: "Log Files with Manual Archival to WORM Storage",
+              reason: "Chose a full SIEM stack for searchable, correlated audit events. Plain log files with manual archival to WORM-capable storage is cheaper but requires building your own retrieval/correlation tooling.",
+              costEstimate: {
+                min: isHighScale ? 60 : 20,
+                max: isHighScale ? 250 : 80,
+                assumptions: "WORM-capable storage array allocation for archived log files, no query/correlation tooling included.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: isHighScale ? 150 : 60,
+            max: isHighScale ? 600 : 200,
+            assumptions: "Flag: no managed immutable storage on-premises — requires a WORM-capable storage array or write-once tape/archive tier for true audit immutability.",
+          },
+        };
+
+      case "phi-vault":
+        return {
+          serviceName: "Encrypted Volume on SAN/NAS with Manual Key Management",
+          alternatives: [
+            {
+              serviceName: "Dedicated HSM Appliance for Key Management",
+              reason: "Chose manual key management (encrypted volume + a documented key custody process) to avoid additional hardware spend. A dedicated HSM appliance offers certified, tamper-resistant key storage at a much higher hardware cost.",
+              costEstimate: {
+                min: 2000,
+                max: 8000,
+                assumptions: "Dedicated HSM appliance purchase/lease, amortized monthly — a significant capital expense, recommended for real PHI at scale.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: isHighScale ? 300 : 120,
+            max: isHighScale ? 1000 : 400,
+            assumptions: "Encrypted SAN/NAS volume allocation for PHI, with a documented manual key-rotation and access-review process — a Business Associate Agreement is still required from any third party involved in hosting or maintaining this hardware.",
+          },
+        };
+
+      case "deidentification":
+        return {
+          serviceName: "Microsoft Presidio Self-Hosted on Dedicated VM",
+          alternatives: [
+            {
+              serviceName: "Manual De-identification Review Process",
+              reason: "Chose Presidio to automate detection of the 18 HIPAA identifiers. A fully manual review process avoids any new infrastructure but does not scale past small record volumes and is far more error-prone.",
+              costEstimate: {
+                min: 0,
+                max: 0,
+                assumptions: "No infrastructure cost — cost shows up as staff time instead, and does not scale.",
+              },
+            },
+          ],
+          costEstimate: {
+            min: isHighScale ? 100 : 40,
+            max: isHighScale ? 350 : 120,
+            assumptions: "Dedicated VM running Presidio Analyzer + Anonymizer, invoked by a scheduled batch job.",
+          },
+        };
+
+      default:
+        return {
+          serviceName: `Private Cloud Mapped Component (${componentType})`,
+          alternatives: [],
+          costEstimate: { min: 0, max: 0, assumptions: "Generic on-premises component — no managed-service equivalent assumed." },
+        };
+    }
   }
 
   return {

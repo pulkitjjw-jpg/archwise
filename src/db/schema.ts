@@ -55,6 +55,17 @@ export const requirements = pgTable("requirements", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+export type ProviderMapping = {
+  serviceName: string;
+  alternatives: Array<{ serviceName: string; reason: string; costEstimate?: { min: number; max: number; assumptions: string } }>;
+  costEstimate: { min: number; max: number; assumptions: string };
+  lld?: {
+    config: Record<string, string>;
+    reasoning: Record<string, string>;
+  };
+  swapReasoning?: string;
+};
+
 export type HldContent = {
   components: Array<{
     id: string;
@@ -65,36 +76,14 @@ export type HldContent = {
     reasoning: string; // Component-level explanation trace
     metadata?: Record<string, any>;
     cloudMappings?: {
-      aws: {
-        serviceName: string;
-        alternatives: Array<{ serviceName: string; reason: string; costEstimate?: { min: number; max: number; assumptions: string } }>;
-        costEstimate: { min: number; max: number; assumptions: string };
-        lld?: {
-          config: Record<string, string>;
-          reasoning: Record<string, string>;
-        };
-        swapReasoning?: string;
-      };
-      azure: {
-        serviceName: string;
-        alternatives: Array<{ serviceName: string; reason: string; costEstimate?: { min: number; max: number; assumptions: string } }>;
-        costEstimate: { min: number; max: number; assumptions: string };
-        lld?: {
-          config: Record<string, string>;
-          reasoning: Record<string, string>;
-        };
-        swapReasoning?: string;
-      };
-      gcp: {
-        serviceName: string;
-        alternatives: Array<{ serviceName: string; reason: string; costEstimate?: { min: number; max: number; assumptions: string } }>;
-        costEstimate: { min: number; max: number; assumptions: string };
-        lld?: {
-          config: Record<string, string>;
-          reasoning: Record<string, string>;
-        };
-        swapReasoning?: string;
-      };
+      aws: ProviderMapping;
+      azure: ProviderMapping;
+      gcp: ProviderMapping;
+      // Computed entirely deterministically (rule-engine only, no LLM pass) — see
+      // architectures/route.ts. Optional because architecture versions generated before
+      // Phase 4 Step 2 won't have them.
+      kubernetes?: ProviderMapping;
+      private?: ProviderMapping;
     };
   }>;
   connections: Array<{

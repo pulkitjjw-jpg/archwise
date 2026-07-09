@@ -59,6 +59,17 @@ export function runLldRulesEngine(
     complianceLower.includes("audit") ||
     complianceLower.includes("encrypt");
 
+  // Kubernetes and private cloud have fundamentally different LLD shapes (pod resource
+  // requests/HPA/namespaces vs. instance sizes; VM sizing vs. managed-service config) — they
+  // get their own dedicated rule functions below rather than being squeezed into the
+  // aws/azure/gcp switch statement that follows.
+  if (provider === "kubernetes") {
+    return runKubernetesLld(componentType, componentId, isHighScale, isLowBudget, teamLower, isHighSecurity, industryContext);
+  }
+  if (provider === "private") {
+    return runPrivateCloudLld(componentType, componentId, isHighScale, isHighSecurity, industryContext);
+  }
+
   const config: Record<string, string> = {};
   const reasoning: Record<string, string> = {};
 
@@ -298,6 +309,250 @@ export function runLldRulesEngine(
     if (componentType === "database" && industryContext.industry === "fintech") {
       config.multiAZ = "true (Primary/Standby)";
       reasoning.multiAZ = "Forced to enabled for PCI-DSS compliance — regulated payment workloads require high availability regardless of stated scale.";
+    }
+  }
+
+  return { config, reasoning };
+}
+
+function runKubernetesLld(
+  componentType: string,
+  componentId: string,
+  isHighScale: boolean,
+  isLowBudget: boolean,
+  teamLower: string,
+  isHighSecurity: boolean,
+  industryContext?: IndustryContext
+): LldConfig {
+  const isLowOpsCapacity =
+    isLowBudget || teamLower.includes("junior") || teamLower.includes("small") || teamLower === "not_specified";
+
+  const config: Record<string, string> = {};
+  const reasoning: Record<string, string> = {};
+
+  switch (componentType) {
+    case "cdn":
+      config.ingressClass = "nginx";
+      config.tlsMode = "cert-manager (Let's Encrypt)";
+      config.replicas = "2";
+      config.namespace = "ingress-system";
+      reasoning.replicas = "Two Ingress-NGINX replicas avoid a single point of failure for all cluster traffic entry.";
+      reasoning.tlsMode = "cert-manager automates certificate issuance and renewal rather than requiring manual cert rotation.";
+      break;
+
+    case "compute": {
+      const isWorker = componentId === "worker";
+      if (isWorker) {
+        config.replicas = "2";
+        config.resourceRequests = "250m CPU / 256Mi Memory";
+        config.resourceLimits = "500m CPU / 512Mi Memory";
+        config.kedaMinReplicas = "0";
+        config.kedaMaxReplicas = isHighScale ? "15" : "5";
+        config.kedaTriggerType = "Queue depth (RabbitMQ/NATS)";
+        config.namespace = "app";
+
+        reasoning.kedaMinReplicas = "Scaling to zero when the queue is empty avoids paying for idle worker capacity.";
+        reasoning.kedaMaxReplicas = isHighScale
+          ? "Higher ceiling to absorb large batch/reconciliation spikes at scale."
+          : "Modest ceiling appropriate for lower expected background job volume.";
+      } else {
+        config.replicas = isHighScale ? "4" : "2";
+        config.resourceRequests = isHighScale ? "500m CPU / 512Mi Memory" : "250m CPU / 256Mi Memory";
+        config.resourceLimits = isHighScale ? "1000m CPU / 1Gi Memory" : "500m CPU / 512Mi Memory";
+        config.hpaMinReplicas = isHighScale ? "4" : "2";
+        config.hpaMaxReplicas = isHighScale ? "20" : "6";
+        config.hpaTargetCPU = "70%";
+        config.namespace = "app";
+        config.networkPolicy = "Allow ingress from ingress-nginx namespace only; allow egress to data namespace only";
+
+        reasoning.hpaMinReplicas = isHighScale
+          ? "Minimum 4 replicas spread across nodes for multi-zone-equivalent availability under high scale."
+          : "Minimum 2 replicas is the smallest count that still tolerates a single pod eviction without downtime.";
+        reasoning.networkPolicy = "Default-deny network policy scoped to only the traffic paths this component actually needs, limiting lateral movement if a pod is compromised.";
+      }
+      break;
+    }
+
+    case "database": {
+      if (isLowOpsCapacity) {
+        config.deploymentMode = "External (ExternalName Service + Secret)";
+        config.namespace = "data";
+        reasoning.deploymentMode = "Given the team's low operational maturity/tight budget, the database runs outside the cluster on a managed service — self-managing a stateful database's failover, backups, and patching on Kubernetes is a significant ops burden this avoids.";
+      } else {
+        config.replicas = isHighScale ? "3 (Primary + 2 Replicas)" : "1 (Single Instance)";
+        config.storageSize = isHighScale ? "100Gi" : "20Gi";
+        config.storageClass = "ssd-retain (Retain reclaim policy)";
+        config.resourceRequests = isHighScale ? "1000m CPU / 2Gi Memory" : "500m CPU / 1Gi Memory";
+        config.namespace = "data";
+        config.networkPolicy = "Allow ingress from app namespace only; deny all else";
+
+        reasoning.storageClass = "A Retain reclaim policy prevents the underlying volume from being deleted if the StatefulSet or PVC is accidentally removed — data loss protection for a self-managed database.";
+        reasoning.replicas = isHighScale
+          ? "Primary plus two read replicas for both read scaling and failover capacity."
+          : "Single instance keeps operational surface minimal; acceptable only because ops capacity was assessed as adequate to handle its own failover.";
+      }
+      break;
+    }
+
+    case "storage":
+      config.replicas = isHighScale ? "4 (Distributed Mode)" : "1 (Standalone)";
+      config.storageSize = isHighScale ? "500Gi" : "100Gi";
+      config.namespace = "data";
+      reasoning.replicas = isHighScale
+        ? "MinIO distributed mode (4+ nodes) provides erasure coding for durability at this scale."
+        : "Standalone MinIO is sufficient for lower storage volumes, at the cost of no built-in redundancy.";
+      break;
+
+    case "queue":
+      config.replicas = "3 (Clustered)";
+      config.storageSize = isHighScale ? "50Gi" : "10Gi";
+      config.namespace = "data";
+      reasoning.replicas = "A 3-node cluster is the minimum for RabbitMQ quorum queues to survive a single node failure.";
+      break;
+
+    case "cache":
+      config.replicas = isHighScale ? "3 (Cluster Mode)" : "1 (Standalone)";
+      config.namespace = "data";
+      reasoning.replicas = isHighScale
+        ? "Redis Cluster mode shards data across nodes to handle higher throughput."
+        : "Standalone Redis is sufficient for lower cache volumes; a node failure means a cold cache, not data loss, since this is a cache.";
+      break;
+
+    case "auth":
+      config.replicas = "2";
+      config.namespace = "identity";
+      reasoning.replicas = "Two replicas avoid identity/login becoming a single point of failure for the whole application.";
+      break;
+
+    case "tokenization":
+      config.replicas = "3 (Vault Raft HA)";
+      config.namespace = "security";
+      config.networkPolicy = "Only the app namespace may reach Vault; no direct external ingress permitted";
+      reasoning.replicas = "Vault's Raft integrated storage needs an odd number of nodes (3 minimum) to maintain quorum during a node failure.";
+      reasoning.networkPolicy = "Narrowing which namespaces can reach the tokenization boundary is itself a PCI-DSS-relevant network segmentation control.";
+      break;
+
+    case "audit-log":
+      config.deploymentMode = "DaemonSet (Falco — one pod per node)";
+      config.namespace = "monitoring";
+      reasoning.deploymentMode = "Falco must run on every node as a DaemonSet to observe syscall-level activity across the whole cluster, not just within one namespace.";
+      break;
+
+    case "phi-vault":
+      config.storageClass = "encrypted-retain";
+      config.namespace = "data-phi";
+      config.networkPolicy = "Only the app namespace may reach phi-vault; deny all else";
+      reasoning.namespace = "A dedicated namespace (separate from the general 'data' namespace) keeps the HIPAA compliance boundary enforceable via namespace-scoped RBAC and network policy.";
+      reasoning.storageClass = "An encrypted StorageClass with a Retain policy ensures PHI is encrypted at the volume level and cannot be silently deleted by a PVC/StatefulSet mistake.";
+      break;
+
+    case "deidentification":
+      config.deploymentMode = "CronJob (nightly)";
+      config.namespace = "data";
+      reasoning.deploymentMode = "Runs as a scheduled batch job against new PHI records rather than an always-on Deployment, since de-identification doesn't need to be real-time.";
+      break;
+
+    default:
+      config.genericType = "Generic in-cluster workload";
+      config.namespace = "app";
+      reasoning.genericType = "Standard deployment config.";
+      break;
+  }
+
+  if (industryContext && industryContext.industry !== "none") {
+    const standard = industryContext.industry === "fintech" ? "PCI-DSS" : "HIPAA";
+    if (["database", "storage", "cache", "queue"].includes(componentType)) {
+      config.mtls = "Enabled (service mesh or cert-manager-issued pod certs)";
+      reasoning.mtls = `Mandatory for ${standard} compliance — encryption in transit between pods is not optional for regulated data, regardless of scale.`;
+    }
+  }
+
+  return { config, reasoning };
+}
+
+function runPrivateCloudLld(
+  componentType: string,
+  componentId: string,
+  isHighScale: boolean,
+  isHighSecurity: boolean,
+  industryContext?: IndustryContext
+): LldConfig {
+  const config: Record<string, string> = {};
+  const reasoning: Record<string, string> = {};
+
+  switch (componentType) {
+    case "cdn":
+      config.vmSize = "2 vCPU / 4GB RAM";
+      config.scalingMode = "Manual (no autoscaler)";
+      reasoning.scalingMode = "No CDN edge network on-premises — traffic capacity is whatever the reverse-proxy VM(s) can handle, sized ahead of time.";
+      break;
+
+    case "compute": {
+      const isWorker = componentId === "worker";
+      config.vmSize = isHighScale ? "8 vCPU / 16GB RAM" : "4 vCPU / 8GB RAM";
+      config.vmCount = isWorker ? (isHighScale ? "3" : "2") : (isHighScale ? "4" : "2");
+      config.scalingMode = "Manual (no autoscaler) — capacity must be pre-provisioned for peak load";
+      reasoning.scalingMode = "Private infrastructure has no elastic capacity pool — under-provisioning means dropped requests at peak, not an autoscale event.";
+      break;
+    }
+
+    case "database":
+      config.vmSize = isHighScale ? "16 vCPU / 64GB RAM" : "8 vCPU / 32GB RAM";
+      config.storageSize = isHighScale ? "1TB (SAN-backed)" : "200GB (SAN-backed)";
+      config.haMode = "Manual failover (no managed failover available)";
+      reasoning.haMode = "On-premises database HA requires manually configured streaming replication and a documented, tested failover runbook — nothing here does this automatically.";
+      break;
+
+    case "storage":
+      config.storageAllocation = isHighScale ? "5TB" : "1TB";
+      config.replicationMode = "Manual (backup job to secondary array or off-site)";
+      break;
+
+    case "queue":
+      config.vmCount = "1 (no managed HA)";
+      config.opsFlag = "No managed queue on-premises — requires dedicated ops capacity for clustering, HA, and upgrades";
+      reasoning.opsFlag = "Flagging explicitly: a managed cloud queue absorbs clustering/HA/patching automatically, this does not.";
+      break;
+
+    case "cache":
+      config.vmSize = "4 vCPU / 8GB RAM";
+      config.haMode = "Manual failover";
+      break;
+
+    case "auth":
+      config.vmCount = "1-2 (manual load balancing)";
+      break;
+
+    case "tokenization":
+      config.vmCount = "3 (manual HA cluster)";
+      config.hsmRecommended = isHighSecurity ? "true — dedicated HSM appliance recommended at this compliance level" : "false — software-based key storage acceptable";
+      break;
+
+    case "audit-log":
+      config.storageMode = "WORM-capable storage array required for true immutability";
+      reasoning.storageMode = "Standard on-prem storage can be overwritten by anyone with array access — immutability requires a storage array or archive tier that explicitly supports write-once semantics.";
+      break;
+
+    case "phi-vault":
+      config.encryptionMode = "Manual key management (HSM appliance recommended)";
+      config.baaFlag = "A Business Associate Agreement is still required from any third party hosting/maintaining this hardware";
+      break;
+
+    case "deidentification":
+      config.vmSize = "4 vCPU / 8GB RAM";
+      config.schedulingMode = "Scheduled batch job (cron)";
+      break;
+
+    default:
+      config.genericType = "Generic on-premises component";
+      break;
+  }
+
+  if (industryContext && industryContext.industry !== "none") {
+    const standard = industryContext.industry === "fintech" ? "PCI-DSS" : "HIPAA";
+    if (["database", "storage", "cache", "queue"].includes(componentType)) {
+      config.networkSegmentation = "Dedicated VLAN, firewalled from general corporate network";
+      reasoning.networkSegmentation = `Mandatory for ${standard} compliance — regulated data stores must be network-isolated from the general corporate network, not just access-controlled.`;
     }
   }
 

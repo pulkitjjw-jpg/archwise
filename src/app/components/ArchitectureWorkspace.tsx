@@ -2,7 +2,17 @@
 
 import { useEffect, useState } from "react";
 import { runLldRulesEngine } from "@/lib/lld-rules";
-import { validateArchitectureLayout } from "@/lib/validation";
+import { validateArchitectureLayout, getProviderMaturityWarning } from "@/lib/validation";
+
+type CloudProviderKey = "aws" | "azure" | "gcp" | "kubernetes" | "private";
+
+const PROVIDER_LABELS: Record<CloudProviderKey, string> = {
+  aws: "AWS",
+  azure: "Azure",
+  gcp: "GCP",
+  kubernetes: "K8s",
+  private: "Private",
+};
 
 type CloudMapping = {
   serviceName: string;
@@ -39,6 +49,9 @@ type ComponentData = {
     aws: CloudMapping;
     azure: CloudMapping;
     gcp: CloudMapping;
+    // Optional: only present on architectures generated after Phase 4 Step 2.
+    kubernetes?: CloudMapping;
+    private?: CloudMapping;
   };
   metadata?: {
     isManuallyAdded?: boolean;
@@ -103,7 +116,7 @@ export default function ArchitectureWorkspace({
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [activeProvider, setActiveProvider] = useState<"aws" | "azure" | "gcp">("aws");
+  const [activeProvider, setActiveProvider] = useState<CloudProviderKey>("aws");
   const [viewMode, setViewMode] = useState<"diagram" | "comparison">("diagram");
   const [isLldExpanded, setIsLldExpanded] = useState(false);
   const [error, setError] = useState("");
@@ -192,6 +205,8 @@ export default function ArchitectureWorkspace({
     requirements.nonFunctional.dataNature.toLowerCase() === "not specified";
 
   const isGenerationBlocked = isScaleUnspecified || isBudgetUnspecified || isDataUnspecified;
+
+  const providerMaturityWarning = getProviderMaturityWarning(activeProvider, requirements);
 
   const handleGenerate = async () => {
     if (isGenerationBlocked) return;
@@ -328,7 +343,7 @@ export default function ArchitectureWorkspace({
     });
   };
 
-  const handleUpdateLldConfig = (nodeId: string, provider: "aws" | "azure" | "gcp", paramKey: string, newVal: string) => {
+  const handleUpdateLldConfig = (nodeId: string, provider: CloudProviderKey, paramKey: string, newVal: string) => {
     if (!draftHld) return;
     const updatedComponents = draftHld.components.map((c) => {
       if (c.id !== nodeId) return c;
@@ -360,7 +375,7 @@ export default function ArchitectureWorkspace({
     });
   };
 
-  const handleUpdateLldReasoning = (nodeId: string, provider: "aws" | "azure" | "gcp", paramKey: string, val: string) => {
+  const handleUpdateLldReasoning = (nodeId: string, provider: CloudProviderKey, paramKey: string, val: string) => {
     if (!draftHld) return;
     const updatedComponents = draftHld.components.map((c) => {
       if (c.id !== nodeId) return c;
@@ -415,7 +430,7 @@ export default function ArchitectureWorkspace({
   // considered" entries. The demoted current service becomes a new alternative in its place
   // (with its own cost band), so the swap is reversible, and the LLD config is recomputed for
   // the newly chosen service rather than left stale from the previous one.
-  const handleSwapService = (nodeId: string, provider: "aws" | "azure" | "gcp", altIndex: number) => {
+  const handleSwapService = (nodeId: string, provider: CloudProviderKey, altIndex: number) => {
     if (!draftHld) return;
     const reasonText = swapReason.trim() || "Manually changed by user.";
 
@@ -514,7 +529,7 @@ export default function ArchitectureWorkspace({
   };
 
   // Helper to extract mapping based on active provider
-  const getMappingForProvider = (node: ComponentData, prov: "aws" | "azure" | "gcp"): CloudMapping | undefined => {
+  const getMappingForProvider = (node: ComponentData, prov: CloudProviderKey): CloudMapping | undefined => {
     if (node.cloudMappings) {
       return node.cloudMappings[prov];
     }
@@ -525,7 +540,7 @@ export default function ArchitectureWorkspace({
   };
 
   // Compute Total Cost Estimates dynamically
-  const calculateTotalCost = (prov: "aws" | "azure" | "gcp") => {
+  const calculateTotalCost = (prov: CloudProviderKey) => {
     if (!architecture) return { min: 0, max: 0 };
     const min = architecture.hld.components.reduce((sum, c) => {
       const mapping = getMappingForProvider(c, prov);
@@ -611,8 +626,11 @@ export default function ArchitectureWorkspace({
   const totalMinCost = calculateTotalCost(activeProvider).min;
   const totalMaxCost = calculateTotalCost(activeProvider).max;
 
-  const getProviderCostDeltaString = (prov: "aws" | "azure" | "gcp") => {
-    const costDelta = architecture?.reasoning?.diff?.costDelta?.[prov];
+  const getProviderCostDeltaString = (prov: CloudProviderKey) => {
+    // costDelta is only ever computed for aws/azure/gcp (see architectures/route.ts) — cloud
+    // spend deltas don't map cleanly onto Kubernetes/private cloud's hardware-amortized costs.
+    // Cast for lookup safety; the undefined-guard right below handles k8s/private cleanly.
+    const costDelta = (architecture?.reasoning?.diff?.costDelta as Record<string, { min: number; max: number }> | undefined)?.[prov];
     if (!costDelta) return "";
     const minDelta = costDelta.min;
     const maxDelta = costDelta.max;
@@ -945,17 +963,17 @@ export default function ArchitectureWorkspace({
                   </span>
                   
                   <div className="flex items-center gap-3">
-                    {/* Export Terraform Button */}
+                    {/* Export Button */}
                     <button
                       onClick={handleExport}
                       className="rounded-xl bg-cyan-600 hover:bg-cyan-700 text-white px-3 py-1.5 text-[9.5px] font-extrabold uppercase transition shadow-sm active:scale-95 flex items-center gap-1"
                     >
-                      <span>📥</span> Export TF
+                      <span>📥</span> {activeProvider === "kubernetes" ? "Export Manifests" : "Export TF"}
                     </button>
 
-                    {/* Cloud Provider Toggle */}
+                    {/* Deployment Target Toggle */}
                     <div className="flex bg-slate-100/80 p-0.5 rounded-lg border border-slate-200 shadow-sm">
-                      {(["aws", "azure", "gcp"] as const).map((p) => (
+                      {(["aws", "azure", "gcp", "kubernetes", "private"] as const).map((p) => (
                         <button
                           key={p}
                           onClick={() => setActiveProvider(p)}
@@ -965,7 +983,7 @@ export default function ArchitectureWorkspace({
                               : "text-slate-500 hover:text-slate-800"
                           }`}
                         >
-                          {p}
+                          {PROVIDER_LABELS[p]}
                         </button>
                       ))}
                     </div>
@@ -973,7 +991,7 @@ export default function ArchitectureWorkspace({
                       <span>Est: ${totalMinCost} - ${totalMaxCost}/mo</span>
                       {getProviderCostDeltaString(activeProvider) && (
                         <span className={`px-1 rounded font-black ${
-                          (architecture.reasoning.diff?.costDelta?.[activeProvider]?.min || 0) < 0
+                          ((architecture.reasoning.diff?.costDelta as Record<string, { min: number; max: number }> | undefined)?.[activeProvider]?.min || 0) < 0
                             ? "text-emerald-700 bg-emerald-50"
                             : "text-amber-700 bg-amber-50"
                         }`}>
@@ -983,6 +1001,19 @@ export default function ArchitectureWorkspace({
                     </span>
                   </div>
                 </div>
+
+                {/* Team Maturity / Deployment Target Advisory */}
+                {providerMaturityWarning && (
+                  <div className="mt-4 flex items-start gap-2.5 rounded-2xl border border-amber-200 bg-amber-50/60 p-3.5 text-xs text-amber-950 shadow-sm animate-fadeIn">
+                    <span className="text-sm">⚠️</span>
+                    <div className="leading-relaxed">
+                      <span className="font-extrabold uppercase text-[9px] tracking-wider text-amber-800 block">
+                        Recommendation
+                      </span>
+                      {providerMaturityWarning}
+                    </div>
+                  </div>
+                )}
 
                 {/* Manual Editing Controls Toolbar */}
                 {isEditing && draftHld && (

@@ -127,6 +127,35 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       };
     });
 
+    // 4b. Resolve Kubernetes + private-cloud mappings for every component too — but keep these
+    // entirely OUT of what gets sent to the LLM. They're fully deterministic (no managed-service
+    // pricing nuance to "validate"), and adding two more providers' worth of reasoning to
+    // validateAndGenerateArchitecture's job would meaningfully grow its prompt/output size,
+    // which Phase 4 Step 1 already showed makes Gemini's occasional malformed-JSON problem
+    // worse. Computed here, merged onto the LLM's response afterward (step 7b).
+    const extraProviderMappingsById = new Map<string, { kubernetes: any; private: any }>();
+    allComponents.forEach((c) => {
+      const k8sMapping = getCloudMapping("kubernetes", c.type, c.id, reqsContext);
+      const k8sLld = runLldRulesEngine("kubernetes", c.type, c.id, reqsContext, undefined, industryContext);
+      const privateMapping = getCloudMapping("private", c.type, c.id, reqsContext);
+      const privateLld = runLldRulesEngine("private", c.type, c.id, reqsContext, undefined, industryContext);
+
+      extraProviderMappingsById.set(c.id, {
+        kubernetes: {
+          serviceName: k8sMapping.serviceName,
+          alternatives: k8sMapping.alternatives,
+          costEstimate: k8sMapping.costEstimate,
+          lld: { config: k8sLld.config, reasoning: k8sLld.reasoning },
+        },
+        private: {
+          serviceName: privateMapping.serviceName,
+          alternatives: privateMapping.alternatives,
+          costEstimate: privateMapping.costEstimate,
+          lld: { config: privateLld.config, reasoning: privateLld.reasoning },
+        },
+      });
+    });
+
     // 5. Calculate baseline total costs
     const providerCosts = {
       aws: { min: 0, max: 0 },
@@ -192,6 +221,14 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
           c.cloudMappings[prov].alternatives = baselineComponent.cloudMappings[prov].alternatives;
         }
       });
+
+      // Attach the Kubernetes + private-cloud mappings computed in step 4b. These never went
+      // to the LLM, so they're attached wholesale rather than merged field-by-field.
+      const extra = extraProviderMappingsById.get(c.id);
+      if (extra) {
+        c.cloudMappings.kubernetes = extra.kubernetes;
+        c.cloudMappings.private = extra.private;
+      }
     });
 
     // 8. Save new architecture version with all three cloud mappings, recommendations, and LLD specs

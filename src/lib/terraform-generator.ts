@@ -69,8 +69,50 @@ ${industryContext.flags?.dataResidency && industryContext.flags.dataResidency !=
 `;
 }
 
+function buildManualProvisioningSection(provider: string, components: any[]): string {
+  if (provider !== "private") return "";
+
+  const rows = components
+    .map((c) => {
+      const lld = c.cloudMappings?.private?.lld || { config: {}, reasoning: {} };
+      const flaggedKey = Object.keys(lld.config).find((k) => k.toLowerCase().includes("flag") || k.toLowerCase().includes("mode") || k.toLowerCase().includes("recommended"));
+      const flagNote = flaggedKey ? lld.config[flaggedKey] : "—";
+      return `| ${c.name} | ${c.cloudMappings?.private?.serviceName || c.name} | ${flagNote} |`;
+    })
+    .join("\n");
+
+  return `
+---
+
+> [!IMPORTANT]
+> ## What Needs Manual Provisioning
+
+Nothing in this Terraform actually provisions private-cloud infrastructure — there is no
+generic Terraform provider for "your data center." Every \`null_resource\` in \`compute.tf\` is a
+documented placeholder. Being honest about what this tool can and can't automate for you:
+
+**Cannot be automated by this tool at all:**
+*   Physical or virtual machine provisioning (pick a real provider in \`main.tf\`: vSphere, OpenStack, or manage bare-metal outside Terraform entirely).
+*   Network segmentation / VLAN configuration on your physical switches.
+*   Storage array allocation (SAN/NAS) and its own RAID/replication setup.
+*   Hardware procurement lead time for anything requiring new physical capacity.
+
+**Explicitly flagged per component (no managed-service equivalent exists on-premises):**
+
+| Component | Chosen Approach | Manual Ops Flag |
+|---|---|---|
+${rows}
+
+**What you're responsible for that a public cloud would otherwise absorb:**
+*   Failover/HA orchestration (no managed multi-AZ equivalent — you configure and test the failover runbook yourself).
+*   Patching and version upgrades for every self-managed service (RabbitMQ, PostgreSQL, Redis, etc.).
+*   Backup scheduling and restore testing — nothing here schedules or verifies a single backup.
+*   Physical security and hardware lifecycle management for whatever data center this deploys into.
+`;
+}
+
 export function generateTerraformCode(
-  provider: "aws" | "azure" | "gcp",
+  provider: "aws" | "azure" | "gcp" | "private",
   projectName: string,
   components: any[],
   connections: any[],
@@ -769,7 +811,7 @@ resource "azurerm_servicebus_queue" "jobs" {
     files["storage.tf"] = storageTf;
     files["outputs.tf"] = outputsTf;
 
-  } else {
+  } else if (provider === "gcp") {
     // ----------------------------------------------------
     // GCP TERRAFORM GENERATOR
     // ----------------------------------------------------
@@ -967,6 +1009,104 @@ resource "google_pubsub_subscription" "jobs_sub" {
     files["database.tf"] = databaseTf;
     files["storage.tf"] = storageTf;
     files["outputs.tf"] = outputsTf;
+  } else if (provider === "private") {
+    // ----------------------------------------------------
+    // PRIVATE CLOUD / ON-PREMISES TERRAFORM GENERATOR
+    // ----------------------------------------------------
+    // No single Terraform provider covers "private cloud" — VMware, OpenStack, and bare-metal
+    // all need different providers with environment-specific credentials this tool can't know.
+    // Rather than guess, this generates null_resource placeholders that document exactly what
+    // needs manual provisioning per component, plus commented-out real provider blocks for the
+    // two most common private-cloud Terraform providers so you have a starting point either way.
+
+    files["variables.tf"] = `# Private Cloud Variables for ${projectName}
+
+variable "environment" {
+  type    = string
+  default = "dev"
+}
+
+variable "project_name" {
+  type    = string
+  default = "${safeName}"
+}
+
+# Fill in once you've picked a private cloud provider (see main.tf for options).
+variable "datacenter_name" {
+  type        = string
+  default     = ""
+  description = "vSphere datacenter / OpenStack region / physical site identifier."
+}
+`;
+
+    files["main.tf"] = `# Provider Configuration for ${projectName} — PRIVATE CLOUD
+#
+# Uncomment and configure ONE of the following depending on your actual private cloud platform.
+# This tool cannot auto-detect or provision credentials for on-premises infrastructure.
+
+# --- Option A: VMware vSphere ---
+# terraform {
+#   required_providers {
+#     vsphere = {
+#       source  = "hashicorp/vsphere"
+#       version = "~> 2.0"
+#     }
+#   }
+# }
+# provider "vsphere" {
+#   user           = var.vsphere_user
+#   password       = var.vsphere_password
+#   vsphere_server = var.vsphere_server
+# }
+
+# --- Option B: OpenStack ---
+# terraform {
+#   required_providers {
+#     openstack = {
+#       source  = "terraform-provider-openstack/openstack"
+#       version = "~> 1.53"
+#     }
+#   }
+# }
+# provider "openstack" {
+#   cloud = "my-openstack-cloud"
+# }
+
+# --- Option C: Bare-metal (no provider — infrastructure provisioned outside Terraform) ---
+# If deploying to bare metal without a virtualization layer, most of what's below is
+# configuration management (Ansible/Puppet/manual) rather than Terraform's job.
+`;
+
+    let manualProvisioningTf = `# Private Cloud Resource Placeholders for ${projectName}
+#
+# These null_resource blocks are NOT real infrastructure — Terraform has no generic way to
+# provision a VM on an arbitrary private cloud. Each one documents exactly what a human (or a
+# platform-specific Terraform provider, once you pick one above) needs to provision manually.
+
+`;
+
+    components.forEach((c) => {
+      const lld = getLld(c);
+      const svc = getServiceName(c);
+      manualProvisioningTf += `# ---- ${c.name} → ${svc} ----
+${Object.keys(lld.config || {})
+  .map((k) => `# ${k}: ${lld.config[k]}${lld.reasoning?.[k] ? ` — ${lld.reasoning[k]}` : ""}`)
+  .join("\n")}
+resource "null_resource" "${c.id}_manual_provisioning" {
+  triggers = {
+    component   = "${c.id}"
+    service     = "${svc.replace(/"/g, "'")}"
+    provisioned = "false" # flip once this component has actually been provisioned by hand
+  }
+}
+
+`;
+    });
+
+    files["compute.tf"] = manualProvisioningTf;
+    files["outputs.tf"] = `# No computed outputs — private cloud resources above are manual placeholders,
+# not real Terraform-managed infrastructure. Update this once real resources exist.
+`;
   }
 
   // README.MD (Consistent across providers)
@@ -990,6 +1130,7 @@ This Terraform configuration script was automatically synthesized by the **AI Cl
 > This configuration represents a starting point. It has been derived automatically based on design rules and client brainstorming.
 > You MUST review instance profiles, security group configurations, IAM roles, and pricing implications before running \`terraform apply\` in any real staging or production environments.
 ${buildComplianceSection(industryContext, components)}
+${buildManualProvisioningSection(provider, components)}
 ---
 
 ## State Management Configuration
