@@ -5,7 +5,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "AI Cloud Architecture Generator",
   description:
-    "A planning workspace for an AI-powered SaaS that generates HLD, LLD, cloud mappings, cost estimates, IaC, and living architecture versions.",
+    "An AI-powered SaaS that generates HLD, LLD, cloud mappings, cost estimates, IaC, and living architecture versions from a plain-language product idea.",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

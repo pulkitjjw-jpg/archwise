@@ -38,3 +38,13 @@ next-env.d.ts
 
 # local tooling (contains credentials, not part of the project)
 .jetro/
+
+# Jetro VS Code extension rewrites these on every session start/reconnect with
+# its own generic boilerplate (and .mcp.json embeds machine-local absolute paths) —
+# none of it is project content, so keep it out of version control entirely.
+.mcp.json
+.agents/
+.cursor/
+.windsurfrules
+AGENT.md
+.github/copilot-instructions.md

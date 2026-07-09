@@ -1,212 +1,210 @@
-import { productContext } from "@/lib/planning-data";
-import { getPlanningArtifacts } from "@/lib/planning-store";
+"use client";
+
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import IntakeForm from "@/app/components/IntakeForm";
 
-export const dynamic = "force-dynamic";
+type ProjectStatus =
+  | "just_started"
+  | "brainstorm_in_progress"
+  | "requirements_complete"
+  | "architecture_ready";
 
-type Artifact = Awaited<ReturnType<typeof getPlanningArtifacts>>[number];
+type ProjectSummary = {
+  id: string;
+  name: string;
+  owner: string | null;
+  createdAt: string;
+  currentVersion: string;
+  lastUpdated: string;
+  conversationCount: number;
+  requirementCount: number;
+  architectureCount: number;
+  status: ProjectStatus;
+};
 
-function Badge({ children }: { children: string }) {
+const STATUS_META: Record<ProjectStatus, { label: string; classes: string }> = {
+  just_started: {
+    label: "Just Started",
+    classes: "bg-slate-100 text-slate-600 border-slate-200",
+  },
+  brainstorm_in_progress: {
+    label: "Brainstorm In Progress",
+    classes: "bg-cyan-50 text-cyan-700 border-cyan-200",
+  },
+  requirements_complete: {
+    label: "Requirements Complete",
+    classes: "bg-amber-50 text-amber-700 border-amber-200",
+  },
+  architecture_ready: {
+    label: "Architecture Ready",
+    classes: "bg-emerald-50 text-emerald-700 border-emerald-200",
+  },
+};
+
+function StatusBadge({ status }: { status: ProjectStatus }) {
+  const meta = STATUS_META[status];
   return (
-    <span className="rounded-full border border-cyan-200 bg-cyan-50 px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-cyan-700">
-      {children}
+    <span
+      className={`inline-flex items-center rounded-full border px-3 py-1 text-[10px] font-bold uppercase tracking-wider ${meta.classes}`}
+    >
+      {meta.label}
     </span>
   );
 }
 
-function ArtifactCard({ artifact }: { artifact: Artifact }) {
+function formatDate(value: string) {
+  return new Date(value).toLocaleDateString([], {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function ProjectCard({ project, onOpen }: { project: ProjectSummary; onOpen: (id: string) => void }) {
   return (
-    <article className="rounded-[2rem] border border-slate-200 bg-white p-6 shadow-sm shadow-slate-200/60 transition hover:-translate-y-0.5 hover:shadow-xl hover:shadow-slate-200/80">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <p className="text-sm font-semibold text-cyan-700">{artifact.priority}</p>
-          <h2 className="mt-2 text-2xl font-bold tracking-tight text-slate-950">{artifact.title}</h2>
-        </div>
-        <span className="w-fit rounded-full bg-slate-950 px-3 py-1 text-xs font-semibold text-white">
-          #{artifact.displayOrder.toString().padStart(2, "0")}
+    <button
+      type="button"
+      onClick={() => onOpen(project.id)}
+      className="group flex flex-col gap-4 rounded-[2rem] border border-slate-200 bg-white/85 p-6 text-left shadow-sm backdrop-blur transition hover:-translate-y-0.5 hover:shadow-xl hover:shadow-slate-200/80"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <h3 className="text-lg font-bold tracking-tight text-slate-950">{project.name}</h3>
+        <span className="shrink-0 rounded-full bg-slate-950 px-2.5 py-1 font-mono text-[10px] font-semibold text-white">
+          v{project.currentVersion}
         </span>
       </div>
 
-      <p className="mt-4 text-base leading-7 text-slate-700">{artifact.summary}</p>
+      <StatusBadge status={project.status} />
 
-      <div className="mt-6 space-y-6">
-        {artifact.content.sections.map((section) => (
-          <section key={section.heading} className="rounded-3xl bg-slate-50 p-5">
-            <h3 className="text-lg font-semibold text-slate-950">{section.heading}</h3>
-            <p className="mt-2 leading-7 text-slate-700">{section.body}</p>
-            {section.bullets ? (
-              <ul className="mt-4 grid gap-2 text-sm text-slate-700">
-                {section.bullets.map((bullet) => (
-                  <li key={bullet} className="flex gap-3">
-                    <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-cyan-500" />
-                    <span>{bullet}</span>
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-          </section>
-        ))}
+      <dl className="mt-auto grid grid-cols-2 gap-3 border-t border-slate-100 pt-4 text-xs">
+        <div>
+          <dt className="font-semibold uppercase tracking-wider text-slate-400">Created</dt>
+          <dd className="mt-1 font-mono text-slate-700">{formatDate(project.createdAt)}</dd>
+        </div>
+        <div>
+          <dt className="font-semibold uppercase tracking-wider text-slate-400">Last Updated</dt>
+          <dd className="mt-1 font-mono text-slate-700">{formatDate(project.lastUpdated)}</dd>
+        </div>
+      </dl>
+
+      <div className="flex items-center justify-end text-xs font-semibold text-cyan-700 opacity-0 transition group-hover:opacity-100">
+        Open workspace ➜
       </div>
-
-      {artifact.content.tables ? (
-        <div className="mt-6 space-y-6">
-          {artifact.content.tables.map((table) => (
-            <div key={table.title} className="overflow-hidden rounded-3xl border border-slate-200">
-              <div className="border-b border-slate-200 bg-slate-950 px-5 py-3 text-sm font-semibold text-white">
-                {table.title}
-              </div>
-              <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-slate-200 text-left text-sm">
-                  <thead className="bg-white text-slate-950">
-                    <tr>
-                      {table.columns.map((column) => (
-                        <th key={column} scope="col" className="px-5 py-3 font-semibold">
-                          {column}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-200 bg-white text-slate-700">
-                    {table.rows.map((row) => (
-                      <tr key={row.join("|")}>
-                        {row.map((cell, index) => (
-                          <td key={`${cell}-${index}`} className="max-w-[28rem] px-5 py-4 align-top leading-6">
-                            {cell}
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : null}
-
-      {artifact.content.tasks ? (
-        <div className="mt-6 grid gap-4 md:grid-cols-2">
-          {artifact.content.tasks.map((taskGroup) => (
-            <div key={taskGroup.phase} className="rounded-3xl border border-slate-200 bg-white p-5">
-              <h3 className="font-semibold text-slate-950">{taskGroup.phase}</h3>
-              <ol className="mt-4 space-y-3 text-sm text-slate-700">
-                {taskGroup.items.map((item, index) => (
-                  <li key={item} className="flex gap-3">
-                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-cyan-600 text-xs font-bold text-white">
-                      {index + 1}
-                    </span>
-                    <span className="leading-6">{item}</span>
-                  </li>
-                ))}
-              </ol>
-            </div>
-          ))}
-        </div>
-      ) : null}
-    </article>
+    </button>
   );
 }
 
-export default async function HomePage() {
-  const artifacts = await getPlanningArtifacts();
-  const lastUpdated = artifacts.at(-1)?.updatedAt;
+export default function HomePage() {
+  const router = useRouter();
+  const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
+  const [error, setError] = useState("");
+  const [showIntake, setShowIntake] = useState(false);
+
+  const loadProjects = async () => {
+    try {
+      setError("");
+      const res = await fetch("/api/projects");
+      if (!res.ok) throw new Error("Failed to load projects");
+      const data = await res.json();
+      setProjects(data.projects || []);
+    } catch (err: any) {
+      setError(err.message || "Failed to load projects.");
+      setProjects([]);
+    }
+  };
+
+  useEffect(() => {
+    loadProjects();
+  }, []);
+
+  const openProject = (id: string) => router.push(`/projects/${id}`);
+
+  const loading = projects === null;
+  const isEmpty = !loading && projects.length === 0;
 
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_top_left,#cffafe,transparent_36%),linear-gradient(135deg,#f8fafc_0%,#eef2ff_48%,#ecfeff_100%)] px-6 py-8 text-slate-900 sm:py-12">
-      <section className="mx-auto max-w-7xl">
-        <div className="overflow-hidden rounded-[2.5rem] border border-white/70 bg-white/80 shadow-2xl shadow-slate-300/40 backdrop-blur">
-          <div className="grid gap-8 p-6 sm:p-10 lg:grid-cols-[1.15fr_0.85fr] lg:p-12">
+      <div className="mx-auto max-w-6xl">
+        {/* Header */}
+        <div className="overflow-hidden rounded-[2.5rem] border border-white/70 bg-slate-950 shadow-2xl shadow-slate-300/40">
+          <div className="flex flex-col gap-4 p-8 sm:flex-row sm:items-center sm:justify-between sm:p-10">
             <div>
-              <Badge>Context understood</Badge>
-              <h1 className="mt-6 max-w-4xl text-4xl font-black tracking-tight text-slate-950 sm:text-6xl">
-                {productContext.name}
+              <span className="rounded-full bg-white/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-cyan-300">
+                Workspace Dashboard
+              </span>
+              <h1 className="mt-4 text-3xl font-black tracking-tight text-white sm:text-4xl">
+                AI Cloud Architecture Generator
               </h1>
-              <p className="mt-6 max-w-3xl text-lg leading-8 text-slate-700">{productContext.concept}</p>
-              <div className="mt-8 rounded-3xl border border-emerald-200 bg-emerald-50 p-5">
-                <p className="text-sm font-bold uppercase tracking-[0.14em] text-emerald-700">Recommended next move</p>
-                <p className="mt-2 text-xl font-bold text-emerald-950">
-                  Build the Phase 1 technical specification first: data model, API contracts, and deterministic decision rules.
-                </p>
-                <p className="mt-3 leading-7 text-emerald-900">
-                  This is the highest-leverage priority because it defines the canonical inputs and outputs that brainstorming, HLD generation, AWS mapping, cost estimates, and future architecture deltas all depend on.
-                </p>
-              </div>
+              <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-300">
+                Describe a product idea, brainstorm requirements, and generate a genuinely-reasoned
+                multi-cloud architecture — with cost estimates, LLD detail, and Terraform export.
+              </p>
             </div>
-
-            <div className="space-y-6">
-              <IntakeForm />
-
-              <aside className="rounded-[2rem] bg-slate-950 p-6 text-white">
-                <p className="text-sm font-semibold uppercase tracking-[0.14em] text-cyan-300">Planning console</p>
-                <dl className="mt-6 grid gap-4">
-                  <div className="rounded-2xl bg-white/10 p-4">
-                    <dt className="text-sm text-slate-300">Current priority</dt>
-                    <dd className="mt-1 text-lg font-semibold">Phase 1 engineering spec</dd>
-                  </div>
-                  <div className="rounded-2xl bg-white/10 p-4">
-                    <dt className="text-sm text-slate-300">Stored artifacts</dt>
-                    <dd className="mt-1 text-lg font-semibold">{artifacts.length} planning records in Postgres</dd>
-                  </div>
-                  <div className="rounded-2xl bg-white/10 p-4">
-                    <dt className="text-sm text-slate-300">API endpoint</dt>
-                    <dd className="mt-1 break-all font-mono text-sm text-cyan-100">/api/planning/phase-1</dd>
-                  </div>
-                  <div className="rounded-2xl bg-white/10 p-4">
-                    <dt className="text-sm text-slate-300">Last seeded</dt>
-                    <dd className="mt-1 text-sm font-semibold">
-                      {lastUpdated ? lastUpdated.toISOString() : "Pending seed"}
-                    </dd>
-                  </div>
-                </dl>
-              </aside>
-            </div>
+            {!isEmpty && (
+              <button
+                onClick={() => setShowIntake((v) => !v)}
+                className="flex shrink-0 items-center justify-center rounded-2xl bg-cyan-600 px-5 py-3 text-sm font-semibold text-white shadow-md transition-all hover:bg-cyan-700 active:scale-[0.98]"
+              >
+                {showIntake ? "Cancel" : "+ New Project"}
+              </button>
+            )}
           </div>
         </div>
 
-        <div className="mt-8 grid gap-6 lg:grid-cols-2">
-          <section className="rounded-[2rem] border border-slate-200 bg-white/85 p-6 shadow-sm backdrop-blur">
-            <h2 className="text-xl font-bold text-slate-950">Finalized user journey</h2>
-            <ol className="mt-5 grid gap-3 text-sm text-slate-700">
-              {productContext.journey.map((step, index) => (
-                <li key={step} className="flex items-center gap-3 rounded-2xl bg-slate-50 p-3">
-                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-950 text-xs font-bold text-white">
-                    {index + 1}
-                  </span>
-                  <span>{step}</span>
-                </li>
-              ))}
-            </ol>
-          </section>
+        {error && (
+          <div className="mt-6 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-950 shadow-sm">
+            {error}
+          </div>
+        )}
 
-          <section className="rounded-[2rem] border border-slate-200 bg-white/85 p-6 shadow-sm backdrop-blur">
-            <h2 className="text-xl font-bold text-slate-950">Internal system modules</h2>
-            <div className="mt-5 flex flex-wrap gap-2">
-              {productContext.modules.map((module) => (
-                <span key={module} className="rounded-full border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
-                  {module}
-                </span>
+        {/* Loading */}
+        {loading && (
+          <div className="mt-16 flex flex-col items-center justify-center text-slate-500">
+            <div className="h-8 w-8 animate-spin rounded-full border-4 border-cyan-500 border-t-transparent" />
+            <span className="mt-4 text-sm font-semibold">Loading projects...</span>
+          </div>
+        )}
+
+        {/* Empty state */}
+        {isEmpty && (
+          <div className="mt-8 grid gap-8 lg:grid-cols-[1fr_1.1fr] lg:items-center">
+            <div className="rounded-[2rem] border-2 border-dashed border-slate-200 bg-white/60 p-10 text-center lg:text-left">
+              <span className="text-4xl">🧭</span>
+              <h2 className="mt-4 text-2xl font-black tracking-tight text-slate-950">
+                No projects yet
+              </h2>
+              <p className="mt-3 text-sm leading-6 text-slate-600">
+                Create your first project to start the discovery brainstorm. Once requirements are
+                gathered, you&apos;ll get a rule-engine-driven architecture with AWS, Azure, and GCP
+                mappings, cost bands, and a full reasoning trace for every decision.
+              </p>
+            </div>
+            <IntakeForm />
+          </div>
+        )}
+
+        {/* New project panel (toggle, only when projects already exist) */}
+        {!loading && !isEmpty && showIntake && (
+          <div className="mt-8 max-w-xl">
+            <IntakeForm />
+          </div>
+        )}
+
+        {/* Project grid */}
+        {!loading && !isEmpty && (
+          <div className="mt-8">
+            <h2 className="text-sm font-bold uppercase tracking-wider text-slate-500">
+              {projects.length} {projects.length === 1 ? "Project" : "Projects"}
+            </h2>
+            <div className="mt-4 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+              {projects.map((project) => (
+                <ProjectCard key={project.id} project={project} onOpen={openProject} />
               ))}
             </div>
-          </section>
-        </div>
-
-        <section className="mt-10 space-y-6">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-            <div>
-              <Badge>Claude Code handoff</Badge>
-              <h2 className="mt-3 text-3xl font-black tracking-tight text-slate-950">Engineering-ready planning artifacts</h2>
-            </div>
-            <p className="max-w-2xl text-sm leading-6 text-slate-600">
-              These records are persisted as structured JSON rather than static copy so later implementation can evolve them into editable specs, generated documents, and architecture-version diffs.
-            </p>
           </div>
-          <div className="grid gap-6">
-            {artifacts.map((artifact) => (
-              <ArtifactCard key={artifact.id} artifact={artifact} />
-            ))}
-          </div>
-        </section>
-      </section>
+        )}
+      </div>
     </main>
   );
 }

@@ -1,7 +1,77 @@
 import { db } from "@/db";
 import { conversations, projects } from "@/db/schema";
 import { getNextBrainstormTurn } from "@/lib/llm";
+import { sql } from "drizzle-orm";
 import { NextResponse } from "next/server";
+
+export type ProjectStatus =
+  | "just_started"
+  | "brainstorm_in_progress"
+  | "requirements_complete"
+  | "architecture_ready";
+
+function deriveStatus(row: { conversationCount: number; requirementCount: number; architectureCount: number }): ProjectStatus {
+  if (row.architectureCount > 0) return "architecture_ready";
+  if (row.requirementCount > 0) return "requirements_complete";
+  if (row.conversationCount > 0) return "brainstorm_in_progress";
+  return "just_started";
+}
+
+export async function GET() {
+  try {
+    // Single aggregated query (no N+1): each child table is pre-aggregated per project_id in
+    // its own subquery before joining, so the join itself never fans out across tables.
+    const result = await db.execute(sql`
+      SELECT
+        p.id,
+        p.name,
+        p.owner,
+        p.created_at AS "createdAt",
+        p.current_version AS "currentVersion",
+        COALESCE(conv.cnt, 0) AS "conversationCount",
+        COALESCE(req.cnt, 0) AS "requirementCount",
+        COALESCE(arch.cnt, 0) AS "architectureCount",
+        GREATEST(p.created_at, conv.last, req.last, arch.last) AS "lastUpdated"
+      FROM projects p
+      LEFT JOIN (
+        SELECT project_id, COUNT(*) AS cnt, MAX(created_at) AS last
+        FROM conversations GROUP BY project_id
+      ) conv ON conv.project_id = p.id
+      LEFT JOIN (
+        SELECT project_id, COUNT(*) AS cnt, MAX(created_at) AS last
+        FROM requirements GROUP BY project_id
+      ) req ON req.project_id = p.id
+      LEFT JOIN (
+        SELECT project_id, COUNT(*) AS cnt, MAX(created_at) AS last
+        FROM architectures GROUP BY project_id
+      ) arch ON arch.project_id = p.id
+      ORDER BY "lastUpdated" DESC NULLS LAST
+    `);
+
+    const projectsWithStatus = (result.rows as any[]).map((row) => {
+      const normalized = {
+        conversationCount: Number(row.conversationCount),
+        requirementCount: Number(row.requirementCount),
+        architectureCount: Number(row.architectureCount),
+      };
+      return {
+        id: row.id,
+        name: row.name,
+        owner: row.owner,
+        createdAt: row.createdAt,
+        currentVersion: row.currentVersion,
+        lastUpdated: row.lastUpdated,
+        ...normalized,
+        status: deriveStatus(normalized),
+      };
+    });
+
+    return NextResponse.json({ projects: projectsWithStatus });
+  } catch (error: any) {
+    console.error("Error listing projects:", error);
+    return NextResponse.json({ error: error.message || "Failed to list projects" }, { status: 500 });
+  }
+}
 
 export async function POST(request: Request) {
   try {

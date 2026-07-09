@@ -1,34 +1,5 @@
 import { integer, jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 
-export type PlanningArtifactContent = {
-  sections: Array<{
-    heading: string;
-    body: string;
-    bullets?: string[];
-  }>;
-  tables?: Array<{
-    title: string;
-    columns: string[];
-    rows: string[][];
-  }>;
-  tasks?: Array<{
-    phase: string;
-    items: string[];
-  }>;
-};
-
-export const planningArtifacts = pgTable("planning_artifacts", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  slug: text("slug").notNull().unique(),
-  title: text("title").notNull(),
-  priority: text("priority").notNull(),
-  summary: text("summary").notNull(),
-  content: jsonb("content").$type<PlanningArtifactContent>().notNull(),
-  displayOrder: integer("display_order").notNull().default(0),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
-
 // Phase 1 Schema Tables
 
 export const projects = pgTable("projects", {
