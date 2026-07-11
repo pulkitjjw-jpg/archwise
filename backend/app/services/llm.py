@@ -262,6 +262,74 @@ Do not include markdown code block formatting (like ```json) in your response, r
     return await _call_llm_with_retry(api_key, messages_for_api, "Requirement extraction")
 
 
+async def generate_conversation_summary(history: list[dict[str, str]], requirements: dict, api_key: str) -> str:
+    """Generates the Conversation Summary section's brief -- a short readable narrative of the
+    discovery conversation, not a transcript restatement. Called lazily (not on every requirements
+    save) and cached by the caller on the requirements row it was generated for."""
+    system_instruction = """
+You are a senior systems analyst writing a short, readable brief that summarizes a product discovery conversation for someone who wasn't in the room -- a teammate skimming the project later, or the user themselves reviewing what was decided.
+
+Write 3 to 5 sentences of flowing prose covering: what the user described building, what the AI asked or clarified along the way, what was ultimately decided (functional scope, scale, budget, compliance posture), and briefly why -- tie conclusions to specific things the user actually said.
+
+Rules:
+- Prose, not a bullet list or a blow-by-blow transcript restatement ("The user said X, then the AI asked Y...").
+- Be concrete: use the real numbers and details from the conversation and requirements, not vague generalities like "a scalable solution".
+- Do not editorialize or add caveats that aren't grounded in the conversation.
+
+You MUST respond with a raw JSON object matching this structure:
+{ "summary": string }
+Do not include markdown code block formatting (like ```json) in your response, return only the raw JSON.
+"""
+
+    input_context = {"conversationHistory": history, "finalRequirements": requirements}
+    messages_for_api = [
+        {"role": "system", "content": system_instruction},
+        {"role": "user", "content": json.dumps(input_context)},
+    ]
+    result = await _call_llm_with_retry(api_key, messages_for_api, "Conversation summary generation")
+    return result["summary"]
+
+
+async def generate_flow_story(
+    provider: str, components: list[dict], connections: list[dict], functional: list[str], api_key: str
+) -> str:
+    """Generates the Architecture Flow Story section for one provider -- a plain-language,
+    step-by-step walkthrough of request/data flow, synthesized from the real per-provider service
+    names and each component's already-computed reasoning (not regenerated from scratch, and not
+    generic per-service boilerplate). Called lazily per provider and cached by the caller on the
+    architecture row's flow_story[provider] key."""
+    system_instruction = """
+You are a senior cloud systems architect writing a plain-language, step-by-step walkthrough of how a request actually flows through a generated architecture, for someone with zero architecture background.
+
+You are given the component list (each with the REAL cloud service chosen for it on this specific provider, and the genuine architect reasoning for why it exists), the connections between components, and the product's functional requirements.
+
+Write a narrative (a few short paragraphs, not bullet points) that traces control/data flow starting from wherever a user request would enter the system, following the connections, ending at final storage or response. If there are multiple distinct paths (e.g. a compliance-only path, a background job path), cover each briefly rather than only the main path.
+
+Rules:
+- Use the actual service names given, not generic terms -- say "Amazon Aurora PostgreSQL", never just "the database".
+- Ground every claim in the provided components/connections/reasoning -- do not invent behavior not present in the data.
+- Tie specific steps back to the actual functional requirements where relevant (e.g. "since the product needs SMS reminders, the notification worker sends to...").
+- Write for a total beginner: explain WHY a step happens, not just that it happens.
+
+You MUST respond with a raw JSON object matching this structure:
+{ "story": string }
+Do not include markdown code block formatting (like ```json) in your response, return only the raw JSON.
+"""
+
+    input_context = {
+        "provider": provider,
+        "components": components,
+        "connections": connections,
+        "functionalRequirements": functional,
+    }
+    messages_for_api = [
+        {"role": "system", "content": system_instruction},
+        {"role": "user", "content": json.dumps(input_context)},
+    ]
+    result = await _call_llm_with_retry(api_key, messages_for_api, "Flow story generation")
+    return result["story"]
+
+
 async def generate_requirement_suggestions(functional: list[str], non_functional: dict, api_key: str) -> dict:
     """Generates clickable-chip candidate values for the Requirements panel's editable fields, so
     the user can select instead of typing. Called on-demand (not persisted) whenever the panel

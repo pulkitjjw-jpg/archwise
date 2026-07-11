@@ -31,6 +31,7 @@ def serialize_requirement(r: Requirement) -> dict:
         "nonFunctional": r.non_functional,
         "industryContext": r.industry_context,
         "version": r.version,
+        "conversationSummary": r.conversation_summary,
         "createdAt": r.created_at,
     }
 
@@ -43,5 +44,6 @@ def serialize_architecture(a: Architecture) -> dict:
         "hld": a.hld,
         "reasoning": a.reasoning,
         "cloudProvider": a.cloud_provider,
+        "flowStory": a.flow_story,
         "createdAt": a.created_at,
     }

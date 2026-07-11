@@ -71,6 +71,13 @@ class Requirement(Base):
         JSONB, nullable=False, server_default=INDUSTRY_CONTEXT_DEFAULT
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    # Lazily generated + cached on first request (not eagerly on every requirements save) --
+    # NULL until someone actually views the Conversation Summary section. This is the one field
+    # on an otherwise-immutable versioned row that gets an in-place UPDATE after insert: it's a
+    # derived cache of existing data (conversation + this row's own functional/nonFunctional),
+    # never a change to the requirements content itself, so it doesn't violate the "insert new
+    # version, never mutate" pattern the rest of this table follows.
+    conversation_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
     )
@@ -91,6 +98,12 @@ class Architecture(Base):
     hld: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     reasoning: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     cloud_provider: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'aws'"))
+    # Keyed by provider ("aws" | "azure" | "gcp" | "kubernetes" | "private"), each value lazily
+    # generated + cached the first time that provider's flow story is viewed -- generating all 5
+    # up front would mean 5 extra LLM calls on every architecture generation, on top of the one
+    # that already takes ~30-45s. Same "derived cache, not content" reasoning as
+    # Requirement.conversation_summary applies to updating this after insert.
+    flow_story: Mapped[dict[str, str]] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
     )

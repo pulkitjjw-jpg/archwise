@@ -14,11 +14,13 @@ from app.services.architecture_diff import calculate_total_cost, compute_archite
 from app.services.cloud_mapping import get_cloud_mapping
 from app.services.industry_rules import run_industry_rules
 from app.services.lld_rules import run_lld_rules_engine
-from app.services.llm import validate_and_generate_architecture
+from app.services.llm import generate_flow_story, validate_and_generate_architecture
 from app.services.rules_engine import run_rules_engine
 from app.services.validation import validate_architecture_layout
 
 router = APIRouter()
+
+VALID_FLOW_STORY_PROVIDERS = ("aws", "azure", "gcp", "kubernetes", "private")
 
 
 async def _latest_architecture(db: AsyncSession, project_id: uuid.UUID) -> Architecture | None:
@@ -69,6 +71,63 @@ async def list_architectures(project_id: uuid.UUID, all: str | None = None, db: 
         return {"architecture": None}
 
     return {"architecture": serialize_architecture(record)}
+
+
+@router.post("/projects/{project_id}/architectures/{architecture_id}/flow-story")
+async def get_flow_story(
+    project_id: uuid.UUID, architecture_id: uuid.UUID, provider: str, db: AsyncSession = Depends(get_db)
+) -> dict:
+    if provider not in VALID_FLOW_STORY_PROVIDERS:
+        raise HTTPException(status_code=400, detail="Invalid provider specified")
+
+    record = (
+        await db.execute(
+            select(Architecture).where(Architecture.id == architecture_id, Architecture.project_id == project_id)
+        )
+    ).scalar_one_or_none()
+    if not record:
+        raise HTTPException(status_code=404, detail="Architecture version not found")
+
+    # Cached per provider on this specific architecture version -- switching the provider tab
+    # back and forth never re-triggers generation once each provider has been viewed once.
+    if record.flow_story.get(provider):
+        return {"story": record.flow_story[provider]}
+
+    reqs = (
+        await db.execute(
+            select(Requirement)
+            .where(Requirement.project_id == project_id)
+            .order_by(Requirement.version.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    functional = reqs.functional if reqs else []
+
+    components = record.hld.get("components", [])
+    connections = record.hld.get("connections", [])
+
+    # Synthesize from the reasoning + service names already computed for this provider -- no new
+    # architectural decisions are made here, just narrated.
+    provider_components = [
+        {
+            "id": c["id"],
+            "name": c["name"],
+            "type": c["type"],
+            "reasoning": c.get("reasoning", ""),
+            "serviceName": ((c.get("cloudMappings") or {}).get(provider) or {}).get("serviceName", c["name"]),
+        }
+        for c in components
+    ]
+
+    story = await generate_flow_story(provider, provider_components, connections, functional, settings.openrouter_api_key)
+
+    # Cache-only UPDATE on an otherwise-immutable versioned row -- see Architecture.flow_story's
+    # docstring in models.py. SQLAlchemy won't detect a plain in-place dict mutation on a JSONB
+    # column as a change, so reassign the whole dict rather than record.flow_story[provider] = ...
+    record.flow_story = {**record.flow_story, provider: story}
+    await db.commit()
+
+    return {"story": story}
 
 
 @router.post("/projects/{project_id}/architectures", status_code=201)

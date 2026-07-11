@@ -41,6 +41,7 @@ type RequirementsData = {
     complianceAnswers: Array<{ question: string; answer: string }>;
     flags: Record<string, unknown>;
   };
+  conversationSummary?: string | null;
 };
 
 const INDUSTRY_BADGE: Record<"fintech" | "healthtech", { label: string; emoji: string }> = {
@@ -70,6 +71,35 @@ export default function RequirementsPanel({
   const [extracting, setExtracting] = useState(false);
   const [editMode, setEditMode] = useState(false);
   const [error, setError] = useState("");
+
+  // Conversation Summary -- cached server-side on the requirements row, so this only pays for a
+  // real LLM call the first time a given requirements version is viewed.
+  const [conversationSummary, setConversationSummary] = useState<string | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
+
+  const loadConversationSummary = async () => {
+    try {
+      setSummaryLoading(true);
+      const res = await fetch(`/api/projects/${projectId}/requirements/summary`, { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        setConversationSummary(data.summary || null);
+      }
+    } catch (err) {
+      console.error("Failed to load conversation summary:", err);
+    } finally {
+      setSummaryLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!requirements) return;
+    if (requirements.conversationSummary) {
+      setConversationSummary(requirements.conversationSummary);
+      return;
+    }
+    loadConversationSummary();
+  }, [requirements]);
 
   // Edit states
   const [editedFunctional, setEditedFunctional] = useState("");
@@ -369,6 +399,27 @@ export default function RequirementsPanel({
 
       {/* Main Content */}
       <div className="mt-6 flex-1 space-y-6">
+        {/* Conversation Summary -- a readable brief of the discovery conversation, not the raw
+            transcript (that's already visible in the chat panel). Cached server-side, so this
+            only shows a loading state the very first time a given requirements version is
+            viewed. */}
+        <div>
+          <h4 className="mb-3 flex items-center gap-2 text-sm font-bold text-ink">
+            <span>📝</span> Conversation Summary
+            <InfoTooltip text="A short, readable brief of what you described and what was decided — generated once per requirements version and cached, not the raw chat transcript." />
+          </h4>
+          {summaryLoading ? (
+            <div className="flex items-center gap-1.5 rounded-2xl bg-paper p-4 text-xs text-ink-faint italic">
+              <span className="h-2.5 w-2.5 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+              Summarizing the conversation...
+            </div>
+          ) : conversationSummary ? (
+            <p className="rounded-2xl bg-paper p-4 text-sm text-ink-muted leading-relaxed">{conversationSummary}</p>
+          ) : (
+            <p className="rounded-2xl bg-paper p-4 text-xs text-ink-faint italic">Summary unavailable.</p>
+          )}
+        </div>
+
         {/* Functional Requirements */}
         <div>
           <h4 className="mb-3 flex items-center gap-2 text-sm font-bold text-ink">

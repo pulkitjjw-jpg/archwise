@@ -9,6 +9,7 @@ import { validateArchitectureLayout, getProviderMaturityWarning } from "@/lib/va
 import { resolveServiceIcon } from "@/lib/service-icons";
 import { getLearnContent, getPlainDescription } from "@/lib/component-descriptions";
 import { exportDiagramAsPng, exportDiagramAsSvg, type PngExportEdge, type PngExportNode } from "@/lib/diagram-export";
+import { buildFlowDocumentationMarkdown, downloadMarkdown, type FlowDocComponent } from "@/lib/flow-documentation-export";
 import InfoTooltip from "./InfoTooltip";
 
 type CloudProviderKey = "aws" | "azure" | "gcp" | "kubernetes" | "private";
@@ -158,11 +159,13 @@ type ConnectionData = {
 };
 
 type ArchitectureData = {
+  id: string;
   version: string;
   hld: {
     components: ComponentData[];
     connections: ConnectionData[];
   };
+  flowStory?: Record<string, string>;
   reasoning: {
     decisions: any[];
     assumptions: string[];
@@ -411,6 +414,54 @@ export default function ArchitectureWorkspace({
       setError("Failed to export diagram image. Please try again.");
     } finally {
       setImageExportBusy(false);
+    }
+  };
+
+  const [docsExportBusy, setDocsExportBusy] = useState(false);
+
+  // Separate export action from both Export TF (deployable code) and Export Image (just the
+  // picture) -- this is the only one with narrative explanation baked in, by design.
+  const handleExportFlowDocs = async () => {
+    if (!architecture) return;
+    setImageExportOpen(false);
+    try {
+      setDocsExportBusy(true);
+
+      const [projectRes, summaryRes] = await Promise.all([
+        fetch(`/api/projects/${projectId}`),
+        fetch(`/api/projects/${projectId}/requirements/summary`, { method: "POST" }),
+      ]);
+      const projectName = projectRes.ok ? (await projectRes.json())?.project?.name : undefined;
+      const conversationSummary = summaryRes.ok ? (await summaryRes.json())?.summary : null;
+
+      const components: FlowDocComponent[] = architecture.hld.components.map((c) => {
+        const mapping = getMappingForProvider(c, activeProvider);
+        return {
+          name: c.name,
+          type: c.type,
+          serviceName: mapping?.serviceName || c.name,
+          reasoning: c.reasoning || "",
+        };
+      });
+
+      const costs = calculateTotalCost(activeProvider);
+      const markdown = buildFlowDocumentationMarkdown({
+        projectName: projectName || "Untitled Project",
+        providerLabel: PROVIDER_LABELS[activeProvider],
+        version: architecture.version,
+        conversationSummary,
+        flowStory: currentFlowStory || null,
+        components,
+        costMin: costs.min,
+        costMax: costs.max,
+      });
+
+      downloadMarkdown(markdown, `architecture-docs-v${architecture.version}-${activeProvider}`);
+    } catch (err) {
+      console.error("Flow documentation export failed:", err);
+      setError("Failed to export architecture documentation. Please try again.");
+    } finally {
+      setDocsExportBusy(false);
     }
   };
 
@@ -775,6 +826,46 @@ export default function ArchitectureWorkspace({
   const [imageExportOpen, setImageExportOpen] = useState(false);
   const [imageExportBusy, setImageExportBusy] = useState(false);
   const imageExportRef = useRef<HTMLSpanElement>(null);
+
+  // Architecture Flow Story -- generated per provider, cached both server-side (on the
+  // architecture row) and here client-side (so toggling between providers you've already
+  // viewed doesn't even cost a network round trip). Refetches only when the architecture
+  // version or active provider actually changes.
+  const [flowStoryCache, setFlowStoryCache] = useState<Record<string, string>>({});
+  const [flowStoryLoading, setFlowStoryLoading] = useState(false);
+  const flowStoryKey = architecture ? `${architecture.id}:${activeProvider}` : null;
+  const currentFlowStory = flowStoryKey ? flowStoryCache[flowStoryKey] : undefined;
+
+  useEffect(() => {
+    if (!architecture) return;
+    const key = `${architecture.id}:${activeProvider}`;
+    if (flowStoryCache[key]) return;
+
+    const embedded = architecture.flowStory?.[activeProvider];
+    if (embedded) {
+      setFlowStoryCache((prev) => ({ ...prev, [key]: embedded }));
+      return;
+    }
+
+    let cancelled = false;
+    setFlowStoryLoading(true);
+    fetch(`/api/projects/${projectId}/architectures/${architecture.id}/flow-story?provider=${activeProvider}`, {
+      method: "POST",
+    })
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error("Failed to load flow story"))))
+      .then((data) => {
+        if (cancelled) return;
+        setFlowStoryCache((prev) => ({ ...prev, [key]: data.story }));
+      })
+      .catch((err) => console.error("Failed to load flow story:", err))
+      .finally(() => {
+        if (!cancelled) setFlowStoryLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [architecture, activeProvider]);
 
   useEffect(() => {
     if (!imageExportOpen) return;
@@ -1176,6 +1267,20 @@ export default function ArchitectureWorkspace({
                       <InfoTooltip text="Downloads the diagram as an image (PNG) or scalable vector (SVG) — for docs, slides, or sharing. This is just the picture; use Export TF for the actual deployable infrastructure code." />
                     </span>
 
+                    {/* Export Flow Documentation -- the one export with narrative explanation
+                        baked in, kept separate from both the image (no explanation) and the
+                        Terraform/K8s export (deployable code, no explanation) by design. */}
+                    <span className="inline-flex items-center gap-1">
+                      <button
+                        onClick={handleExportFlowDocs}
+                        disabled={docsExportBusy}
+                        className="rounded-xl border border-line-strong bg-panel hover:bg-paper text-ink-muted px-3 py-1.5 text-[9.5px] font-extrabold uppercase transition shadow-sm active:scale-95 flex items-center gap-1 disabled:opacity-50"
+                      >
+                        <span>📄</span> {docsExportBusy ? "Exporting..." : "Export Docs"}
+                      </button>
+                      <InfoTooltip text="Downloads a Markdown file with the project summary, this provider's flow story, and the full component list with reasoning — real documentation, not just a picture or raw code." />
+                    </span>
+
                     {/* Deployment Target Toggle */}
                     <span className="inline-flex items-center gap-1">
                       <div className="flex bg-paper/80 p-0.5 rounded-lg border border-line shadow-sm">
@@ -1487,6 +1592,32 @@ export default function ArchitectureWorkspace({
                       </>
                     )}
                   </TransformWrapper>
+                </div>
+
+                {/* Architecture Flow Story -- plain-language, step-by-step walkthrough of
+                    request/data flow for the currently active provider, synthesized from each
+                    component's real service name + stored reasoning on that provider. Refetches
+                    (from cache, usually) whenever the provider tab changes. */}
+                <div className="mt-6 rounded-3xl border border-accent/25 bg-accent-soft/10 p-5 shadow-sm">
+                  <h4 className="flex items-center gap-2 text-xs font-extrabold uppercase tracking-wider text-ink">
+                    <span>🗺️</span> Architecture Flow Story
+                    <span className="rounded-full bg-ink px-2 py-0.5 text-[9px] font-bold text-white uppercase">
+                      {PROVIDER_LABELS[activeProvider]}
+                    </span>
+                    <InfoTooltip text="A step-by-step, plain-language walkthrough of how a request actually moves through this design on the selected provider — generated from the real service names and reasoning above, not a generic description." />
+                  </h4>
+                  {flowStoryLoading ? (
+                    <div className="mt-3 flex items-center gap-1.5 text-xs text-ink-faint italic">
+                      <span className="h-2.5 w-2.5 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+                      Writing the flow story for {PROVIDER_LABELS[activeProvider]}...
+                    </div>
+                  ) : currentFlowStory ? (
+                    <p className="mt-3 text-sm text-ink-muted leading-relaxed whitespace-pre-line">
+                      {currentFlowStory}
+                    </p>
+                  ) : (
+                    <p className="mt-3 text-xs text-ink-faint italic">Flow story unavailable.</p>
+                  )}
                 </div>
 
                 {/* Manual Editing Controls Toolbar */}

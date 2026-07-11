@@ -10,7 +10,11 @@ from app.db import get_db
 from app.models import Conversation, Requirement
 from app.schemas import RequirementsPutRequest
 from app.serializers import serialize_requirement
-from app.services.llm import extract_requirements_from_history, generate_requirement_suggestions
+from app.services.llm import (
+    extract_requirements_from_history,
+    generate_conversation_summary,
+    generate_requirement_suggestions,
+)
 
 router = APIRouter()
 
@@ -89,6 +93,42 @@ async def get_requirement_suggestions(
         settings.openrouter_api_key,
     )
     return {"suggestions": suggestions}
+
+
+@router.post("/projects/{project_id}/requirements/summary")
+async def get_conversation_summary(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> dict:
+    latest = await _latest_requirement(db, project_id)
+    if not latest:
+        raise HTTPException(status_code=400, detail="No requirements yet -- complete the discovery conversation first")
+
+    # Cached on the requirements row it describes -- regenerating only happens when a NEW
+    # requirements version is created (a fresh row with conversation_summary NULL), never on
+    # repeat views of the same version.
+    if latest.conversation_summary:
+        return {"summary": latest.conversation_summary}
+
+    history = (
+        (
+            await db.execute(
+                select(Conversation)
+                .where(Conversation.project_id == project_id)
+                .order_by(Conversation.created_at.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    summary = await generate_conversation_summary(
+        [{"role": h.role, "message": h.message} for h in history],
+        {"functional": latest.functional, "nonFunctional": latest.non_functional},
+        settings.openrouter_api_key,
+    )
+
+    latest.conversation_summary = summary
+    await db.commit()
+
+    return {"summary": summary}
 
 
 @router.put("/projects/{project_id}/requirements")
