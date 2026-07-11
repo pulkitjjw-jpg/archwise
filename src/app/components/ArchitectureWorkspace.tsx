@@ -1551,7 +1551,7 @@ export default function ArchitectureWorkspace({
               className={`bg-transparent text-xs font-bold text-ink focus:outline-none cursor-pointer ${isEditing ? "opacity-50 cursor-not-allowed" : ""}`}
             >
               {versionList.map((v) => (
-                <option key={v.version} value={v.version}>
+                <option key={v.id} value={v.version}>
                   v{v.version} {v.version === versionList[0]?.version ? "(Latest)" : ""}
                 </option>
               ))}
@@ -2955,12 +2955,27 @@ export default function ArchitectureWorkspace({
              Flow Story (Workstream G) rather than an independent narrative. */
           <div className="h-full overflow-y-auto p-6">
             <div className="mx-auto max-w-3xl">
-              <div className="flex items-center gap-2">
-                <h4 className="text-lg font-black text-ink">User Journey Architecture</h4>
-                <span className="rounded-full bg-ink px-2 py-0.5 text-[10px] font-extrabold text-white uppercase tracking-wider">
-                  {PROVIDER_LABELS[activeProvider]}
-                </span>
-                <InfoTooltip text="A step-by-step walkthrough from the end user's perspective -- what they do, what happens behind the scenes, and which real components are involved at each step. Synthesized from the Architecture Flow Story for this provider, restructured into discrete steps. Click a component chip to jump to it in Topology View." />
+              <div className="flex flex-wrap items-center justify-between gap-y-2">
+                <div className="flex items-center gap-2">
+                  <h4 className="text-lg font-black text-ink">User Journey Architecture</h4>
+                  <InfoTooltip text="A step-by-step walkthrough from the end user's perspective -- what they do, what happens behind the scenes, and which real components are involved at each step. Synthesized from the Architecture Flow Story for this provider, restructured into discrete steps. Click a component chip to jump to it in Topology View." />
+                </div>
+                {/* Provider toggle, mirroring the one in Topology View -- the journey text and
+                    component names genuinely differ per provider, so switching shouldn't
+                    require leaving this view. */}
+                <div className="flex bg-paper/80 p-0.5 rounded-lg border border-line shadow-sm">
+                  {(["aws", "azure", "gcp", "kubernetes", "private"] as const).map((p) => (
+                    <button
+                      key={p}
+                      onClick={() => setActiveProvider(p)}
+                      className={`px-2 py-1 text-[9px] font-extrabold uppercase rounded transition ${
+                        activeProvider === p ? "bg-ink text-white shadow-sm" : "text-ink-muted hover:text-ink"
+                      }`}
+                    >
+                      {PROVIDER_LABELS[p]}
+                    </button>
+                  ))}
+                </div>
               </div>
               <p className="mt-1.5 text-xs text-ink-muted leading-relaxed">
                 How a real user moves through this product end-to-end, mapped to the actual infrastructure behind each step -- the way a solutions architect would walk through it in a design review.
