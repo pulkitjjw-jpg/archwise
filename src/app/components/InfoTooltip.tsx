@@ -5,13 +5,22 @@ import { createPortal } from "react-dom";
 
 interface InfoTooltipProps {
   text: string;
-  className?: string;
+  /** "dark" for icons that sit on a dark/colored surface (e.g. the chat header) -- swaps to a
+   * light-on-dark palette instead of appending classes, since Tailwind utility class *order* in
+   * the compiled stylesheet (not the order in a className string) decides which color wins when
+   * two color utilities for the same property collide, so naive appending isn't reliable. */
+  variant?: "default" | "dark";
 }
+
+const VARIANT_CLASSES: Record<"default" | "dark", string> = {
+  default: "border-ink-faint/60 text-ink-faint hover:border-accent hover:text-accent hover:bg-accent-soft",
+  dark: "border-white/40 text-white/70 hover:border-white hover:text-white hover:bg-white/10",
+};
 
 // Portal-rendered so it's never clipped by an ancestor's overflow-hidden (the diagram canvas,
 // the workspace tabs, several card containers all have one) -- position is computed from the
 // anchor button's real viewport coordinates instead of relying on CSS containment.
-export default function InfoTooltip({ text, className = "" }: InfoTooltipProps) {
+export default function InfoTooltip({ text, variant = "default" }: InfoTooltipProps) {
   const [open, setOpen] = useState(false);
   const [coords, setCoords] = useState<{ top: number; left: number; flip: boolean } | null>(null);
   const anchorRef = useRef<HTMLButtonElement>(null);
@@ -59,7 +68,7 @@ export default function InfoTooltip({ text, className = "" }: InfoTooltipProps) 
           else show();
         }}
         aria-label="More info"
-        className={`inline-flex h-3.5 w-3.5 flex-none items-center justify-center rounded-full border border-ink-faint/60 text-[9px] font-bold leading-none text-ink-faint transition hover:border-accent hover:text-accent hover:bg-accent-soft ${className}`}
+        className={`inline-flex h-3.5 w-3.5 flex-none items-center justify-center rounded-full border text-[9px] font-bold leading-none transition ${VARIANT_CLASSES[variant]}`}
       >
         i
       </button>

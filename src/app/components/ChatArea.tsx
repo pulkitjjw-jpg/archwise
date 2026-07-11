@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import InfoTooltip from "./InfoTooltip";
 
 type ConversationTurn = {
   id: string;
@@ -136,8 +137,12 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
               {stageLabel}
             </p>
           </div>
-          <span className="rounded-full bg-white/10 px-3 py-1 text-xs font-semibold">
+          <span className="flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1 text-xs font-semibold">
             {progressPercent}%
+            <InfoTooltip
+              text="How far along the discovery conversation is — not a countdown to a fixed number of questions, just a rough sense of progress toward having enough detail to generate an architecture."
+              variant="dark"
+            />
           </span>
         </div>
 
@@ -202,9 +207,10 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
       {/* Message Input Form */}
       <div className="border-t border-line bg-paper/50 p-4 space-y-3">
         {latestStage === "requirement_gathering" && (
-          <div className="rounded-xl bg-success-soft/70 border border-success/25 p-2 text-center text-xs">
+          <div className="flex items-center justify-center gap-1.5 rounded-xl bg-success-soft/70 border border-success/25 p-2 text-center text-xs">
             <span className="font-semibold text-success">Discovery concluded.</span>{" "}
             <span className="text-success">Need to report changes? Type a growth trigger below.</span>
+            <InfoTooltip text="A 'growth trigger' just means describing a change to your product — new scale, a new feature, a bigger budget. Typing one here updates your requirements and lets you regenerate an updated architecture, without starting over." />
           </div>
         )}
 
