@@ -116,6 +116,14 @@ class Architecture(Base):
     journey_steps: Mapped[dict[str, list[dict[str, Any]]]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
+    # Keyed by component id -> {"x": float, "y": float}, a manual drag-to-reposition override on
+    # top of the auto-computed ELK layout (Workstream Q). Purely cosmetic/visual, never a content
+    # change, so -- same "sanctioned in-place UPDATE" exception as flow_story/journey_steps above
+    # -- this is merged in directly via a lightweight PATCH endpoint rather than going through the
+    # insert-new-version manual-save flow every other component edit uses.
+    layout_overrides: Mapped[dict[str, dict[str, float]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
     )

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import dagre from "dagre";
+import { createPortal } from "react-dom";
 import { Icon } from "@iconify/react";
 import { TransformWrapper, TransformComponent } from "react-zoom-pan-pinch";
 import { runLldRulesEngine } from "@/lib/lld-rules";
@@ -10,6 +10,13 @@ import { resolveServiceIcon } from "@/lib/service-icons";
 import { getLearnContent, getPlainDescription } from "@/lib/component-descriptions";
 import { exportDiagramAsPng, exportDiagramAsSvg, type PngExportEdge, type PngExportNode } from "@/lib/diagram-export";
 import { buildFlowDocumentationMarkdown, downloadMarkdown, type FlowDocComponent } from "@/lib/flow-documentation-export";
+import {
+  computeDiagramLayoutAsync,
+  buildRoundedPath,
+  DIAGRAM_NODE_WIDTH,
+  DIAGRAM_NODE_HEIGHT,
+  type DiagramLayout,
+} from "@/lib/diagram-layout";
 import InfoTooltip from "./InfoTooltip";
 
 type CloudProviderKey = "aws" | "azure" | "gcp" | "kubernetes" | "private";
@@ -244,52 +251,6 @@ function getSubChoiceOptions(
   return [];
 }
 
-const DIAGRAM_NODE_WIDTH = 208;
-const DIAGRAM_NODE_HEIGHT = 68;
-
-type DiagramLayout = {
-  nodes: Record<string, { x: number; y: number; width: number; height: number }>;
-  edgePoints: Record<string, { x: number; y: number }[]>;
-  width: number;
-  height: number;
-};
-
-function computeDiagramLayout(components: ComponentData[], connections: ConnectionData[]): DiagramLayout {
-  if (components.length === 0) {
-    return { nodes: {}, edgePoints: {}, width: 400, height: 300 };
-  }
-
-  const g = new dagre.graphlib.Graph();
-  g.setGraph({ rankdir: "LR", nodesep: 44, ranksep: 110, marginx: 40, marginy: 40 });
-  g.setDefaultEdgeLabel(() => ({}));
-
-  const ids = new Set(components.map((c) => c.id));
-  components.forEach((c) => {
-    g.setNode(c.id, { width: DIAGRAM_NODE_WIDTH, height: DIAGRAM_NODE_HEIGHT });
-  });
-  connections.forEach((conn) => {
-    if (ids.has(conn.from) && ids.has(conn.to)) {
-      g.setEdge(conn.from, conn.to);
-    }
-  });
-
-  dagre.layout(g);
-
-  const nodes: DiagramLayout["nodes"] = {};
-  g.nodes().forEach((id) => {
-    const n = g.node(id);
-    nodes[id] = { x: n.x, y: n.y, width: n.width, height: n.height };
-  });
-
-  const edgePoints: DiagramLayout["edgePoints"] = {};
-  g.edges().forEach((e) => {
-    edgePoints[`${e.v}->${e.w}`] = g.edge(e).points;
-  });
-
-  const graph = g.graph();
-  return { nodes, edgePoints, width: graph.width || 400, height: graph.height || 300 };
-}
-
 // Honest, staged descriptions of what the generation call is actually doing server-side —
 // shown progressively (not tied to real server progress events) to make the ~30-45s wait
 // legible instead of a single unmoving spinner.
@@ -369,6 +330,7 @@ type ArchitectureData = {
   };
   flowStory?: Record<string, string>;
   journeySteps?: Record<string, JourneyStep[]>;
+  layoutOverrides?: Record<string, { x: number; y: number }>;
   reasoning: {
     decisions: any[];
     assumptions: string[];
@@ -609,7 +571,10 @@ export default function ArchitectureWorkspace({
           .map((conn) => {
             const points = diagramLayout.edgePoints[`${conn.from}->${conn.to}`];
             if (!points || points.length < 2) return null;
-            return { d: points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ") };
+            // Same rounded-corner path builder the live diagram uses (see below) -- export must
+            // match what's on screen exactly, orthogonal routing and manual repositioning
+            // included, not a simplified straight-line re-derivation.
+            return { d: buildRoundedPath(points) };
           })
           .filter((e): e is PngExportEdge => e !== null);
 
@@ -1007,8 +972,99 @@ export default function ArchitectureWorkspace({
   const diagramConnections = isEditing
     ? draftHld?.connections || []
     : architecture?.hld.connections || [];
-  const diagramLayout = computeDiagramLayout(diagramComponents, diagramConnections);
+
+  // Manual drag-to-reposition overrides (Workstream Q) -- local state seeded from whatever the
+  // loaded architecture version already has saved, optimistically updated on drag and persisted
+  // via a lightweight PATCH that merges into the CURRENT version's layout_overrides without
+  // creating a new version (purely cosmetic, not a content change -- same precedent as
+  // flow_story/journey_steps elsewhere on this same model).
+  const [layoutOverrides, setLayoutOverrides] = useState<Record<string, { x: number; y: number }>>({});
+  useEffect(() => {
+    setLayoutOverrides(architecture?.layoutOverrides || {});
+  }, [architecture?.id]);
+
+  const [diagramLayout, setDiagramLayout] = useState<DiagramLayout>({ nodes: {}, edgePoints: {}, width: 400, height: 300 });
+  // ELK's layout() is async (unlike the old dagre call), so this has to be an effect rather than
+  // a plain computed value. Keyed off a flattened string rather than the raw arrays/objects
+  // directly, since diagramComponents/diagramConnections are freshly-derived (non-stable
+  // reference) on every render -- depending on them directly would re-run ELK on every render.
+  const layoutKey = `${diagramComponents.map((c) => c.id).join(",")}|${diagramConnections
+    .map((c) => `${c.from}-${c.to}`)
+    .join(",")}|${JSON.stringify(layoutOverrides)}`;
+  useEffect(() => {
+    let cancelled = false;
+    computeDiagramLayoutAsync(diagramComponents, diagramConnections, layoutOverrides).then((result) => {
+      if (!cancelled) setDiagramLayout(result);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layoutKey]);
+
   const nodeCoords = diagramLayout.nodes;
+
+  // Drag-to-reposition (Workstream Q) -- live drag preview is a separate, ephemeral piece of
+  // state from layoutOverrides so dragging doesn't trigger an ELK re-layout on every pointer-move
+  // frame (only the final drop does, via layoutOverrides). renderCoords overlays the live drag
+  // position onto nodeCoords for whichever single node is currently being dragged, so both the
+  // node itself and its connected edges track the pointer smoothly.
+  const [draggingNodeId, setDraggingNodeId] = useState<string | null>(null);
+  const [dragPreviewPos, setDragPreviewPos] = useState<{ x: number; y: number } | null>(null);
+  const dragStartRef = useRef<{ screenX: number; screenY: number; nodeX: number; nodeY: number } | null>(null);
+  const renderCoords =
+    draggingNodeId && dragPreviewPos
+      ? { ...nodeCoords, [draggingNodeId]: { ...nodeCoords[draggingNodeId], ...dragPreviewPos } }
+      : nodeCoords;
+
+  const handleNodePointerDown = (e: React.PointerEvent, nodeId: string) => {
+    // Left-button/primary pointer only, and never while manually connecting edges (the "+ Add
+    // Connection" flow) or the node is being clicked for its own remove button, which stops
+    // propagation before this ever fires.
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    const coord = nodeCoords[nodeId];
+    if (!coord) return;
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    dragStartRef.current = { screenX: e.clientX, screenY: e.clientY, nodeX: coord.x, nodeY: coord.y };
+    setDraggingNodeId(nodeId);
+  };
+
+  const handleNodePointerMove = (e: React.PointerEvent) => {
+    if (!draggingNodeId || !dragStartRef.current) return;
+    const scale = diagramTransformRef.current?.state?.scale || 1;
+    const dx = (e.clientX - dragStartRef.current.screenX) / scale;
+    const dy = (e.clientY - dragStartRef.current.screenY) / scale;
+    setDragPreviewPos({ x: dragStartRef.current.nodeX + dx, y: dragStartRef.current.nodeY + dy });
+  };
+
+  const handleNodePointerUp = async (e: React.PointerEvent, nodeId: string) => {
+    if (draggingNodeId !== nodeId) return;
+    const start = dragStartRef.current;
+    dragStartRef.current = null;
+    setDraggingNodeId(null);
+
+    if (!start || !dragPreviewPos || !architecture) {
+      setDragPreviewPos(null);
+      return;
+    }
+    const moved = Math.hypot(e.clientX - start.screenX, e.clientY - start.screenY) > 3;
+    const finalPos = dragPreviewPos;
+    setDragPreviewPos(null);
+    if (!moved) return; // a plain click, not a drag -- let the node's own onClick select it
+
+    setLayoutOverrides((prev) => ({ ...prev, [nodeId]: finalPos }));
+    try {
+      await fetch(`/api/projects/${projectId}/architectures/${architecture.id}/layout`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ componentId: nodeId, x: finalPos.x, y: finalPos.y }),
+      });
+    } catch (err) {
+      console.error("Failed to persist node position:", err);
+    }
+  };
+
   const selectedNode = isEditing
     ? draftHld?.components.find((c) => c.id === selectedNodeId)
     : architecture?.hld.components.find((c) => c.id === selectedNodeId);
@@ -1058,6 +1114,22 @@ export default function ArchitectureWorkspace({
   const [imageExportOpen, setImageExportOpen] = useState(false);
   const [imageExportBusy, setImageExportBusy] = useState(false);
   const imageExportRef = useRef<HTMLSpanElement>(null);
+
+  // Fullscreen diagram mode (Workstream Q) -- more room to visually untangle complex
+  // architectures. Escape exits it, same as any other fullscreen/modal UI convention.
+  const [isDiagramFullscreen, setIsDiagramFullscreen] = useState(false);
+  useEffect(() => {
+    if (!isDiagramFullscreen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setIsDiagramFullscreen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = "";
+    };
+  }, [isDiagramFullscreen]);
 
   // Architecture Flow Story -- generated per provider, cached both server-side (on the
   // architecture row) and here client-side (so toggling between providers you've already
@@ -2161,8 +2233,26 @@ export default function ArchitectureWorkspace({
                   </div>
                 )}
 
-                {/* Topology Diagram — dagre-laid-out SVG canvas with pan/zoom for larger graphs */}
-                <div ref={diagramViewportRef} className="relative mt-6 rounded-2xl border border-line bg-paper shadow-inner overflow-hidden" style={{ height: "min(780px, calc(100vh - 260px))" }}>
+                {/* Topology Diagram — ELK-laid-out SVG canvas with pan/zoom for larger graphs.
+                    Fullscreen mode (Workstream Q) reuses this exact same element rather than a
+                    duplicated copy -- it just becomes a fixed full-viewport overlay instead of
+                    an inline card, so every handler (drag, export, zoom) and every byte of data
+                    stays identical between the two states by construction. Portaled to
+                    document.body when fullscreen: several ancestor cards use backdrop-blur,
+                    which (like transform/filter) creates a CSS containing block for
+                    position:fixed descendants -- without the portal, "fullscreen" would only
+                    ever fill that ancestor's box, not the real viewport. */}
+                {(() => {
+                  const diagramNode = (
+                <div
+                  ref={diagramViewportRef}
+                  className={
+                    isDiagramFullscreen
+                      ? "fixed inset-0 z-50 bg-paper"
+                      : "relative mt-6 rounded-2xl border border-line bg-paper shadow-inner overflow-hidden"
+                  }
+                  style={isDiagramFullscreen ? undefined : { height: "min(780px, calc(100vh - 260px))" }}
+                >
                   <TransformWrapper ref={diagramTransformRef} initialScale={1} minScale={0.15} maxScale={2.5}>
                     {({ zoomIn, zoomOut }) => (
                       <>
@@ -2208,6 +2298,17 @@ export default function ArchitectureWorkspace({
                           >
                             <Icon icon="mdi:fit-to-page-outline" width={15} height={15} />
                           </button>
+                          <button
+                            onClick={() => setIsDiagramFullscreen((v) => !v)}
+                            className={`flex h-8 w-8 items-center justify-center rounded-lg border shadow-sm transition ${
+                              isDiagramFullscreen
+                                ? "border-accent bg-accent text-white"
+                                : "border-line-strong bg-panel text-ink-muted hover:text-ink"
+                            }`}
+                            aria-label={isDiagramFullscreen ? "Exit fullscreen" : "Expand to fullscreen"}
+                          >
+                            <Icon icon={isDiagramFullscreen ? "mdi:fullscreen-exit" : "mdi:fullscreen"} width={18} height={18} />
+                          </button>
                           <span className="flex h-8 w-8 items-center justify-center rounded-lg border border-line-strong bg-panel shadow-sm">
                             <InfoTooltip text="Zoom in/out with these buttons or your scroll wheel. Drag anywhere on the canvas to pan around. Fit-to-view re-centers and re-scales everything back into frame." />
                           </span>
@@ -2235,13 +2336,20 @@ export default function ArchitectureWorkspace({
                                 <path d="M 0 0 L 10 5 L 0 10 z" className="fill-accent" />
                               </marker>
                             </defs>
-                            {/* Connections — routed through dagre's own computed waypoints, so
+                            {/* Connections — routed through ELK's own orthogonal waypoints, so
                                 skip-rank edges (e.g. into the compliance cluster) don't cut through
-                                unrelated nodes. */}
+                                unrelated nodes and don't overlap other edges. While a node is being
+                                dragged, its connected edges fall back to a live straight line
+                                between renderCoords instead (ELK's stored bend points are only
+                                valid for its own pre-drag positions). */}
                             {diagramConnections.map((conn, idx) => {
-                              const points = diagramLayout.edgePoints[`${conn.from}->${conn.to}`];
+                              const isLiveDragging =
+                                draggingNodeId && (conn.from === draggingNodeId || conn.to === draggingNodeId);
+                              const points = isLiveDragging
+                                ? [renderCoords[conn.from], renderCoords[conn.to]].filter(Boolean)
+                                : diagramLayout.edgePoints[`${conn.from}->${conn.to}`];
                               if (!points || points.length < 2) return null;
-                              const d = points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ");
+                              const d = buildRoundedPath(points);
                               return (
                                 <g key={idx}>
                                   <path d={d} fill="none" className="stroke-accent/25" strokeWidth={2.5} />
@@ -2264,7 +2372,7 @@ export default function ArchitectureWorkspace({
                             {(() => {
                               const complianceBoxes = diagramComponents
                                 .filter((c) => isComplianceNode(c.type))
-                                .map((c) => nodeCoords[c.id])
+                                .map((c) => renderCoords[c.id])
                                 .filter(Boolean) as { x: number; y: number; width: number; height: number }[];
                               if (complianceBoxes.length < 2) return null;
                               const pad = 26;
@@ -2295,7 +2403,7 @@ export default function ArchitectureWorkspace({
                                 foreignObject so text truncates naturally and the icon library
                                 just works, rather than hand-rolled SVG text/rects. */}
                             {diagramComponents.map((node) => {
-                              const coord = nodeCoords[node.id];
+                              const coord = renderCoords[node.id];
                               if (!coord) return null;
 
                               const isSelected = selectedNodeId === node.id;
@@ -2313,13 +2421,17 @@ export default function ArchitectureWorkspace({
                                 >
                                   <div
                                     onClick={() => setSelectedNodeId(node.id)}
-                                    className={`group relative flex h-full w-full cursor-pointer items-center gap-2.5 rounded-2xl border bg-panel px-3 py-2 shadow-sm transition-all ${
+                                    onPointerDown={(e) => handleNodePointerDown(e, node.id)}
+                                    onPointerMove={handleNodePointerMove}
+                                    onPointerUp={(e) => handleNodePointerUp(e, node.id)}
+                                    title="Drag to reposition"
+                                    className={`group relative flex h-full w-full cursor-grab items-center gap-2.5 rounded-2xl border bg-panel px-3 py-2 shadow-sm transition-all active:cursor-grabbing ${
                                       isSelected
                                         ? "border-accent ring-2 ring-accent-soft"
                                         : isComplianceNode(node.type)
                                           ? "border-warning/50 hover:border-warning"
                                           : "border-line-strong hover:border-ink-faint"
-                                    } ${isOverride ? "border-dashed" : ""}`}
+                                    } ${isOverride ? "border-dashed" : ""} ${draggingNodeId === node.id ? "opacity-80 shadow-lg" : ""}`}
                                   >
                                     <div className={`flex h-9 w-9 flex-none items-center justify-center rounded-lg ${PROVIDER_SOFT_BG[activeProvider]}`}>
                                       <Icon icon={resolveServiceIcon(serviceName, node.type)} width={20} height={20} />
@@ -2367,6 +2479,11 @@ export default function ArchitectureWorkspace({
                     )}
                   </TransformWrapper>
                 </div>
+                  );
+                  return isDiagramFullscreen && typeof document !== "undefined"
+                    ? createPortal(diagramNode, document.body)
+                    : diagramNode;
+                })()}
 
                 {/* Architecture Flow Story -- plain-language, step-by-step walkthrough of
                     request/data flow for the currently active provider, synthesized from each

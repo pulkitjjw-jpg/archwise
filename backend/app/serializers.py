@@ -47,5 +47,6 @@ def serialize_architecture(a: Architecture) -> dict:
         "cloudProvider": a.cloud_provider,
         "flowStory": a.flow_story,
         "journeySteps": a.journey_steps,
+        "layoutOverrides": a.layout_overrides,
         "createdAt": a.created_at,
     }

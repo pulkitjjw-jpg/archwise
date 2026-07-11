@@ -8,7 +8,7 @@ from app.config import settings
 from app.constants import DEFAULT_INDUSTRY_CONTEXT
 from app.db import get_db
 from app.models import Architecture, Project, Requirement
-from app.schemas import ManualArchitectureRequest, ProposeChangesRequest, RefineProposalRequest
+from app.schemas import LayoutOverrideRequest, ManualArchitectureRequest, ProposeChangesRequest, RefineProposalRequest
 from app.serializers import serialize_architecture
 from app.services.architecture_diff import calculate_total_cost, compute_architecture_diff
 from app.services.cloud_mapping import get_cloud_mapping
@@ -247,6 +247,29 @@ async def get_user_journey(
     await db.commit()
 
     return {"journeySteps": steps}
+
+
+@router.patch("/projects/{project_id}/architectures/{architecture_id}/layout")
+async def update_layout_override(
+    project_id: uuid.UUID, architecture_id: uuid.UUID, payload: LayoutOverrideRequest, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """Persists one node's manually-dragged position (Workstream Q) -- purely cosmetic, so this
+    merges into the CURRENT architecture version's layout_overrides in place rather than
+    creating a new version, exactly like flow_story/journey_steps above. Scoped per architecture
+    version, so an older version a user browses back to keeps whatever layout it had when it was
+    last positioned, and doesn't inherit later versions' repositioning."""
+    record = (
+        await db.execute(
+            select(Architecture).where(Architecture.id == architecture_id, Architecture.project_id == project_id)
+        )
+    ).scalar_one_or_none()
+    if not record:
+        raise HTTPException(status_code=404, detail="Architecture version not found")
+
+    record.layout_overrides = {**record.layout_overrides, payload.componentId: {"x": payload.x, "y": payload.y}}
+    await db.commit()
+
+    return {"layoutOverrides": record.layout_overrides}
 
 
 @router.post("/projects/{project_id}/architectures/{architecture_id}/propose-changes")

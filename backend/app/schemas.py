@@ -105,3 +105,9 @@ class RefineProposalRequest(BaseModel):
     discussionMessage: str
     priorMessages: list[DiscussionMessage] = Field(default_factory=list)
     provider: str
+
+
+class LayoutOverrideRequest(BaseModel):
+    componentId: str
+    x: float
+    y: float

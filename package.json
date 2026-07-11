@@ -13,6 +13,7 @@
     "@iconify-json/mdi": "^1.2.3",
     "@iconify/react": "^6.0.2",
     "dagre": "^0.8.5",
+    "elkjs": "^0.11.1",
     "next": "16.2.6",
     "react": "19.2.6",
     "react-dom": "19.2.6",
