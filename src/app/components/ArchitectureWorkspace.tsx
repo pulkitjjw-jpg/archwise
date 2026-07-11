@@ -8,6 +8,7 @@ import { runLldRulesEngine } from "@/lib/lld-rules";
 import { validateArchitectureLayout, getProviderMaturityWarning } from "@/lib/validation";
 import { resolveServiceIcon } from "@/lib/service-icons";
 import { getPlainDescription } from "@/lib/component-descriptions";
+import { exportDiagramAsPng, exportDiagramAsSvg, type PngExportEdge, type PngExportNode } from "@/lib/diagram-export";
 import InfoTooltip from "./InfoTooltip";
 
 type CloudProviderKey = "aws" | "azure" | "gcp" | "kubernetes" | "private";
@@ -278,10 +279,12 @@ export default function ArchitectureWorkspace({
     loadArchitecture();
   }, [projectId]);
 
-  // Reset LLD accordion state when selected node changes
+  // LLD accordion defaults open in Technical mode (deeper detail should be the default there,
+  // not an extra click) and closed in Simple mode -- re-applied whenever the selected node
+  // changes so switching components doesn't leave a stale expand/collapse state behind.
   useEffect(() => {
-    setIsLldExpanded(false);
-  }, [selectedNodeId]);
+    setIsLldExpanded(explanationMode === "technical");
+  }, [selectedNodeId, explanationMode]);
 
   // Advance the staged loading message every few seconds while a generation call is
   // in-flight. These stages are honest labels for what the server is doing during the call,
@@ -345,6 +348,61 @@ export default function ArchitectureWorkspace({
   const handleExport = () => {
     if (!architecture) return;
     window.location.href = `/api/projects/${projectId}/export?provider=${activeProvider}`;
+  };
+
+  // Exports the diagram itself as an image -- a separate concern from handleExport above, which
+  // downloads deployable Terraform/K8s config. This just captures the picture.
+  const handleExportDiagramImage = async (format: "svg" | "png") => {
+    setImageExportOpen(false);
+    if (!architecture) return;
+    const filenameBase = `architecture-diagram-v${architecture.version}`;
+    try {
+      setImageExportBusy(true);
+      if (format === "svg") {
+        const svgEl = diagramSvgRef.current;
+        if (!svgEl) return;
+        exportDiagramAsSvg(svgEl, filenameBase);
+      } else {
+        // Pure-SVG twin, not the live foreignObject-based DOM -- canvas.toBlob() throws on any
+        // SVG containing foreignObject regardless of content, so PNG export builds its own
+        // simplified rect/text representation from the same layout data instead (see
+        // diagram-export.ts for why).
+        const pngNodes: PngExportNode[] = diagramComponents
+          .map((c) => {
+            const coord = nodeCoords[c.id];
+            if (!coord) return null;
+            const mapping = getMappingForProvider(c, activeProvider);
+            return {
+              id: c.id,
+              x: coord.x,
+              y: coord.y,
+              width: coord.width,
+              height: coord.height,
+              label: c.name,
+              serviceName: mapping?.serviceName || c.name,
+              isCompliance: isComplianceNode(c.type),
+              isOverride: c.metadata?.overrideSource === "user",
+              accentHex: "#5B4FE8",
+            };
+          })
+          .filter((n): n is PngExportNode => n !== null);
+
+        const pngEdges: PngExportEdge[] = diagramConnections
+          .map((conn) => {
+            const points = diagramLayout.edgePoints[`${conn.from}->${conn.to}`];
+            if (!points || points.length < 2) return null;
+            return { d: points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ") };
+          })
+          .filter((e): e is PngExportEdge => e !== null);
+
+        await exportDiagramAsPng(pngNodes, pngEdges, diagramLayout.width, diagramLayout.height, filenameBase);
+      }
+    } catch (err) {
+      console.error("Diagram image export failed:", err);
+      setError("Failed to export diagram image. Please try again.");
+    } finally {
+      setImageExportBusy(false);
+    }
   };
 
   const handleEnterEditMode = () => {
@@ -689,10 +747,36 @@ export default function ArchitectureWorkspace({
     ? draftHld?.components.find((c) => c.id === selectedNodeId)
     : architecture?.hld.components.find((c) => c.id === selectedNodeId);
 
+  // Plain-language data-flow context for the drawer -- who this component sends requests to,
+  // and who sends requests to it, using the component names a non-architect would recognize
+  // rather than raw ids.
+  const nodeNameById = (id: string) => diagramComponents.find((c) => c.id === id)?.name || id;
+  const outgoingConnections = selectedNode
+    ? diagramConnections.filter((c) => c.from === selectedNode.id)
+    : [];
+  const incomingConnections = selectedNode
+    ? diagramConnections.filter((c) => c.to === selectedNode.id)
+    : [];
+
   // Fit the graph to the visible canvas whenever its size changes (provider/version/edit-mode
   // switches can all change the node count) -- a static initialScale can't adapt to that.
   const diagramViewportRef = useRef<HTMLDivElement>(null);
   const diagramTransformRef = useRef<any>(null);
+  const diagramSvgRef = useRef<SVGSVGElement>(null);
+  const [imageExportOpen, setImageExportOpen] = useState(false);
+  const [imageExportBusy, setImageExportBusy] = useState(false);
+  const imageExportRef = useRef<HTMLSpanElement>(null);
+
+  useEffect(() => {
+    if (!imageExportOpen) return;
+    const onClickOutside = (e: MouseEvent) => {
+      if (imageExportRef.current && !imageExportRef.current.contains(e.target as Node)) {
+        setImageExportOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onClickOutside);
+    return () => document.removeEventListener("mousedown", onClickOutside);
+  }, [imageExportOpen]);
   useEffect(() => {
     const viewport = diagramViewportRef.current;
     const transform = diagramTransformRef.current;
@@ -1038,6 +1122,35 @@ export default function ArchitectureWorkspace({
                       />
                     </span>
 
+                    {/* Export Diagram Image -- deliberately a separate control from Export TF
+                        above: one downloads the picture, the other downloads deployable code. */}
+                    <span ref={imageExportRef} className="relative inline-flex items-center gap-1">
+                      <button
+                        onClick={() => setImageExportOpen((v) => !v)}
+                        disabled={imageExportBusy}
+                        className="rounded-xl border border-line-strong bg-panel hover:bg-paper text-ink-muted px-3 py-1.5 text-[9.5px] font-extrabold uppercase transition shadow-sm active:scale-95 flex items-center gap-1 disabled:opacity-50"
+                      >
+                        <span>🖼️</span> {imageExportBusy ? "Exporting..." : "Export Image"} <span className="text-[8px]">▾</span>
+                      </button>
+                      {imageExportOpen && (
+                        <div className="absolute left-0 top-full z-20 mt-1.5 w-36 rounded-xl border border-line bg-white p-1 shadow-lg animate-fadeIn">
+                          <button
+                            onClick={() => handleExportDiagramImage("png")}
+                            className="block w-full rounded-lg px-2.5 py-1.5 text-left text-[10px] font-bold text-ink-muted hover:bg-paper hover:text-ink"
+                          >
+                            As PNG (image)
+                          </button>
+                          <button
+                            onClick={() => handleExportDiagramImage("svg")}
+                            className="block w-full rounded-lg px-2.5 py-1.5 text-left text-[10px] font-bold text-ink-muted hover:bg-paper hover:text-ink"
+                          >
+                            As SVG (vector)
+                          </button>
+                        </div>
+                      )}
+                      <InfoTooltip text="Downloads the diagram as an image (PNG) or scalable vector (SVG) — for docs, slides, or sharing. This is just the picture; use Export TF for the actual deployable infrastructure code." />
+                    </span>
+
                     {/* Deployment Target Toggle */}
                     <span className="inline-flex items-center gap-1">
                       <div className="flex bg-paper/80 p-0.5 rounded-lg border border-line shadow-sm">
@@ -1084,6 +1197,272 @@ export default function ArchitectureWorkspace({
                     </div>
                   </div>
                 )}
+
+
+                {/* What Changed Diff Panel */}
+                {architecture.reasoning.diff && (
+                  <div className="mt-6 rounded-3xl border border-accent/25/80 bg-accent-soft/10 p-5 shadow-sm">
+                    <h4 className="font-extrabold text-ink flex items-center gap-2 text-xs uppercase tracking-wider">
+                      <span>🔄</span> What Changed in Version {architecture.version}
+                    </h4>
+                    <p className="text-[11px] text-ink-muted mt-1">
+                      Delta modifications generated in response to growth triggers or updates:
+                    </p>
+                    <div className="mt-4 grid gap-4 md:grid-cols-2 lg:grid-cols-3 border-t border-line pt-4">
+                      {/* Added Components */}
+                      {architecture.reasoning.diff.added && architecture.reasoning.diff.added.length > 0 && (
+                        <div className="space-y-2">
+                          <span className="text-[9px] font-black text-success uppercase tracking-widest block bg-success-soft/60 border border-success/25 px-2 py-0.5 rounded w-max">
+                            + Added
+                          </span>
+                          <ul className="text-xs space-y-2 text-ink-muted">
+                            {architecture.reasoning.diff.added.map((item: any, idx: number) => (
+                              <li key={idx} className="leading-relaxed">
+                                <span className="font-bold text-ink block">{item.name}</span>
+                                <span className="text-[10px] text-ink-faint font-semibold uppercase">{item.type}</span>
+                                <span className="block text-[11px] text-ink-muted italic mt-0.5">{item.reasoning}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      {/* Modified Components */}
+                      {architecture.reasoning.diff.modified && architecture.reasoning.diff.modified.length > 0 && (
+                        <div className="space-y-2">
+                          <span className="text-[9px] font-black text-warning uppercase tracking-widest block bg-warning-soft/60 border border-warning/25 px-2 py-0.5 rounded w-max">
+                            ~ Modified
+                          </span>
+                          <ul className="text-xs space-y-3 text-ink-muted">
+                            {architecture.reasoning.diff.modified.map((item: any, idx: number) => (
+                              <li key={idx} className="leading-relaxed">
+                                <span className="font-bold text-ink block">{item.name}</span>
+                                <div className="mt-1 space-y-1.5 pl-2 border-l-2 border-line">
+                                  {item.changes.map((ch: any, cIdx: number) => (
+                                    <div key={cIdx} className="text-[11px]">
+                                      <span className="font-semibold text-ink-muted block uppercase text-[9px]">{ch.parameter}</span>
+                                      <span className="text-ink-faint line-through">{ch.oldVal}</span> ➜{" "}
+                                      <span className="text-ink font-bold">{ch.newVal}</span>
+                                      <span className="block text-[10px] text-ink-muted italic mt-0.5">{ch.reasoning}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      {/* Removed Components */}
+                      {architecture.reasoning.diff.removed && architecture.reasoning.diff.removed.length > 0 && (
+                        <div className="space-y-2">
+                          <span className="text-[9px] font-black text-danger uppercase tracking-widest block bg-danger-soft/60 border border-danger/25 px-2 py-0.5 rounded w-max">
+                            − Removed
+                          </span>
+                          <ul className="text-xs space-y-2 text-ink-muted">
+                            {architecture.reasoning.diff.removed.map((item: any, idx: number) => (
+                              <li key={idx} className="leading-relaxed">
+                                <span className="font-bold text-ink line-through block">{item.name}</span>
+                                <span className="text-[10px] text-ink-faint font-semibold uppercase">{item.type}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Topology Diagram — dagre-laid-out SVG canvas with pan/zoom for larger graphs */}
+                <div ref={diagramViewportRef} className="relative mt-6 rounded-2xl border border-line bg-paper shadow-inner overflow-hidden" style={{ height: "min(780px, calc(100vh - 260px))" }}>
+                  <TransformWrapper ref={diagramTransformRef} initialScale={1} minScale={0.15} maxScale={2.5}>
+                    {({ zoomIn, zoomOut }) => (
+                      <>
+                        <div className="absolute right-3 top-3 z-10 flex gap-1.5">
+                          <button
+                            onClick={() => zoomIn()}
+                            className="flex h-8 w-8 items-center justify-center rounded-lg border border-line-strong bg-panel text-ink-muted shadow-sm hover:text-ink"
+                            aria-label="Zoom in"
+                          >
+                            <Icon icon="mdi:plus" width={16} height={16} />
+                          </button>
+                          <button
+                            onClick={() => zoomOut()}
+                            className="flex h-8 w-8 items-center justify-center rounded-lg border border-line-strong bg-panel text-ink-muted shadow-sm hover:text-ink"
+                            aria-label="Zoom out"
+                          >
+                            <Icon icon="mdi:minus" width={16} height={16} />
+                          </button>
+                          <button
+                            onClick={() => {
+                              const viewport = diagramViewportRef.current;
+                              if (!viewport) return;
+                              const fitScale = Math.min(
+                                (viewport.clientWidth - 24) / diagramLayout.width,
+                                (viewport.clientHeight - 24) / diagramLayout.height,
+                                1
+                              );
+                              diagramTransformRef.current?.centerView(Math.max(fitScale, 0.1), 200);
+                            }}
+                            className="flex h-8 w-8 items-center justify-center rounded-lg border border-line-strong bg-panel text-ink-muted shadow-sm hover:text-ink"
+                            aria-label="Fit to view"
+                          >
+                            <Icon icon="mdi:fit-to-page-outline" width={15} height={15} />
+                          </button>
+                          <span className="flex h-8 w-8 items-center justify-center rounded-lg border border-line-strong bg-panel shadow-sm">
+                            <InfoTooltip text="Zoom in/out with these buttons or your scroll wheel. Drag anywhere on the canvas to pan around. Fit-to-view re-centers and re-scales everything back into frame." />
+                          </span>
+                        </div>
+                        <TransformComponent wrapperStyle={{ width: "100%", height: "100%" }}>
+                          <svg
+                            ref={diagramSvgRef}
+                            viewBox={`0 0 ${diagramLayout.width} ${diagramLayout.height}`}
+                            width={diagramLayout.width}
+                            height={diagramLayout.height}
+                          >
+                            <defs>
+                              {/* Arrowhead marking request/response direction -- dagre's points
+                                  run from conn.from to conn.to, so an end-marker here always
+                                  points the right way without needing per-edge math. */}
+                              <marker
+                                id="flow-arrow"
+                                viewBox="0 0 10 10"
+                                refX="8.5"
+                                refY="5"
+                                markerWidth="7"
+                                markerHeight="7"
+                                orient="auto-start-reverse"
+                              >
+                                <path d="M 0 0 L 10 5 L 0 10 z" className="fill-accent" />
+                              </marker>
+                            </defs>
+                            {/* Connections — routed through dagre's own computed waypoints, so
+                                skip-rank edges (e.g. into the compliance cluster) don't cut through
+                                unrelated nodes. */}
+                            {diagramConnections.map((conn, idx) => {
+                              const points = diagramLayout.edgePoints[`${conn.from}->${conn.to}`];
+                              if (!points || points.length < 2) return null;
+                              const d = points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ");
+                              return (
+                                <g key={idx}>
+                                  <path d={d} fill="none" className="stroke-accent/25" strokeWidth={2.5} />
+                                  <path
+                                    d={d}
+                                    fill="none"
+                                    className="stroke-accent/70"
+                                    strokeWidth={1.5}
+                                    strokeDasharray="5, 9"
+                                    markerEnd="url(#flow-arrow)"
+                                  >
+                                    <animate attributeName="stroke-dashoffset" values="56;0" dur="3s" repeatCount="indefinite" />
+                                  </path>
+                                </g>
+                              );
+                            })}
+
+                            {/* Compliance cluster — a subtle bounding box around HIPAA/PCI-style
+                                compliance components so they read as a group at any graph size. */}
+                            {(() => {
+                              const complianceBoxes = diagramComponents
+                                .filter((c) => isComplianceNode(c.type))
+                                .map((c) => nodeCoords[c.id])
+                                .filter(Boolean) as { x: number; y: number; width: number; height: number }[];
+                              if (complianceBoxes.length < 2) return null;
+                              const pad = 26;
+                              const minX = Math.min(...complianceBoxes.map((b) => b.x - b.width / 2)) - pad;
+                              const minY = Math.min(...complianceBoxes.map((b) => b.y - b.height / 2)) - (pad + 14);
+                              const maxX = Math.max(...complianceBoxes.map((b) => b.x + b.width / 2)) + pad;
+                              const maxY = Math.max(...complianceBoxes.map((b) => b.y + b.height / 2)) + pad;
+                              return (
+                                <g>
+                                  <rect
+                                    x={minX}
+                                    y={minY}
+                                    width={maxX - minX}
+                                    height={maxY - minY}
+                                    rx={16}
+                                    className="fill-warning-soft/50 stroke-warning"
+                                    strokeWidth={1.4}
+                                    strokeDasharray="6 5"
+                                  />
+                                  <text x={minX + 16} y={minY + 22} className="fill-warning text-[11px] font-bold uppercase tracking-wide">
+                                    Compliance &amp; Security
+                                  </text>
+                                </g>
+                              );
+                            })()}
+
+                            {/* Nodes — real per-service icons, rendered as HTML cards inside
+                                foreignObject so text truncates naturally and the icon library
+                                just works, rather than hand-rolled SVG text/rects. */}
+                            {diagramComponents.map((node) => {
+                              const coord = nodeCoords[node.id];
+                              if (!coord) return null;
+
+                              const isSelected = selectedNodeId === node.id;
+                              const mapping = getMappingForProvider(node, activeProvider);
+                              const serviceName = mapping?.serviceName || node.name;
+                              const isOverride = node.metadata?.overrideSource === "user";
+
+                              return (
+                                <foreignObject
+                                  key={node.id}
+                                  x={coord.x - coord.width / 2}
+                                  y={coord.y - coord.height / 2}
+                                  width={coord.width}
+                                  height={coord.height}
+                                >
+                                  <div
+                                    onClick={() => setSelectedNodeId(node.id)}
+                                    className={`group relative flex h-full w-full cursor-pointer items-center gap-2.5 rounded-2xl border bg-panel px-3 py-2 shadow-sm transition-all ${
+                                      isSelected
+                                        ? "border-accent ring-2 ring-accent-soft"
+                                        : isComplianceNode(node.type)
+                                          ? "border-warning/50 hover:border-warning"
+                                          : "border-line-strong hover:border-ink-faint"
+                                    } ${isOverride ? "border-dashed" : ""}`}
+                                  >
+                                    <div className={`flex h-9 w-9 flex-none items-center justify-center rounded-lg ${PROVIDER_SOFT_BG[activeProvider]}`}>
+                                      <Icon icon={resolveServiceIcon(serviceName, node.type)} width={20} height={20} />
+                                    </div>
+                                    <div className="min-w-0 flex-1">
+                                      <div className="truncate text-[9.5px] font-bold uppercase tracking-wide text-ink-faint">
+                                        {node.name}
+                                      </div>
+                                      <div className="truncate text-[12.5px] font-bold text-ink">{serviceName}</div>
+                                    </div>
+
+                                    {isComplianceNode(node.type) && (
+                                      <Icon icon="mdi:shield-check-outline" width={15} height={15} className="flex-none text-warning" />
+                                    )}
+                                    {isOverride && (
+                                      <span className="absolute -right-1.5 -top-1.5 flex h-4 w-4 flex-none items-center justify-center rounded-full bg-warning text-[8px] font-black text-white ring-2 ring-panel">
+                                        U
+                                      </span>
+                                    )}
+
+                                    {isEditing && (
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleRemoveNode(node.id);
+                                        }}
+                                        className="absolute -left-1.5 -top-1.5 flex h-5 w-5 flex-none items-center justify-center rounded-full bg-danger text-white ring-2 ring-panel transition hover:scale-110"
+                                        aria-label={`Remove ${node.name}`}
+                                      >
+                                        <Icon icon="mdi:close" width={12} height={12} />
+                                      </button>
+                                    )}
+                                  </div>
+                                </foreignObject>
+                              );
+                            })}
+                          </svg>
+                        </TransformComponent>
+                      </>
+                    )}
+                  </TransformWrapper>
+                </div>
 
                 {/* Manual Editing Controls Toolbar */}
                 {isEditing && draftHld && (
@@ -1277,247 +1656,6 @@ export default function ArchitectureWorkspace({
                       )}
                   </div>
                 )}
-
-                {/* What Changed Diff Panel */}
-                {architecture.reasoning.diff && (
-                  <div className="mt-6 rounded-3xl border border-accent/25/80 bg-accent-soft/10 p-5 shadow-sm">
-                    <h4 className="font-extrabold text-ink flex items-center gap-2 text-xs uppercase tracking-wider">
-                      <span>🔄</span> What Changed in Version {architecture.version}
-                    </h4>
-                    <p className="text-[11px] text-ink-muted mt-1">
-                      Delta modifications generated in response to growth triggers or updates:
-                    </p>
-                    <div className="mt-4 grid gap-4 md:grid-cols-2 lg:grid-cols-3 border-t border-line pt-4">
-                      {/* Added Components */}
-                      {architecture.reasoning.diff.added && architecture.reasoning.diff.added.length > 0 && (
-                        <div className="space-y-2">
-                          <span className="text-[9px] font-black text-success uppercase tracking-widest block bg-success-soft/60 border border-success/25 px-2 py-0.5 rounded w-max">
-                            + Added
-                          </span>
-                          <ul className="text-xs space-y-2 text-ink-muted">
-                            {architecture.reasoning.diff.added.map((item: any, idx: number) => (
-                              <li key={idx} className="leading-relaxed">
-                                <span className="font-bold text-ink block">{item.name}</span>
-                                <span className="text-[10px] text-ink-faint font-semibold uppercase">{item.type}</span>
-                                <span className="block text-[11px] text-ink-muted italic mt-0.5">{item.reasoning}</span>
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-
-                      {/* Modified Components */}
-                      {architecture.reasoning.diff.modified && architecture.reasoning.diff.modified.length > 0 && (
-                        <div className="space-y-2">
-                          <span className="text-[9px] font-black text-warning uppercase tracking-widest block bg-warning-soft/60 border border-warning/25 px-2 py-0.5 rounded w-max">
-                            ~ Modified
-                          </span>
-                          <ul className="text-xs space-y-3 text-ink-muted">
-                            {architecture.reasoning.diff.modified.map((item: any, idx: number) => (
-                              <li key={idx} className="leading-relaxed">
-                                <span className="font-bold text-ink block">{item.name}</span>
-                                <div className="mt-1 space-y-1.5 pl-2 border-l-2 border-line">
-                                  {item.changes.map((ch: any, cIdx: number) => (
-                                    <div key={cIdx} className="text-[11px]">
-                                      <span className="font-semibold text-ink-muted block uppercase text-[9px]">{ch.parameter}</span>
-                                      <span className="text-ink-faint line-through">{ch.oldVal}</span> ➜{" "}
-                                      <span className="text-ink font-bold">{ch.newVal}</span>
-                                      <span className="block text-[10px] text-ink-muted italic mt-0.5">{ch.reasoning}</span>
-                                    </div>
-                                  ))}
-                                </div>
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-
-                      {/* Removed Components */}
-                      {architecture.reasoning.diff.removed && architecture.reasoning.diff.removed.length > 0 && (
-                        <div className="space-y-2">
-                          <span className="text-[9px] font-black text-danger uppercase tracking-widest block bg-danger-soft/60 border border-danger/25 px-2 py-0.5 rounded w-max">
-                            − Removed
-                          </span>
-                          <ul className="text-xs space-y-2 text-ink-muted">
-                            {architecture.reasoning.diff.removed.map((item: any, idx: number) => (
-                              <li key={idx} className="leading-relaxed">
-                                <span className="font-bold text-ink line-through block">{item.name}</span>
-                                <span className="text-[10px] text-ink-faint font-semibold uppercase">{item.type}</span>
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {/* Topology Diagram — dagre-laid-out SVG canvas with pan/zoom for larger graphs */}
-                <div ref={diagramViewportRef} className="relative mt-6 rounded-2xl border border-line bg-paper shadow-inner overflow-hidden" style={{ height: 520 }}>
-                  <TransformWrapper ref={diagramTransformRef} initialScale={1} minScale={0.15} maxScale={2.5}>
-                    {({ zoomIn, zoomOut }) => (
-                      <>
-                        <div className="absolute right-3 top-3 z-10 flex gap-1.5">
-                          <button
-                            onClick={() => zoomIn()}
-                            className="flex h-8 w-8 items-center justify-center rounded-lg border border-line-strong bg-panel text-ink-muted shadow-sm hover:text-ink"
-                            aria-label="Zoom in"
-                          >
-                            <Icon icon="mdi:plus" width={16} height={16} />
-                          </button>
-                          <button
-                            onClick={() => zoomOut()}
-                            className="flex h-8 w-8 items-center justify-center rounded-lg border border-line-strong bg-panel text-ink-muted shadow-sm hover:text-ink"
-                            aria-label="Zoom out"
-                          >
-                            <Icon icon="mdi:minus" width={16} height={16} />
-                          </button>
-                          <button
-                            onClick={() => {
-                              const viewport = diagramViewportRef.current;
-                              if (!viewport) return;
-                              const fitScale = Math.min(
-                                (viewport.clientWidth - 24) / diagramLayout.width,
-                                (viewport.clientHeight - 24) / diagramLayout.height,
-                                1
-                              );
-                              diagramTransformRef.current?.centerView(Math.max(fitScale, 0.1), 200);
-                            }}
-                            className="flex h-8 w-8 items-center justify-center rounded-lg border border-line-strong bg-panel text-ink-muted shadow-sm hover:text-ink"
-                            aria-label="Fit to view"
-                          >
-                            <Icon icon="mdi:fit-to-page-outline" width={15} height={15} />
-                          </button>
-                          <span className="flex h-8 w-8 items-center justify-center rounded-lg border border-line-strong bg-panel shadow-sm">
-                            <InfoTooltip text="Zoom in/out with these buttons or your scroll wheel. Drag anywhere on the canvas to pan around. Fit-to-view re-centers and re-scales everything back into frame." />
-                          </span>
-                        </div>
-                        <TransformComponent wrapperStyle={{ width: "100%", height: "100%" }}>
-                          <svg
-                            viewBox={`0 0 ${diagramLayout.width} ${diagramLayout.height}`}
-                            width={diagramLayout.width}
-                            height={diagramLayout.height}
-                          >
-                            {/* Connections — routed through dagre's own computed waypoints, so
-                                skip-rank edges (e.g. into the compliance cluster) don't cut through
-                                unrelated nodes. */}
-                            {diagramConnections.map((conn, idx) => {
-                              const points = diagramLayout.edgePoints[`${conn.from}->${conn.to}`];
-                              if (!points || points.length < 2) return null;
-                              const d = points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ");
-                              return (
-                                <g key={idx}>
-                                  <path d={d} fill="none" className="stroke-accent/25" strokeWidth={2.5} />
-                                  <path d={d} fill="none" className="stroke-accent/70" strokeWidth={1.5} strokeDasharray="5, 9">
-                                    <animate attributeName="stroke-dashoffset" values="56;0" dur="3s" repeatCount="indefinite" />
-                                  </path>
-                                </g>
-                              );
-                            })}
-
-                            {/* Compliance cluster — a subtle bounding box around HIPAA/PCI-style
-                                compliance components so they read as a group at any graph size. */}
-                            {(() => {
-                              const complianceBoxes = diagramComponents
-                                .filter((c) => isComplianceNode(c.type))
-                                .map((c) => nodeCoords[c.id])
-                                .filter(Boolean) as { x: number; y: number; width: number; height: number }[];
-                              if (complianceBoxes.length < 2) return null;
-                              const pad = 26;
-                              const minX = Math.min(...complianceBoxes.map((b) => b.x - b.width / 2)) - pad;
-                              const minY = Math.min(...complianceBoxes.map((b) => b.y - b.height / 2)) - (pad + 14);
-                              const maxX = Math.max(...complianceBoxes.map((b) => b.x + b.width / 2)) + pad;
-                              const maxY = Math.max(...complianceBoxes.map((b) => b.y + b.height / 2)) + pad;
-                              return (
-                                <g>
-                                  <rect
-                                    x={minX}
-                                    y={minY}
-                                    width={maxX - minX}
-                                    height={maxY - minY}
-                                    rx={16}
-                                    className="fill-warning-soft/50 stroke-warning"
-                                    strokeWidth={1.4}
-                                    strokeDasharray="6 5"
-                                  />
-                                  <text x={minX + 16} y={minY + 22} className="fill-warning text-[11px] font-bold uppercase tracking-wide">
-                                    Compliance &amp; Security
-                                  </text>
-                                </g>
-                              );
-                            })()}
-
-                            {/* Nodes — real per-service icons, rendered as HTML cards inside
-                                foreignObject so text truncates naturally and the icon library
-                                just works, rather than hand-rolled SVG text/rects. */}
-                            {diagramComponents.map((node) => {
-                              const coord = nodeCoords[node.id];
-                              if (!coord) return null;
-
-                              const isSelected = selectedNodeId === node.id;
-                              const mapping = getMappingForProvider(node, activeProvider);
-                              const serviceName = mapping?.serviceName || node.name;
-                              const isOverride = node.metadata?.overrideSource === "user";
-
-                              return (
-                                <foreignObject
-                                  key={node.id}
-                                  x={coord.x - coord.width / 2}
-                                  y={coord.y - coord.height / 2}
-                                  width={coord.width}
-                                  height={coord.height}
-                                >
-                                  <div
-                                    onClick={() => setSelectedNodeId(node.id)}
-                                    className={`group relative flex h-full w-full cursor-pointer items-center gap-2.5 rounded-2xl border bg-panel px-3 py-2 shadow-sm transition-all ${
-                                      isSelected
-                                        ? "border-accent ring-2 ring-accent-soft"
-                                        : isComplianceNode(node.type)
-                                          ? "border-warning/50 hover:border-warning"
-                                          : "border-line-strong hover:border-ink-faint"
-                                    } ${isOverride ? "border-dashed" : ""}`}
-                                  >
-                                    <div className={`flex h-9 w-9 flex-none items-center justify-center rounded-lg ${PROVIDER_SOFT_BG[activeProvider]}`}>
-                                      <Icon icon={resolveServiceIcon(serviceName, node.type)} width={20} height={20} />
-                                    </div>
-                                    <div className="min-w-0 flex-1">
-                                      <div className="truncate text-[9.5px] font-bold uppercase tracking-wide text-ink-faint">
-                                        {node.name}
-                                      </div>
-                                      <div className="truncate text-[12.5px] font-bold text-ink">{serviceName}</div>
-                                    </div>
-
-                                    {isComplianceNode(node.type) && (
-                                      <Icon icon="mdi:shield-check-outline" width={15} height={15} className="flex-none text-warning" />
-                                    )}
-                                    {isOverride && (
-                                      <span className="absolute -right-1.5 -top-1.5 flex h-4 w-4 flex-none items-center justify-center rounded-full bg-warning text-[8px] font-black text-white ring-2 ring-panel">
-                                        U
-                                      </span>
-                                    )}
-
-                                    {isEditing && (
-                                      <button
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          handleRemoveNode(node.id);
-                                        }}
-                                        className="absolute -left-1.5 -top-1.5 flex h-5 w-5 flex-none items-center justify-center rounded-full bg-danger text-white ring-2 ring-panel transition hover:scale-110"
-                                        aria-label={`Remove ${node.name}`}
-                                      >
-                                        <Icon icon="mdi:close" width={12} height={12} />
-                                      </button>
-                                    )}
-                                  </div>
-                                </foreignObject>
-                              );
-                            })}
-                          </svg>
-                        </TransformComponent>
-                      </>
-                    )}
-                  </TransformWrapper>
-                </div>
               </div>
 
               <div className="mt-6 border-t border-line pt-4 flex items-center justify-between">
@@ -1579,6 +1717,44 @@ export default function ArchitectureWorkspace({
 
                     {explanationMode === "technical" && (
                       <p className="text-xs text-ink-muted mt-2 leading-relaxed">{selectedNode.description}</p>
+                    )}
+
+                    {/* Plain-language data flow -- lets you trace a request without reading the
+                        diagram's arrows directly. Shown in both modes since "what talks to what"
+                        is useful regardless of technical depth. */}
+                    {(incomingConnections.length > 0 || outgoingConnections.length > 0) && (
+                      <div className="mt-3 space-y-2 text-xs">
+                        {incomingConnections.length > 0 && (
+                          <div className="flex items-start gap-1.5">
+                            <span className="mt-0.5 flex-none text-ink-faint">⬅</span>
+                            <span className="text-ink-muted">
+                              <span className="font-semibold text-ink">Receives from:</span>{" "}
+                              {incomingConnections.map((c, i) => (
+                                <span key={i}>
+                                  {i > 0 && ", "}
+                                  {nodeNameById(c.from)}
+                                  {c.protocol ? ` (${c.protocol})` : ""}
+                                </span>
+                              ))}
+                            </span>
+                          </div>
+                        )}
+                        {outgoingConnections.length > 0 && (
+                          <div className="flex items-start gap-1.5">
+                            <span className="mt-0.5 flex-none text-ink-faint">➡</span>
+                            <span className="text-ink-muted">
+                              <span className="font-semibold text-ink">Sends to:</span>{" "}
+                              {outgoingConnections.map((c, i) => (
+                                <span key={i}>
+                                  {i > 0 && ", "}
+                                  {nodeNameById(c.to)}
+                                  {c.protocol ? ` (${c.protocol})` : ""}
+                                </span>
+                              ))}
+                            </span>
+                          </div>
+                        )}
+                      </div>
                     )}
 
                     {isEditing && (
@@ -1742,12 +1918,39 @@ export default function ArchitectureWorkspace({
                   )}
                 </div>
               ) : (
-                <div className="flex-1 flex flex-col justify-center items-center text-center text-ink-faint">
-                  <span className="text-3xl">👈</span>
-                  <h4 className="font-semibold text-sm mt-3 text-ink-muted">Select a Component</h4>
-                  <p className="text-xs text-ink-muted max-w-[220px] mt-1">
-                    Click elements in the diagram to inspect rationale, mapping, alternatives, and cost estimates.
-                  </p>
+                <div className="flex-1 overflow-y-auto">
+                  <div className="text-center text-ink-faint">
+                    <span className="text-3xl">👈</span>
+                    <h4 className="font-semibold text-sm mt-3 text-ink-muted">Select a Component</h4>
+                    <p className="text-xs text-ink-muted max-w-[260px] mx-auto mt-1">
+                      Click any box in the diagram to see its cost, config, and reasoning. Meanwhile, here&apos;s
+                      what each piece in this design actually does:
+                    </p>
+                  </div>
+
+                  {/* Glossary of the types actually present in this diagram -- a legend instead
+                      of a bare empty box, and scoped to this design rather than every possible
+                      component type in the system. */}
+                  <div className="mt-5 space-y-2">
+                    {Array.from(new Set(diagramComponents.map((c) => c.type))).map((type) => (
+                      <div
+                        key={type}
+                        className="flex items-start gap-2.5 rounded-xl border border-line bg-white p-2.5 text-left"
+                      >
+                        <div className="flex h-7 w-7 flex-none items-center justify-center rounded-lg bg-paper">
+                          <Icon icon={resolveServiceIcon(undefined, type)} width={15} height={15} />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-[10px] font-bold uppercase tracking-wide text-ink">
+                            {TYPE_LABELS[type] || type}
+                          </div>
+                          <p className="text-[10.5px] text-ink-muted leading-snug mt-0.5">
+                            {getPlainDescription(type, "")}
+                          </p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
