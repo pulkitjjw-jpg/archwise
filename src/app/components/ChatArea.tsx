@@ -111,11 +111,11 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
   return (
     <div className="flex h-[calc(100vh-12rem)] flex-col rounded-[2rem] border border-white/60 bg-white/70 shadow-xl backdrop-blur-md overflow-hidden">
       {/* Chat Header */}
-      <div className="border-b border-slate-200 bg-slate-950 px-6 py-4 text-white">
+      <div className="border-b border-line bg-ink px-6 py-4 text-white">
         <div className="flex items-center justify-between">
           <div>
             <h3 className="font-bold tracking-tight">Interactive Discovery Chat</h3>
-            <p className="text-xs text-cyan-300 font-semibold uppercase tracking-wider mt-0.5">
+            <p className="text-xs text-accent-on-dark font-semibold uppercase tracking-wider mt-0.5">
               {stageLabel}
             </p>
           </div>
@@ -127,7 +127,7 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
         {/* Progress Bar */}
         <div className="mt-3 h-1.5 w-full rounded-full bg-white/20 overflow-hidden">
           <div
-            className="h-full bg-cyan-400 transition-all duration-500 ease-out"
+            className="h-full bg-accent-on-dark transition-all duration-500 ease-out"
             style={{ width: `${progressPercent}%` }}
           />
         </div>
@@ -145,8 +145,8 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
               <div
                 className={`max-w-[80%] rounded-[1.5rem] px-5 py-3 text-sm leading-relaxed shadow-sm ${
                   isUser
-                    ? "bg-cyan-600 text-white rounded-br-none"
-                    : "bg-slate-100 text-slate-900 rounded-bl-none border border-slate-200"
+                    ? "bg-accent text-white rounded-br-none"
+                    : "bg-paper text-ink rounded-bl-none border border-line"
                 }`}
               >
                 <div className="font-bold text-[10px] uppercase tracking-wider mb-1 opacity-75">
@@ -167,14 +167,14 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
         {/* Typing Indicator */}
         {sending && (
           <div className="flex justify-start">
-            <div className="bg-slate-100 border border-slate-200 text-slate-900 rounded-[1.5rem] rounded-bl-none px-5 py-3 shadow-sm max-w-[80%]">
+            <div className="bg-paper border border-line text-ink rounded-[1.5rem] rounded-bl-none px-5 py-3 shadow-sm max-w-[80%]">
               <div className="font-bold text-[10px] uppercase tracking-wider mb-1 opacity-75">
                 Assistant
               </div>
               <div className="flex items-center gap-1 py-1">
-                <span className="h-2 w-2 animate-bounce rounded-full bg-slate-400 [animation-delay:-0.3s]" />
-                <span className="h-2 w-2 animate-bounce rounded-full bg-slate-400 [animation-delay:-0.15s]" />
-                <span className="h-2 w-2 animate-bounce rounded-full bg-slate-400" />
+                <span className="h-2 w-2 animate-bounce rounded-full bg-ink-faint [animation-delay:-0.3s]" />
+                <span className="h-2 w-2 animate-bounce rounded-full bg-ink-faint [animation-delay:-0.15s]" />
+                <span className="h-2 w-2 animate-bounce rounded-full bg-ink-faint" />
               </div>
             </div>
           </div>
@@ -183,11 +183,11 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
       </div>
 
       {/* Message Input Form */}
-      <div className="border-t border-slate-200 bg-slate-50/50 p-4 space-y-3">
+      <div className="border-t border-line bg-paper/50 p-4 space-y-3">
         {latestStage === "requirement_gathering" && (
-          <div className="rounded-xl bg-emerald-50/70 border border-emerald-100 p-2 text-center text-xs">
-            <span className="font-semibold text-emerald-950">Discovery concluded.</span>{" "}
-            <span className="text-emerald-800">Need to report changes? Type a growth trigger below.</span>
+          <div className="rounded-xl bg-success-soft/70 border border-success/25 p-2 text-center text-xs">
+            <span className="font-semibold text-success">Discovery concluded.</span>{" "}
+            <span className="text-success">Need to report changes? Type a growth trigger below.</span>
           </div>
         )}
         <form onSubmit={handleSend}>
@@ -202,12 +202,12 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
               value={input}
               onChange={(e) => setInput(e.target.value)}
               disabled={sending}
-              className="flex-1 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500 disabled:opacity-50"
+              className="flex-1 rounded-xl border border-line bg-white px-4 py-3 text-sm text-ink shadow-sm focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
             />
             <button
               type="submit"
               disabled={!input.trim() || sending}
-              className="rounded-xl bg-slate-950 px-5 py-3 text-sm font-semibold text-white shadow-md transition-all hover:bg-slate-800 active:scale-95 disabled:opacity-50"
+              className="rounded-xl bg-ink px-5 py-3 text-sm font-semibold text-white shadow-md transition-all hover:bg-ink/90 active:scale-95 disabled:opacity-50"
             >
               Send
             </button>
