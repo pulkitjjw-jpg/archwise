@@ -496,6 +496,67 @@ Do not include markdown code block formatting (like ```json) in your raw respons
     return result.get("proposals") or []
 
 
+async def refine_component_proposal(
+    original_proposal: dict,
+    prior_messages: list[dict],
+    discussion_message: str,
+    existing_components: list[dict],
+    requirements: dict,
+    api_key: str,
+) -> dict:
+    """Inline discuss/refine for ONE pending proposal card (Workstream O) -- the user pushes back
+    on a single proposal ("use a cheaper alternative", "can this just extend the existing queue
+    instead") without touching any other proposal in the same batch. Returns an updated
+    type-level proposal in the SAME shape propose_component_changes produces for one item
+    (action/id/type/name/reasoning/connections, never a specific cloud service -- the caller
+    re-runs the identical deterministic enrichment either way), plus a short conversational reply
+    for the mini discussion thread."""
+    system_instruction = """
+You are a senior cloud systems architect having a short back-and-forth with a user about ONE specific proposed architecture change. You already proposed this change; the user is now pushing back, asking a question, or requesting an adjustment to just this one proposal.
+
+You are given: the original proposal (action/id/type/name/reasoning), any prior discussion turns on this proposal, the user's latest message, the current component list (for context on what already exists), and the product's requirements.
+
+Respond with an UPDATED version of the proposal reflecting what the user asked for, plus a short, direct conversational reply explaining what changed (or, if the user's request doesn't warrant a change -- e.g. they're just asking a clarifying question -- explain why and return the proposal unchanged).
+
+Rules:
+- Keep the same "id" as the original proposal unless the user explicitly asks to rename it.
+- Prefer one of the known types if it genuinely fits: cdn, compute, database, storage, queue, cache, auth, realtime, tokenization, audit-log, phi-vault, deidentification. Only invent a new kebab-case type if none fit even loosely.
+- Do NOT pick a specific cloud service name -- that's resolved separately and deterministically per provider, exactly like the original proposal.
+- "assistantReply" must be 1-3 sentences, conversational, and specific to what actually changed (or didn't).
+- For "add" actions, also return "connections" (same shape as before: {"from": string, "to": string, "protocol": string}), updated if the change affects wiring, otherwise carried forward unchanged.
+
+You MUST respond with a raw JSON object matching this TypeScript structure:
+{
+  "assistantReply": string,
+  "proposal": {
+    "action": "add" | "modify",
+    "id": string,
+    "type": string (required for "add"),
+    "name": string,
+    "reasoning": string,
+    "connections": [ { "from": string, "to": string, "protocol": string } ] (only for "add", empty array otherwise)
+  }
+}
+Do not include markdown code block formatting (like ```json) in your raw response, return only the JSON object.
+"""
+
+    input_context = {
+        "originalProposal": original_proposal,
+        "priorDiscussion": prior_messages,
+        "userMessage": discussion_message,
+        "existingComponents": [
+            {"id": c.get("id"), "type": c.get("type"), "name": c.get("name")} for c in existing_components
+        ],
+        "requirements": requirements,
+    }
+    messages_for_api = [
+        {"role": "system", "content": system_instruction},
+        {"role": "user", "content": json.dumps(input_context)},
+    ]
+    result = await _call_llm_with_retry(api_key, messages_for_api, "Proposal refinement")
+    return {"assistantReply": result.get("assistantReply") or "", "proposal": result["proposal"]}
+
+
 async def generate_requirement_suggestions(functional: list[str], non_functional: dict, api_key: str) -> dict:
     """Generates clickable-chip candidate values for the Requirements panel's editable fields, so
     the user can select instead of typing. Called on-demand (not persisted) whenever the panel

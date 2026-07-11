@@ -8,7 +8,7 @@ from app.config import settings
 from app.constants import DEFAULT_INDUSTRY_CONTEXT
 from app.db import get_db
 from app.models import Architecture, Project, Requirement
-from app.schemas import ManualArchitectureRequest, ProposeChangesRequest
+from app.schemas import ManualArchitectureRequest, ProposeChangesRequest, RefineProposalRequest
 from app.serializers import serialize_architecture
 from app.services.architecture_diff import calculate_total_cost, compute_architecture_diff
 from app.services.cloud_mapping import get_cloud_mapping
@@ -18,6 +18,7 @@ from app.services.llm import (
     generate_flow_story,
     generate_user_journey,
     propose_component_changes,
+    refine_component_proposal,
     validate_and_generate_architecture,
 )
 from app.services.rules_engine import run_rules_engine
@@ -104,6 +105,71 @@ def _provider_components(components: list[dict], provider: str) -> list[dict]:
         }
         for c in components
     ]
+
+
+def _enrich_proposal_item(
+    p: dict, provider: str, existing_components: list[dict], reqs_context: dict, industry_context: dict
+) -> dict | None:
+    """Turns one type-level proposal (action/id/type/name/reasoning from the LLM -- never a
+    specific cloud service, see propose_component_changes' docstring) into the fully-enriched,
+    frontend-ready shape: real per-provider service names/costs/LLD resolved deterministically
+    via _build_cloud_mapping, exactly like a manually-added component. Shared by both the
+    propose-changes endpoint and refine-proposal below so a refined proposal goes through the
+    identical enrichment a freshly-proposed one does. Returns None for anything invalid (missing
+    id, colliding id on "add", unknown id on "modify") so the caller can filter it out."""
+    action = p.get("action")
+    component_id = p.get("id")
+    if not component_id:
+        return None
+    existing_ids = {c["id"] for c in existing_components}
+
+    if action == "add":
+        if component_id in existing_ids:
+            return None  # LLM picked a colliding id -- drop rather than silently overwrite an existing component
+        component_type = p.get("type") or "compute"
+        mapping = _build_cloud_mapping(provider, {"id": component_id, "type": component_type}, reqs_context, industry_context)
+        full_component = {
+            "id": component_id,
+            "name": p.get("name") or component_id,
+            "type": component_type,
+            "description": "",
+            "reasoning": p.get("reasoning") or "Proposed in response to a chat-described enhancement.",
+            "rulesFired": [],
+            "metadata": {"isManuallyAdded": True, "overrideSource": "user"},
+            "cloudMappings": {
+                prov: _build_cloud_mapping(prov, {"id": component_id, "type": component_type}, reqs_context, industry_context)
+                for prov in ("aws", "azure", "gcp", "kubernetes", "private")
+            },
+        }
+        return {
+            "action": "add",
+            "componentId": component_id,
+            "componentType": component_type,
+            "componentName": full_component["name"],
+            "reasoning": full_component["reasoning"],
+            "serviceName": mapping["serviceName"],
+            "component": full_component,
+            "newConnections": p.get("connections") or [],
+        }
+
+    if action == "modify":
+        existing = next((c for c in existing_components if c["id"] == component_id), None)
+        if not existing:
+            return None  # LLM referenced a component id that doesn't exist -- drop it
+        current_service_name = ((existing.get("cloudMappings") or {}).get(provider) or {}).get(
+            "serviceName", existing.get("name")
+        )
+        return {
+            "action": "modify",
+            "componentId": component_id,
+            "componentType": existing.get("type"),
+            "componentName": existing.get("name"),
+            "reasoning": p.get("reasoning") or "Role updated in response to a chat-described enhancement.",
+            "serviceName": current_service_name,
+            "previousReasoning": existing.get("reasoning", ""),
+        }
+
+    return None
 
 
 async def _get_or_generate_flow_story(db: AsyncSession, record: Architecture, project_id: uuid.UUID, provider: str) -> str:
@@ -218,69 +284,71 @@ async def propose_architecture_changes(
 
     existing_components = record.hld.get("components", [])
     existing_connections = record.hld.get("connections", [])
-    existing_ids = {c["id"] for c in existing_components}
 
     raw_proposals = await propose_component_changes(
         payload.description, existing_components, existing_connections, reqs_context, settings.openrouter_api_key
     )
 
-    proposals: list[dict] = []
-    for p in raw_proposals:
-        action = p.get("action")
-        component_id = p.get("id")
-        if not component_id:
-            continue
-
-        if action == "add":
-            if component_id in existing_ids:
-                continue  # LLM picked a colliding id -- drop rather than silently overwrite an existing component
-            component_type = p.get("type") or "compute"
-            mapping = _build_cloud_mapping(payload.provider, {"id": component_id, "type": component_type}, reqs_context, industry_context)
-            full_component = {
-                "id": component_id,
-                "name": p.get("name") or component_id,
-                "type": component_type,
-                "description": "",
-                "reasoning": p.get("reasoning") or "Proposed in response to a chat-described enhancement.",
-                "rulesFired": [],
-                "metadata": {"isManuallyAdded": True, "overrideSource": "user"},
-                "cloudMappings": {
-                    provider: _build_cloud_mapping(provider, {"id": component_id, "type": component_type}, reqs_context, industry_context)
-                    for provider in ("aws", "azure", "gcp", "kubernetes", "private")
-                },
-            }
-            proposals.append(
-                {
-                    "action": "add",
-                    "componentId": component_id,
-                    "componentType": component_type,
-                    "componentName": full_component["name"],
-                    "reasoning": full_component["reasoning"],
-                    "serviceName": mapping["serviceName"],
-                    "component": full_component,
-                    "newConnections": p.get("connections") or [],
-                }
-            )
-        elif action == "modify":
-            existing = next((c for c in existing_components if c["id"] == component_id), None)
-            if not existing:
-                continue  # LLM referenced a component id that doesn't exist -- drop it
-            current_service_name = ((existing.get("cloudMappings") or {}).get(payload.provider) or {}).get(
-                "serviceName", existing.get("name")
-            )
-            proposals.append(
-                {
-                    "action": "modify",
-                    "componentId": component_id,
-                    "componentType": existing.get("type"),
-                    "componentName": existing.get("name"),
-                    "reasoning": p.get("reasoning") or "Role updated in response to a chat-described enhancement.",
-                    "serviceName": current_service_name,
-                    "previousReasoning": existing.get("reasoning", ""),
-                }
-            )
+    proposals = [
+        enriched
+        for p in raw_proposals
+        if (enriched := _enrich_proposal_item(p, payload.provider, existing_components, reqs_context, industry_context))
+    ]
 
     return {"proposals": proposals}
+
+
+@router.post("/projects/{project_id}/architectures/{architecture_id}/refine-proposal")
+async def refine_proposal(
+    project_id: uuid.UUID, architecture_id: uuid.UUID, payload: RefineProposalRequest, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """Inline discuss/refine for a single pending proposal (Workstream O) -- the user pushes
+    back on one card ("use a cheaper alternative") without affecting any other proposal in the
+    same batch. Preview-only like propose-changes: returns an updated, fully-enriched proposal
+    plus a conversational reply for the mini chat thread; nothing is persisted until the user
+    accepts and the batch is applied via the existing manual-save endpoint."""
+    if payload.provider not in VALID_PROPOSE_CHANGES_PROVIDERS:
+        raise HTTPException(status_code=400, detail="Invalid provider specified")
+
+    record = (
+        await db.execute(
+            select(Architecture).where(Architecture.id == architecture_id, Architecture.project_id == project_id)
+        )
+    ).scalar_one_or_none()
+    if not record:
+        raise HTTPException(status_code=404, detail="Architecture version not found")
+
+    reqs = (
+        await db.execute(
+            select(Requirement)
+            .where(Requirement.project_id == project_id)
+            .order_by(Requirement.version.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if not reqs:
+        raise HTTPException(status_code=400, detail="Requirements must exist before refining a proposal")
+
+    reqs_context = {"functional": reqs.functional, "nonFunctional": reqs.non_functional}
+    industry_context = reqs.industry_context or DEFAULT_INDUSTRY_CONTEXT
+    existing_components = record.hld.get("components", [])
+
+    result = await refine_component_proposal(
+        payload.originalProposal.model_dump(),
+        [m.model_dump() for m in payload.priorMessages],
+        payload.discussionMessage,
+        existing_components,
+        reqs_context,
+        settings.openrouter_api_key,
+    )
+
+    enriched = _enrich_proposal_item(
+        result["proposal"], payload.provider, existing_components, reqs_context, industry_context
+    )
+    if not enriched:
+        raise HTTPException(status_code=422, detail="Could not resolve the refined proposal to a valid component")
+
+    return {"proposal": enriched, "assistantReply": result["assistantReply"]}
 
 
 @router.post("/projects/{project_id}/architectures", status_code=201)

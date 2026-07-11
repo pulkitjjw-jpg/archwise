@@ -1139,9 +1139,28 @@ export default function ArchitectureWorkspace({
   const [proposalsFetchedFor, setProposalsFetchedFor] = useState<string | null>(null);
   const [applyingProposals, setApplyingProposals] = useState(false);
 
+  // Batch selection -- independent of proposalDecisions (accept/reject). A checkbox here just
+  // marks a card as "in scope" for the next Accept Selected / Reject Selected click; individual
+  // per-card Accept/Reject buttons still work standalone without touching selection at all.
+  const [selectedProposalIds, setSelectedProposalIds] = useState<Set<string>>(new Set());
+
+  // Inline discuss/refine, scoped per proposal. Keyed by componentId so multiple cards could in
+  // principle have independent histories; only one thread is expanded (openDiscussionId) at a
+  // time for layout simplicity, but that's a display choice only -- accepting/rejecting any
+  // OTHER card is never blocked by an open discussion, since decisions live in the separate
+  // proposalDecisions map untouched by this state.
+  type DiscussMessage = { role: "user" | "assistant"; text: string };
+  const [proposalDiscussions, setProposalDiscussions] = useState<Record<string, DiscussMessage[]>>({});
+  const [openDiscussionId, setOpenDiscussionId] = useState<string | null>(null);
+  const [discussionInput, setDiscussionInput] = useState("");
+  const [discussionLoading, setDiscussionLoading] = useState(false);
+
   const fetchProposals = async (description: string, archId: string) => {
     setProposalsLoading(true);
     setProposalDecisions({});
+    setSelectedProposalIds(new Set());
+    setProposalDiscussions({});
+    setOpenDiscussionId(null);
     try {
       const res = await fetch(
         `/api/projects/${projectId}/architectures/${archId}/propose-changes?provider=${activeProvider}`,
@@ -1190,11 +1209,114 @@ export default function ArchitectureWorkspace({
 
   const approvedProposalCount = proposals.filter((p) => proposalDecisions[p.componentId] === "approved").length;
 
+  const toggleProposalSelected = (componentId: string) => {
+    setSelectedProposalIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(componentId)) next.delete(componentId);
+      else next.add(componentId);
+      return next;
+    });
+  };
+  const selectAllProposals = () => setSelectedProposalIds(new Set(proposals.map((p) => p.componentId)));
+  const deselectAllProposals = () => setSelectedProposalIds(new Set());
+  const acceptSelectedProposals = () => {
+    setProposalDecisions((prev) => {
+      const next = { ...prev };
+      selectedProposalIds.forEach((id) => {
+        next[id] = "approved";
+      });
+      return next;
+    });
+  };
+  const rejectSelectedProposals = () => {
+    setProposalDecisions((prev) => {
+      const next = { ...prev };
+      selectedProposalIds.forEach((id) => {
+        next[id] = "rejected";
+      });
+      return next;
+    });
+  };
+
+  const toggleDiscussion = (componentId: string) => {
+    setOpenDiscussionId((prev) => (prev === componentId ? null : componentId));
+    setDiscussionInput("");
+  };
+
+  const handleSendDiscussion = async (proposal: ProposedChange) => {
+    const message = discussionInput.trim();
+    if (!message || !architecture) return;
+
+    const priorMessages = proposalDiscussions[proposal.componentId] || [];
+    setProposalDiscussions((prev) => ({
+      ...prev,
+      [proposal.componentId]: [...priorMessages, { role: "user", text: message }],
+    }));
+    setDiscussionInput("");
+    setDiscussionLoading(true);
+
+    try {
+      const res = await fetch(
+        `/api/projects/${projectId}/architectures/${architecture.id}/refine-proposal?provider=${activeProvider}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            originalProposal: {
+              action: proposal.action,
+              componentId: proposal.componentId,
+              componentType: proposal.componentType,
+              componentName: proposal.componentName,
+              reasoning: proposal.reasoning,
+            },
+            discussionMessage: message,
+            priorMessages,
+            provider: activeProvider,
+          }),
+        }
+      );
+      if (!res.ok) throw new Error("Failed to refine this proposal");
+      const data = await res.json();
+
+      setProposalDiscussions((prev) => ({
+        ...prev,
+        [proposal.componentId]: [
+          ...(prev[proposal.componentId] || []),
+          { role: "assistant", text: data.assistantReply },
+        ],
+      }));
+
+      // Swap the refined proposal into place in-line -- same componentId, updated fields.
+      // Any existing accept/reject decision for this card is cleared since the underlying
+      // proposal just changed and deserves a fresh look before being (re-)approved.
+      setProposals((prev) => prev.map((p) => (p.componentId === proposal.componentId ? data.proposal : p)));
+      setProposalDecisions((prev) => {
+        const next = { ...prev };
+        delete next[proposal.componentId];
+        return next;
+      });
+    } catch (err) {
+      console.error("Failed to refine proposal:", err);
+      setProposalDiscussions((prev) => ({
+        ...prev,
+        [proposal.componentId]: [
+          ...(prev[proposal.componentId] || []),
+          { role: "assistant", text: "Sorry, I couldn't process that -- please try rephrasing." },
+        ],
+      }));
+    } finally {
+      setDiscussionLoading(false);
+    }
+  };
+
   const dismissProposals = () => {
     setPendingDescription(null);
     setProposals([]);
     setProposalDecisions({});
     setProposalsFetchedFor(null);
+    setSelectedProposalIds(new Set());
+    setProposalDiscussions({});
+    setOpenDiscussionId(null);
   };
 
   const handleApplyProposals = async () => {
@@ -1652,9 +1774,40 @@ export default function ArchitectureWorkspace({
             </p>
           ) : (
             <>
+              {/* Batch controls -- selection (checkboxes) is independent of the accept/reject
+                  decision each card already supports standalone; these just apply that same
+                  per-card action to every currently-checked card in one click. */}
+              <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-line/60 pb-2.5 text-[10px] font-bold uppercase tracking-wide text-ink-muted">
+                <span>{selectedProposalIds.size} of {proposals.length} selected</span>
+                <button onClick={selectAllProposals} className="text-accent-ink hover:underline">
+                  Select All
+                </button>
+                <button onClick={deselectAllProposals} className="text-ink-muted hover:underline">
+                  Deselect All
+                </button>
+                <span className="mx-0.5 text-line-strong">|</span>
+                <button
+                  onClick={acceptSelectedProposals}
+                  disabled={selectedProposalIds.size === 0}
+                  className="rounded-lg bg-success-soft px-2 py-1 text-success transition hover:bg-success/20 disabled:opacity-40"
+                >
+                  Accept Selected
+                </button>
+                <button
+                  onClick={rejectSelectedProposals}
+                  disabled={selectedProposalIds.size === 0}
+                  className="rounded-lg bg-danger-soft px-2 py-1 text-danger transition hover:bg-danger/20 disabled:opacity-40"
+                >
+                  Reject Selected
+                </button>
+              </div>
+
               <div className="mt-3 space-y-2">
                 {proposals.map((p) => {
                   const decision = proposalDecisions[p.componentId];
+                  const isSelected = selectedProposalIds.has(p.componentId);
+                  const isDiscussing = openDiscussionId === p.componentId;
+                  const discussion = proposalDiscussions[p.componentId] || [];
                   return (
                     <div
                       key={p.componentId}
@@ -1667,15 +1820,32 @@ export default function ArchitectureWorkspace({
                       }`}
                     >
                       <div className="flex items-start justify-between gap-2">
-                        <div>
-                          <span className="font-bold text-ink">
-                            {p.action === "add" ? "+ Add" : "✎ Modify"}: {p.componentName}
-                          </span>
-                          <div className="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-accent-ink">
-                            For {PROVIDER_LABELS[activeProvider]}: {p.serviceName}
+                        <div className="flex items-start gap-2">
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => toggleProposalSelected(p.componentId)}
+                            className="mt-0.5 h-3.5 w-3.5 flex-none accent-accent"
+                            aria-label={`Select ${p.componentName} for batch action`}
+                          />
+                          <div>
+                            <span className="font-bold text-ink">
+                              {p.action === "add" ? "+ Add" : "✎ Modify"}: {p.componentName}
+                            </span>
+                            <div className="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-accent-ink">
+                              For {PROVIDER_LABELS[activeProvider]}: {p.serviceName}
+                            </div>
                           </div>
                         </div>
                         <div className="flex flex-none items-center gap-1.5">
+                          <button
+                            onClick={() => toggleDiscussion(p.componentId)}
+                            className={`rounded-lg px-2.5 py-1 text-[10px] font-bold transition ${
+                              isDiscussing ? "bg-ink text-white" : "bg-line text-ink-muted hover:bg-line-strong"
+                            }`}
+                          >
+                            💬 Discuss
+                          </button>
                           <button
                             onClick={() => decideProposal(p.componentId, "approved")}
                             className={`rounded-lg px-2.5 py-1 text-[10px] font-bold transition ${
@@ -1699,6 +1869,57 @@ export default function ArchitectureWorkspace({
                         </div>
                       </div>
                       <p className="mt-2 leading-relaxed text-ink-muted">{p.reasoning}</p>
+
+                      {/* Inline discuss/refine thread -- scoped to just this card. Sending a
+                          message here never touches proposalDecisions for any other card, so
+                          accepting/rejecting the rest of the batch is never blocked by this
+                          being open. */}
+                      {isDiscussing && (
+                        <div className="mt-3 rounded-xl border border-line bg-paper/70 p-2.5">
+                          {discussion.length > 0 && (
+                            <div className="mb-2 space-y-1.5">
+                              {discussion.map((m, i) => (
+                                <div
+                                  key={i}
+                                  className={`rounded-lg px-2.5 py-1.5 text-[11px] leading-relaxed ${
+                                    m.role === "user"
+                                      ? "ml-6 bg-accent/10 text-ink"
+                                      : "mr-6 bg-white text-ink-muted border border-line"
+                                  }`}
+                                >
+                                  {m.text}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          {discussionLoading && (
+                            <div className="mb-2 flex items-center gap-1.5 text-[10px] text-ink-faint italic">
+                              <span className="h-2.5 w-2.5 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+                              Thinking...
+                            </div>
+                          )}
+                          <div className="flex gap-1.5">
+                            <input
+                              type="text"
+                              value={discussionInput}
+                              onChange={(e) => setDiscussionInput(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" && !discussionLoading) handleSendDiscussion(p);
+                              }}
+                              placeholder="e.g. can you use a cheaper alternative for this?"
+                              disabled={discussionLoading}
+                              className="flex-1 rounded-lg border border-line bg-white px-2.5 py-1.5 text-[11px] focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
+                            />
+                            <button
+                              onClick={() => handleSendDiscussion(p)}
+                              disabled={discussionLoading || !discussionInput.trim()}
+                              className="flex-none rounded-lg bg-accent px-3 py-1.5 text-[10px] font-bold text-white transition hover:bg-accent-ink disabled:opacity-40"
+                            >
+                              Send
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   );
                 })}

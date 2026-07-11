@@ -85,3 +85,23 @@ class ManualArchitectureRequest(BaseModel):
 class ProposeChangesRequest(BaseModel):
     description: str
     provider: str
+
+
+class OriginalProposal(BaseModel):
+    action: str
+    componentId: str
+    componentType: str
+    componentName: str
+    reasoning: str
+
+
+class DiscussionMessage(BaseModel):
+    role: str
+    text: str
+
+
+class RefineProposalRequest(BaseModel):
+    originalProposal: OriginalProposal
+    discussionMessage: str
+    priorMessages: list[DiscussionMessage] = Field(default_factory=list)
+    provider: str
