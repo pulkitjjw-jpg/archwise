@@ -7,7 +7,7 @@ import { TransformWrapper, TransformComponent } from "react-zoom-pan-pinch";
 import { runLldRulesEngine } from "@/lib/lld-rules";
 import { validateArchitectureLayout, getProviderMaturityWarning } from "@/lib/validation";
 import { resolveServiceIcon } from "@/lib/service-icons";
-import { getPlainDescription } from "@/lib/component-descriptions";
+import { getLearnContent, getPlainDescription } from "@/lib/component-descriptions";
 import { exportDiagramAsPng, exportDiagramAsSvg, type PngExportEdge, type PngExportNode } from "@/lib/diagram-export";
 import InfoTooltip from "./InfoTooltip";
 
@@ -216,6 +216,9 @@ export default function ArchitectureWorkspace({
   const [activeProvider, setActiveProvider] = useState<CloudProviderKey>("aws");
   const [viewMode, setViewMode] = useState<"diagram" | "comparison">("diagram");
   const [isLldExpanded, setIsLldExpanded] = useState(false);
+  // Collapsed by default -- learning depth is available on demand, not imposed on expert users
+  // who already know what a message queue is.
+  const [isLearnExpanded, setIsLearnExpanded] = useState(false);
   // Simple is the default for every new session -- matches the goal of being usable with
   // zero architecture background. Technical is one click away, not buried.
   const [explanationMode, setExplanationMode] = useState<"simple" | "technical">("simple");
@@ -284,10 +287,12 @@ export default function ArchitectureWorkspace({
   }, [projectId]);
 
   // LLD accordion defaults open in Technical mode (deeper detail should be the default there,
-  // not an extra click) and closed in Simple mode -- re-applied whenever the selected node
-  // changes so switching components doesn't leave a stale expand/collapse state behind.
+  // not an extra click) and closed in Simple mode; the Learn panel always starts collapsed --
+  // both re-applied whenever the selected node changes so switching components doesn't leave a
+  // stale expand/collapse state behind.
   useEffect(() => {
     setIsLldExpanded(explanationMode === "technical");
+    setIsLearnExpanded(false);
   }, [selectedNodeId, explanationMode]);
 
   // Advance the staged loading message every few seconds while a generation call is
@@ -1734,6 +1739,35 @@ export default function ArchitectureWorkspace({
                     <div className="mt-3 rounded-2xl border border-accent/25 bg-accent-soft p-3.5 text-xs text-ink leading-relaxed">
                       {getPlainDescription(selectedNode.type, selectedNode.id)}
                     </div>
+
+                    {/* Learn toggle -- collapsed by default so it doesn't clutter the
+                        professional view. Teaches the underlying concept with a real-world
+                        analogy; deliberately not a tutorial screen or forced walkthrough, just
+                        depth available on demand for whoever wants it. */}
+                    {(() => {
+                      const learn = getLearnContent(selectedNode.type, selectedNode.id);
+                      if (!learn) return null;
+                      return (
+                        <div className="mt-2">
+                          <button
+                            onClick={() => setIsLearnExpanded((v) => !v)}
+                            className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-accent-ink hover:underline"
+                          >
+                            <span>{isLearnExpanded ? "▲" : "▼"}</span>
+                            <span>🎓 Learn: what is this, really?</span>
+                          </button>
+                          {isLearnExpanded && (
+                            <div className="mt-2 rounded-2xl border border-line bg-white p-3.5 text-xs text-ink-muted leading-relaxed space-y-2 animate-fadeIn">
+                              <p>
+                                <span className="font-bold text-ink">Think of it like: </span>
+                                {learn.analogy}
+                              </p>
+                              <p>{learn.deeper}</p>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
 
                     {explanationMode === "technical" && (
                       <p className="text-xs text-ink-muted mt-2 leading-relaxed">{selectedNode.description}</p>

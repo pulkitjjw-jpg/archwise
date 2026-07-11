@@ -22,3 +22,83 @@ export function getPlainDescription(componentType: string, componentId: string):
   }
   return TYPE_DESCRIPTIONS[componentType] || "Supports the system as part of the overall architecture.";
 }
+
+// "Learn" content -- teaches the underlying concept with a real-world analogy, for the drawer's
+// collapsed-by-default Learn toggle (Workstream F). Deliberately generic/conceptual rather than
+// project-specific: the "why this exists in YOUR design" tie-in already lives in the component's
+// own `reasoning` field (surfaced via info tooltips elsewhere) -- this teaches the concept itself,
+// which doesn't change from one project to the next.
+type LearnContent = { analogy: string; deeper: string };
+
+const LEARN_CONTENT: Record<string, LearnContent> = {
+  cdn: {
+    analogy:
+      "Like stocking copies of a popular book in libraries all over the country instead of one central library everyone has to travel to.",
+    deeper:
+      "Whoever's closest gets served fastest, and the original server (the \"central library\") doesn't get overwhelmed by every single request. This matters most for static content — images, videos, scripts — that doesn't change per user.",
+  },
+  compute: {
+    analogy: "The kitchen of your application — where the actual cooking (processing) happens.",
+    deeper:
+      "An order (request) comes in, gets prepared using your business logic, and a finished dish (response) goes back out. How many \"kitchens\" you run, and whether they scale up automatically during a rush, is exactly what the LLD config below controls.",
+  },
+  worker: {
+    analogy:
+      "A kitchen's prep cook working in the back — chopping vegetables ahead of time so the line cooks can serve customers fast.",
+    deeper:
+      "Customers never see or wait on that prep work. In software terms: slow or bulky tasks (sending emails, resizing images, generating reports) get done in the background instead of making a user's request hang while it happens.",
+  },
+  database: {
+    analogy:
+      "A filing cabinet with strict rules: every drawer is labeled, nothing gets lost, and two people can't scribble on the same form at once.",
+    deeper:
+      "Unlike a pile of papers on a desk, you can always find exactly what you're looking for, and the system enforces that data stays consistent even when many people are reading and writing at the same time.",
+  },
+  storage: {
+    analogy: "A self-storage unit for your app: cheap, holds a lot, and you don't open it every five minutes.",
+    deeper:
+      "Good for files you need to keep — uploads, documents, backups — but don't need to query or search through the way you would rows in a database.",
+  },
+  queue: {
+    analogy: "A deli counter's take-a-number system.",
+    deeper:
+      "When it's busy, customers don't need to be served instantly — they wait their turn in order, and the counter keeps working through the line at a sustainable pace instead of everyone shouting at once and the staff getting overwhelmed.",
+  },
+  cache: {
+    analogy: "Keeping your most-used tools on your desk instead of walking to a supply closet every time.",
+    deeper:
+      "It's faster because the data is already close at hand, at the cost of the \"desk\" having limited space — so only the most frequently-needed data stays cached, and it can go stale if the original changes.",
+  },
+  auth: {
+    analogy: "The bouncer-and-wristband system at a venue.",
+    deeper:
+      "Your ID gets checked once at the door (sign-in), then you get a wristband (session/token) that proves who you are for the rest of the night — so you're not re-checked at every single room.",
+  },
+  tokenization: {
+    analogy: "Casino chips — you exchange real cash for chips at the door, and the casino floor never touches your cash directly.",
+    deeper:
+      "If the chips are lost or stolen, no real money was ever exposed. The same idea applies to sensitive data like card numbers: a token stands in for the real value everywhere except the one vault that can reverse it.",
+  },
+  "audit-log": {
+    analogy: "A building's security camera footage log.",
+    deeper:
+      "Nobody watches it live all the time, but if something goes wrong, there's an unchangeable record of exactly who did what and when — which is often a legal requirement, not just a nice-to-have.",
+  },
+  "phi-vault": {
+    analogy: "A hospital's locked records room, separate from the general office filing cabinets.",
+    deeper:
+      "Same building, but extra locks, extra sign-in sheets, and far fewer people allowed in — because the consequences of a leak here are much more serious than for ordinary business data.",
+  },
+  deidentification: {
+    analogy: "A researcher redacting names and addresses from documents before handing them to a study.",
+    deeper:
+      "The useful patterns (trends, aggregates) remain usable, but nobody can trace a specific result back to a specific person — which is what lets that data be used for analytics without the same strict handling rules as the original.",
+  },
+};
+
+export function getLearnContent(componentType: string, componentId: string): LearnContent | undefined {
+  if (componentType === "compute" && componentId === "worker") {
+    return LEARN_CONTENT.worker;
+  }
+  return LEARN_CONTENT[componentType];
+}
