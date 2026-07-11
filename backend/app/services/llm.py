@@ -370,6 +370,82 @@ Do not include markdown code block formatting (like ```json) in your response, r
     return result["story"]
 
 
+KNOWN_COMPONENT_TYPES = (
+    "cdn",
+    "compute",
+    "database",
+    "storage",
+    "queue",
+    "cache",
+    "auth",
+    "realtime",
+    "tokenization",
+    "audit-log",
+    "phi-vault",
+    "deidentification",
+)
+
+
+async def propose_component_changes(
+    description: str,
+    existing_components: list[dict],
+    existing_connections: list[dict],
+    requirements: dict,
+    api_key: str,
+) -> list[dict]:
+    """Identifies which architecture components a freeform chat-described enhancement would add
+    or change, provider-agnostically (no service names -- the caller resolves those
+    deterministically via cloud_mapping.py/lld_rules.py for whichever provider is active, the
+    same "rules engine decides, LLM narrates" boundary the rest of the app follows). This is a
+    preview only: nothing is persisted here, the caller applies only what the user approves via
+    the existing manual-save endpoint."""
+    system_instruction = f"""
+You are a senior cloud systems architect. A user has described a new requirement or enhancement to an already-generated architecture, in their own words, via chat. Your job is to identify which architecture components this would affect -- new components to add, or existing components whose role/config needs to change -- NOT to pick specific cloud services (that's resolved separately, deterministically, per cloud provider).
+
+You are given: the enhancement description, the current component list (id, type, name, reasoning), the current connections, and the product's functional/non-functional requirements.
+
+Rules:
+- Propose the SMALLEST set of changes that genuinely satisfies the description. Do not propose unrelated or speculative changes.
+- For a NEW component ("add"): give it a short kebab-case "id" that doesn't collide with any existing component id, a human-readable "name", and a "type". Prefer one of these known types if it genuinely fits: {", ".join(KNOWN_COMPONENT_TYPES)}. Only invent a new kebab-case type if none of the known ones fit even loosely.
+- For an EXISTING component that needs a role/config change ("modify"): use its EXACT existing "id" from the component list given, do not invent a new one.
+- "reasoning" must be 2-4 sentences, concrete, tied to the specific enhancement description AND the product's actual stated requirements -- never generic boilerplate.
+- For "add" actions, also propose the "connections" needed to wire the new component into the existing flow, each as {{"from": string, "to": string, "protocol": string}}, using real existing component ids (or the new component's own id) as endpoints.
+- If the description doesn't clearly require any architecture change (e.g. it's a clarifying question, not a change), return an empty "proposals" array.
+- Never propose removing a component unless the description explicitly asks to remove/replace that capability.
+
+You MUST respond with a raw JSON object matching this TypeScript structure:
+{{
+  "proposals": [
+    {{
+      "action": "add" | "modify",
+      "id": string,
+      "type": string (required for "add", ignored for "modify"),
+      "name": string,
+      "reasoning": string,
+      "connections": [ {{ "from": string, "to": string, "protocol": string }} ] (only for "add", empty array otherwise)
+    }}
+  ]
+}}
+Do not include markdown code block formatting (like ```json) in your raw response, return only the JSON object.
+"""
+
+    input_context = {
+        "enhancementDescription": description,
+        "existingComponents": [
+            {"id": c.get("id"), "type": c.get("type"), "name": c.get("name"), "reasoning": c.get("reasoning", "")}
+            for c in existing_components
+        ],
+        "existingConnections": existing_connections,
+        "requirements": requirements,
+    }
+    messages_for_api = [
+        {"role": "system", "content": system_instruction},
+        {"role": "user", "content": json.dumps(input_context)},
+    ]
+    result = await _call_llm_with_retry(api_key, messages_for_api, "Component change proposal generation")
+    return result.get("proposals") or []
+
+
 async def generate_requirement_suggestions(functional: list[str], non_functional: dict, api_key: str) -> dict:
     """Generates clickable-chip candidate values for the Requirements panel's editable fields, so
     the user can select instead of typing. Called on-demand (not persisted) whenever the panel

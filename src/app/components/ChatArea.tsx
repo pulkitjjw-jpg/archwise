@@ -85,6 +85,25 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
               method: "POST",
             });
             window.dispatchEvent(new Event("requirementsUpdated"));
+
+            // Gather this growth-trigger's full description from fresh server-side history
+            // (not the local `messages` closure, which can be stale) so multi-turn
+            // clarification isn't lost, then hand it to the architecture panel so it can
+            // propose component-level changes for review -- see ArchitectureWorkspace's
+            // "growthTriggerCompleted" listener.
+            const historyRes = await fetch(`/api/projects/${projectId}/conversations`);
+            if (historyRes.ok) {
+              const { conversations } = await historyRes.json();
+              const growthDescription = conversations
+                .filter((c: ConversationTurn) => c.role === "user" && c.stage === "growth_trigger")
+                .map((c: ConversationTurn) => c.message)
+                .join(" ");
+              if (growthDescription.trim()) {
+                window.dispatchEvent(
+                  new CustomEvent("growthTriggerCompleted", { detail: { description: growthDescription } })
+                );
+              }
+            }
           } catch (err) {
             console.error("Auto extraction failed:", err);
           }

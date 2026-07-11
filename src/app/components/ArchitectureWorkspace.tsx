@@ -867,6 +867,127 @@ export default function ArchitectureWorkspace({
     };
   }, [architecture, activeProvider]);
 
+  // Chat-based Enhancement Proposals -- triggered when a growth-trigger chat conversation
+  // concludes (see ChatArea's "growthTriggerCompleted" event). Scoped to whichever provider is
+  // currently active; re-fetches automatically if the user switches provider while a proposal
+  // is pending, so the review is always for the provider actually on screen. Nothing is
+  // persisted until the user approves individual cards and clicks Apply, which reuses the same
+  // manual-save endpoint/versioning the manual editor already uses.
+  type ProposedChange = {
+    action: "add" | "modify";
+    componentId: string;
+    componentType: string;
+    componentName: string;
+    reasoning: string;
+    serviceName: string;
+    component?: ComponentData;
+    newConnections?: ConnectionData[];
+    previousReasoning?: string;
+  };
+  const [pendingDescription, setPendingDescription] = useState<string | null>(null);
+  const [proposals, setProposals] = useState<ProposedChange[]>([]);
+  const [proposalDecisions, setProposalDecisions] = useState<Record<string, "approved" | "rejected">>({});
+  const [proposalsLoading, setProposalsLoading] = useState(false);
+  const [proposalsFetchedFor, setProposalsFetchedFor] = useState<string | null>(null);
+  const [applyingProposals, setApplyingProposals] = useState(false);
+
+  const fetchProposals = async (description: string, archId: string) => {
+    setProposalsLoading(true);
+    setProposalDecisions({});
+    try {
+      const res = await fetch(
+        `/api/projects/${projectId}/architectures/${archId}/propose-changes?provider=${activeProvider}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ description, provider: activeProvider }),
+        }
+      );
+      if (!res.ok) throw new Error("Failed to generate proposed changes");
+      const data = await res.json();
+      setProposals(data.proposals || []);
+      setProposalsFetchedFor(`${archId}:${activeProvider}`);
+    } catch (err) {
+      console.error("Failed to fetch proposed changes:", err);
+      setProposals([]);
+    } finally {
+      setProposalsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ description: string }>).detail;
+      if (!detail?.description) return;
+      setPendingDescription(detail.description);
+      setProposalsFetchedFor(null);
+      setProposals([]);
+      setProposalDecisions({});
+    };
+    window.addEventListener("growthTriggerCompleted", handler);
+    return () => window.removeEventListener("growthTriggerCompleted", handler);
+  }, []);
+
+  useEffect(() => {
+    if (!pendingDescription || !architecture) return;
+    const key = `${architecture.id}:${activeProvider}`;
+    if (proposalsFetchedFor === key || proposalsLoading) return;
+    fetchProposals(pendingDescription, architecture.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingDescription, architecture, activeProvider]);
+
+  const decideProposal = (componentId: string, decision: "approved" | "rejected") => {
+    setProposalDecisions((prev) => ({ ...prev, [componentId]: decision }));
+  };
+
+  const approvedProposalCount = proposals.filter((p) => proposalDecisions[p.componentId] === "approved").length;
+
+  const dismissProposals = () => {
+    setPendingDescription(null);
+    setProposals([]);
+    setProposalDecisions({});
+    setProposalsFetchedFor(null);
+  };
+
+  const handleApplyProposals = async () => {
+    if (!architecture) return;
+    const approved = proposals.filter((p) => proposalDecisions[p.componentId] === "approved");
+    if (approved.length === 0) return;
+
+    let newComponents = [...architecture.hld.components];
+    let newConnections = [...architecture.hld.connections];
+
+    for (const p of approved) {
+      if (p.action === "add" && p.component) {
+        newComponents = [...newComponents, p.component];
+        newConnections = [...newConnections, ...(p.newConnections || [])];
+      } else if (p.action === "modify") {
+        newComponents = newComponents.map((c) => (c.id === p.componentId ? { ...c, reasoning: p.reasoning } : c));
+      }
+    }
+
+    try {
+      setApplyingProposals(true);
+      setError("");
+      const res = await fetch(`/api/projects/${projectId}/architectures/manual`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ components: newComponents, connections: newConnections }),
+      });
+      if (!res.ok) {
+        const errData = await res.json();
+        throw new Error(errData.error || "Failed to apply approved changes");
+      }
+      const data = await res.json();
+      dismissProposals();
+      await loadArchitecture(data.architecture.version);
+    } catch (err: any) {
+      setError(err.message || "An error occurred while applying approved changes.");
+    } finally {
+      setApplyingProposals(false);
+    }
+  };
+
   useEffect(() => {
     if (!imageExportOpen) return;
     const onClickOutside = (e: MouseEvent) => {
@@ -1204,6 +1325,100 @@ export default function ArchitectureWorkspace({
               Dismiss
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Chat-Based Enhancement Proposals -- see the useEffect pair above listening for
+          "growthTriggerCompleted". Review-and-approve only; nothing here mutates the
+          architecture until "Apply Approved Changes" is clicked. */}
+      {pendingDescription && (
+        <div className="mx-6 mt-4 rounded-2xl border border-accent/25 bg-accent-soft/60 p-4">
+          <div className="flex items-start justify-between gap-2">
+            <span className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-accent-ink">
+              <span>💬</span> Chat-Proposed Changes — {PROVIDER_LABELS[activeProvider]}
+              <InfoTooltip text="Generated from what you described in the chat's growth trigger, scoped to the cloud provider currently active here. Nothing is applied to your architecture until you accept individual changes below and click Apply." />
+            </span>
+            <button
+              onClick={dismissProposals}
+              className="text-xs font-bold text-ink-muted transition hover:text-ink"
+            >
+              Dismiss
+            </button>
+          </div>
+          <p className="mt-1.5 text-xs italic text-ink-muted">&ldquo;{pendingDescription}&rdquo;</p>
+
+          {proposalsLoading ? (
+            <div className="mt-3 flex items-center gap-2 text-xs text-ink-muted">
+              <span className="h-3 w-3 flex-none animate-spin rounded-full border-2 border-accent border-t-transparent" />
+              Analyzing which components this would affect for {PROVIDER_LABELS[activeProvider]}...
+            </div>
+          ) : proposals.length === 0 ? (
+            <p className="mt-2 text-xs text-ink-muted">
+              No architecture changes are needed for this on {PROVIDER_LABELS[activeProvider]} -- your existing
+              components already cover it.
+            </p>
+          ) : (
+            <>
+              <div className="mt-3 space-y-2">
+                {proposals.map((p) => {
+                  const decision = proposalDecisions[p.componentId];
+                  return (
+                    <div
+                      key={p.componentId}
+                      className={`rounded-xl border p-3 text-xs transition ${
+                        decision === "approved"
+                          ? "border-success/40 bg-success-soft/40"
+                          : decision === "rejected"
+                            ? "border-line bg-paper/60 opacity-50"
+                            : "border-line-strong bg-white"
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <span className="font-bold text-ink">
+                            {p.action === "add" ? "+ Add" : "✎ Modify"}: {p.componentName}
+                          </span>
+                          <div className="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-accent-ink">
+                            For {PROVIDER_LABELS[activeProvider]}: {p.serviceName}
+                          </div>
+                        </div>
+                        <div className="flex flex-none items-center gap-1.5">
+                          <button
+                            onClick={() => decideProposal(p.componentId, "approved")}
+                            className={`rounded-lg px-2.5 py-1 text-[10px] font-bold transition ${
+                              decision === "approved"
+                                ? "bg-success text-white"
+                                : "bg-success-soft text-success hover:bg-success/20"
+                            }`}
+                          >
+                            Accept
+                          </button>
+                          <button
+                            onClick={() => decideProposal(p.componentId, "rejected")}
+                            className={`rounded-lg px-2.5 py-1 text-[10px] font-bold transition ${
+                              decision === "rejected"
+                                ? "bg-danger text-white"
+                                : "bg-danger-soft text-danger hover:bg-danger/20"
+                            }`}
+                          >
+                            Reject
+                          </button>
+                        </div>
+                      </div>
+                      <p className="mt-2 leading-relaxed text-ink-muted">{p.reasoning}</p>
+                    </div>
+                  );
+                })}
+              </div>
+              <button
+                onClick={handleApplyProposals}
+                disabled={approvedProposalCount === 0 || applyingProposals}
+                className="mt-3 rounded-xl bg-ink px-4 py-2 text-xs font-bold text-white transition hover:bg-ink/90 disabled:opacity-40"
+              >
+                {applyingProposals ? "Applying..." : `Apply Approved Changes (${approvedProposalCount})`}
+              </button>
+            </>
+          )}
         </div>
       )}
 

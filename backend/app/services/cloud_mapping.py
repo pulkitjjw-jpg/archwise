@@ -57,6 +57,27 @@ def _aws_mapping(
     is_low_budget: bool,
     team_lower: str,
 ) -> dict:
+    if component_type == "realtime":
+        return _mapping(
+            "Amazon API Gateway (WebSocket APIs)",
+            [
+                {
+                    "serviceName": "AWS AppSync (GraphQL Subscriptions)",
+                    "reason": "Chose API Gateway WebSocket APIs for direct bidirectional connection control at low cost and no GraphQL schema overhead. AppSync is the better fit if the app already speaks GraphQL end-to-end.",
+                    "costEstimate": {
+                        "min": 15,
+                        "max": 120 if is_high_scale else 40,
+                        "assumptions": "AppSync real-time subscription pricing (~$2/million messages) plus GraphQL query costs.",
+                    },
+                }
+            ],
+            {
+                "min": 5,
+                "max": 90 if is_high_scale else 20,
+                "assumptions": "API Gateway WebSocket APIs billed per connection-minute + per message ($1.00/million messages, $0.25/million connection-minutes).",
+            },
+        )
+
     if component_type == "cdn":
         return _mapping(
             "Amazon CloudFront",
@@ -425,6 +446,27 @@ def _azure_mapping(
     is_low_budget: bool,
     team_lower: str,
 ) -> dict:
+    if component_type == "realtime":
+        return _mapping(
+            "Azure Web PubSub",
+            [
+                {
+                    "serviceName": "Azure SignalR Service",
+                    "reason": "Chose Web PubSub for a lighter-weight, protocol-agnostic WebSocket service. SignalR Service is the better fit if the backend already uses the .NET SignalR library and wants its client SDK conveniences.",
+                    "costEstimate": {
+                        "min": 50,
+                        "max": 200 if is_high_scale else 80,
+                        "assumptions": "SignalR Service Standard tier (~$50/mo base) plus per-unit connection scaling.",
+                    },
+                }
+            ],
+            {
+                "min": 40 if is_high_scale else 0,
+                "max": 150 if is_high_scale else 50,
+                "assumptions": "Azure Web PubSub Standard tier, billed per concurrent connection and per message.",
+            },
+        )
+
     if component_type == "cdn":
         return _mapping(
             "Azure Front Door",
@@ -789,6 +831,27 @@ def _gcp_mapping(
     is_low_budget: bool,
     team_lower: str,
 ) -> dict:
+    if component_type == "realtime":
+        return _mapping(
+            "Google Cloud Run (WebSocket Support) + Firestore Realtime Listeners",
+            [
+                {
+                    "serviceName": "Firebase Realtime Database",
+                    "reason": "Chose Cloud Run + Firestore listeners to keep real-time state in the same document database already used for the rest of the app. Firebase Realtime Database is a simpler dedicated option if the app doesn't otherwise need Firestore's query model.",
+                    "costEstimate": {
+                        "min": 5,
+                        "max": 100 if is_high_scale else 30,
+                        "assumptions": "Firebase Realtime Database billed on GB stored + GB downloaded, no per-connection fee.",
+                    },
+                }
+            ],
+            {
+                "min": 10,
+                "max": 110 if is_high_scale else 25,
+                "assumptions": "Cloud Run instance held open for WebSocket connections + Firestore realtime listener reads/writes.",
+            },
+        )
+
     if component_type == "cdn":
         return _mapping(
             "Google Cloud CDN",
@@ -1146,6 +1209,27 @@ def _gcp_mapping(
 
 
 def _kubernetes_mapping(component_type: str, component_id: str, is_high_scale: bool, is_low_ops_capacity: bool) -> dict:
+    if component_type == "realtime":
+        return _mapping(
+            "Deployment + Service (WebSocket-Capable Ingress, Sticky Sessions)",
+            [
+                {
+                    "serviceName": "External Managed WebSocket Service (e.g. Ably/Pusher)",
+                    "reason": "Chose an in-cluster WebSocket-capable Deployment for full control and no per-message vendor billing. A managed service (Ably/Pusher) removes the need to handle sticky-session load balancing and horizontal fan-out yourself, at the cost of a recurring per-connection fee.",
+                    "costEstimate": {
+                        "min": 49,
+                        "max": 300 if is_high_scale else 100,
+                        "assumptions": "Managed WebSocket-as-a-service pricing tier, billed per concurrent connection.",
+                    },
+                }
+            ],
+            {
+                "min": 5,
+                "max": 40 if is_high_scale else 15,
+                "assumptions": "In-cluster Deployment + Service with sticky-session Ingress annotations; incremental cost only, no external per-connection billing.",
+            },
+        )
+
     if component_type == "cdn":
         return _mapping(
             "Ingress-NGINX + cert-manager (Cluster-Level TLS)",
@@ -1424,6 +1508,27 @@ def _kubernetes_mapping(component_type: str, component_id: str, is_high_scale: b
 
 
 def _private_mapping(component_type: str, component_id: str, is_high_scale: bool) -> dict:
+    if component_type == "realtime":
+        return _mapping(
+            "Self-Managed WebSocket Server (Socket.IO/Node.js Cluster) Behind Reverse Proxy",
+            [
+                {
+                    "serviceName": "Hosted Managed WebSocket Service (Ably/Pusher) Over the Internet",
+                    "reason": "Chose a self-managed WebSocket cluster to keep real-time traffic entirely on-premises. A hosted managed service is simpler to operate but means real-time traffic leaves the private network, which may not be acceptable for this deployment's data-residency posture.",
+                    "costEstimate": {
+                        "min": 49,
+                        "max": 300 if is_high_scale else 100,
+                        "assumptions": "Managed WebSocket-as-a-service pricing tier, billed per concurrent connection, plus egress from the private network to reach it.",
+                    },
+                }
+            ],
+            {
+                "min": 10,
+                "max": 60 if is_high_scale else 25,
+                "assumptions": "Amortized VM cost for a small Socket.IO/Node.js cluster with sticky-session reverse-proxy config; no elastic capacity, sized ahead of time.",
+            },
+        )
+
     if component_type == "cdn":
         return _mapping(
             "Reverse Proxy (NGINX/HAProxy) — No CDN Edge Network On-Premises",

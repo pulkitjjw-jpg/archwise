@@ -80,3 +80,8 @@ class Connection(BaseModel):
 class ManualArchitectureRequest(BaseModel):
     components: list[Component]
     connections: list[Connection]
+
+
+class ProposeChangesRequest(BaseModel):
+    description: str
+    provider: str

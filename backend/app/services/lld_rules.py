@@ -55,7 +55,22 @@ def run_lld_rules_engine(
     config: dict[str, str] = {}
     reasoning: dict[str, str] = {}
 
-    if component_type == "cdn":
+    if component_type == "realtime":
+        config["connectionModel"] = "Persistent bidirectional (WebSocket)"
+        config["idleTimeoutSec"] = "600s (10 min)"
+        config["maxConcurrentConnections"] = "10000" if is_high_scale else "1000"
+        config["messageBroadcastMode"] = "Fan-out via managed pub/sub backplane"
+
+        reasoning["maxConcurrentConnections"] = (
+            "Sized for a high-traffic real-time workload with many simultaneous open connections."
+            if is_high_scale
+            else "Modest connection ceiling appropriate for lower expected concurrent real-time usage."
+        )
+        reasoning["messageBroadcastMode"] = (
+            "A managed pub/sub backplane is required once there's more than one server instance, so a message sent to one connection can still reach clients connected to a different instance."
+        )
+
+    elif component_type == "cdn":
         config["priceClass"] = "PriceClass_All" if is_high_scale else "PriceClass_100"
         config["ipv6Enabled"] = "true"
         config["originShield"] = "Enabled" if is_high_scale else "Disabled"
@@ -347,7 +362,15 @@ def _run_kubernetes_lld(
     config: dict[str, str] = {}
     reasoning: dict[str, str] = {}
 
-    if component_type == "cdn":
+    if component_type == "realtime":
+        config["replicas"] = "4" if is_high_scale else "2"
+        config["namespace"] = "app"
+        config["sessionAffinity"] = "ClientIP (sticky sessions required for WebSocket)"
+        config["backplane"] = "Redis Pub/Sub (cross-pod message fan-out)"
+        reasoning["sessionAffinity"] = "A WebSocket connection is stateful and pinned to one pod — without sticky sessions, the Ingress could route a client's next request to a pod it has no open connection with."
+        reasoning["backplane"] = "A shared pub/sub backplane lets a message published from any pod reach clients connected to any other pod."
+
+    elif component_type == "cdn":
         config["ingressClass"] = "nginx"
         config["tlsMode"] = "cert-manager (Let's Encrypt)"
         config["replicas"] = "2"
@@ -495,7 +518,13 @@ def _run_private_cloud_lld(
     config: dict[str, str] = {}
     reasoning: dict[str, str] = {}
 
-    if component_type == "cdn":
+    if component_type == "realtime":
+        config["vmSize"] = "4 vCPU / 8GB RAM"
+        config["vmCount"] = "3 (clustered, sticky-session reverse proxy)" if is_high_scale else "2"
+        config["scalingMode"] = "Manual (no autoscaler) — capacity must be pre-provisioned for peak concurrent connections"
+        reasoning["scalingMode"] = "Private infrastructure has no elastic capacity pool — the number of simultaneously open WebSocket connections is capped by whatever's pre-provisioned."
+
+    elif component_type == "cdn":
         config["vmSize"] = "2 vCPU / 4GB RAM"
         config["scalingMode"] = "Manual (no autoscaler)"
         reasoning["scalingMode"] = "No CDN edge network on-premises — traffic capacity is whatever the reverse-proxy VM(s) can handle, sized ahead of time."
