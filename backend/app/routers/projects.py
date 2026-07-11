@@ -99,6 +99,7 @@ async def create_project(payload: ProjectCreateRequest, db: AsyncSession = Depen
 
     # Call LLM to get the first brainstorm question
     first_question = "Thank you. Let's start the brainstorm. Can you tell me what target traffic size or request volume you expect?"
+    first_suggested_replies: list[str] = []
     try:
         turn = await get_next_brainstorm_turn(
             [{"role": "user", "message": payload.ideaText, "stage": "intake"}],
@@ -106,11 +107,20 @@ async def create_project(payload: ProjectCreateRequest, db: AsyncSession = Depen
             settings.openrouter_api_key,
         )
         first_question = turn["message"]
+        first_suggested_replies = turn.get("suggestedReplies") or []
     except Exception as llm_err:
         logger.error("Failed to generate first brainstorm question: %s", llm_err)
 
     # Log the first AI follow-up question
-    db.add(Conversation(project_id=project.id, role="assistant", message=first_question, stage="brainstorm"))
+    db.add(
+        Conversation(
+            project_id=project.id,
+            role="assistant",
+            message=first_question,
+            stage="brainstorm",
+            suggested_replies=first_suggested_replies,
+        )
+    )
 
     await db.commit()
 

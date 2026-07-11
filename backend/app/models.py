@@ -45,6 +45,10 @@ class Conversation(Base):
     role: Mapped[str] = mapped_column(Text, nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     stage: Mapped[str] = mapped_column(Text, nullable=False)
+    # LLM-generated quick-reply options tailored to this specific assistant question (empty for
+    # user turns). Persisted rather than computed ephemerally so a page reload doesn't lose the
+    # suggestions for the latest unanswered question.
+    suggested_replies: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
     )

@@ -53,6 +53,7 @@ async def create_conversation_turn(
     assistant_turn_data = {
         "message": "Thank you for the input. Could you share more about your scaling or compliance requirements?",
         "stage": "brainstorm",
+        "suggestedReplies": [],
     }
 
     try:
@@ -61,7 +62,11 @@ async def create_conversation_turn(
             project_name,
             settings.openrouter_api_key,
         )
-        assistant_turn_data = {"message": next_turn["message"], "stage": next_turn["stage"]}
+        assistant_turn_data = {
+            "message": next_turn["message"],
+            "stage": next_turn["stage"],
+            "suggestedReplies": next_turn.get("suggestedReplies") or [],
+        }
     except Exception as llm_err:
         logger.error("Failed to generate assistant response: %s", llm_err)
 
@@ -71,6 +76,7 @@ async def create_conversation_turn(
         role="assistant",
         message=assistant_turn_data["message"],
         stage=assistant_turn_data["stage"],
+        suggested_replies=assistant_turn_data["suggestedReplies"],
     )
     db.add(assistant_turn)
     await db.flush()

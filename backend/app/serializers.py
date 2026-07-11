@@ -18,6 +18,7 @@ def serialize_conversation(c: Conversation) -> dict:
         "role": c.role,
         "message": c.message,
         "stage": c.stage,
+        "suggestedReplies": c.suggested_replies,
         "createdAt": c.created_at,
     }
 

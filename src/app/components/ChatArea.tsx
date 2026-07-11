@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 type ConversationTurn = {
   id: string;
   role: string;
   message: string;
   stage: string;
+  suggestedReplies?: string[];
   createdAt: string | Date;
 };
 
@@ -30,69 +31,85 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
   const latestStage = latestMessage?.stage || "intake";
   const isGrowthPhase = latestStage === "growth_trigger" || latestStage === "requirement_gathering";
 
-  const handleSend = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!input.trim() || sending) return;
+  const sendMessage = useCallback(
+    async (rawText: string) => {
+      const userMessageText = rawText.trim();
+      if (!userMessageText || sending) return;
 
-    const userMessageText = input.trim();
-    setInput("");
-    setSending(true);
+      setInput("");
+      setSending(true);
 
-    const activeStage = isGrowthPhase ? "growth_trigger" : "brainstorm";
+      const activeStage = isGrowthPhase ? "growth_trigger" : "brainstorm";
 
-    const tempMessage: ConversationTurn = {
-      id: Math.random().toString(),
-      role: "user",
-      message: userMessageText,
-      stage: activeStage,
-      createdAt: new Date(),
-    };
+      const tempMessage: ConversationTurn = {
+        id: crypto.randomUUID(),
+        role: "user",
+        message: userMessageText,
+        stage: activeStage,
+        createdAt: new Date(),
+      };
 
-    setMessages((prev) => [...prev, tempMessage]);
+      setMessages((prev) => [...prev, tempMessage]);
 
-    try {
-      const response = await fetch(`/api/projects/${projectId}/conversations`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          role: "user",
-          message: userMessageText,
-          stage: activeStage,
-        }),
-      });
+      try {
+        const response = await fetch(`/api/projects/${projectId}/conversations`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            role: "user",
+            message: userMessageText,
+            stage: activeStage,
+          }),
+        });
 
-      if (!response.ok) {
-        throw new Error("Failed to save message");
-      }
-
-      const { userConversation, assistantConversation } = await response.json();
-
-      // Replace user temp message with database turn, and append assistant response
-      setMessages((prev) =>
-        prev
-          .map((msg) => (msg.id === tempMessage.id ? userConversation : msg))
-          .concat(assistantConversation)
-      );
-
-      // Auto-extract requirements if LLM confirms the change was clear
-      if (assistantConversation.stage === "requirement_gathering" && isGrowthPhase) {
-        try {
-          await fetch(`/api/projects/${projectId}/requirements`, {
-            method: "POST",
-          });
-          window.dispatchEvent(new Event("requirementsUpdated"));
-        } catch (err) {
-          console.error("Auto extraction failed:", err);
+        if (!response.ok) {
+          throw new Error("Failed to save message");
         }
+
+        const { userConversation, assistantConversation } = await response.json();
+
+        // Replace user temp message with database turn, and append assistant response
+        setMessages((prev) =>
+          prev
+            .map((msg) => (msg.id === tempMessage.id ? userConversation : msg))
+            .concat(assistantConversation)
+        );
+
+        // Auto-extract requirements if LLM confirms the change was clear
+        if (assistantConversation.stage === "requirement_gathering" && isGrowthPhase) {
+          try {
+            await fetch(`/api/projects/${projectId}/requirements`, {
+              method: "POST",
+            });
+            window.dispatchEvent(new Event("requirementsUpdated"));
+          } catch (err) {
+            console.error("Auto extraction failed:", err);
+          }
+        }
+      } catch (error) {
+        console.error("Error sending message:", error);
+      } finally {
+        setSending(false);
       }
-    } catch (error) {
-      console.error("Error sending message:", error);
-    } finally {
-      setSending(false);
-    }
+    },
+    [sending, isGrowthPhase, projectId]
+  );
+
+  const handleSend = (e: React.FormEvent) => {
+    e.preventDefault();
+    sendMessage(input);
   };
+
+  const handleSuggestionClick = (suggestion: string) => {
+    sendMessage(suggestion);
+  };
+
+  // Suggested quick-reply chips only make sense for the latest, still-unanswered assistant
+  // question -- once the user has replied, the next assistant turn carries its own suggestions.
+  const activeSuggestions =
+    latestMessage?.role === "assistant" && !sending ? latestMessage.suggestedReplies || [] : [];
 
   // Calculate progress percentage
   let progressPercent = 15;
@@ -190,6 +207,25 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
             <span className="text-success">Need to report changes? Type a growth trigger below.</span>
           </div>
         )}
+
+        {/* AI-suggested quick replies -- tailored to this question by the LLM, not a static
+            list. Selecting one sends it immediately; typing a custom answer is still just as
+            available below. */}
+        {activeSuggestions.length > 0 && (
+          <div className="flex flex-wrap gap-1.5">
+            {activeSuggestions.map((suggestion, idx) => (
+              <button
+                key={idx}
+                type="button"
+                onClick={() => handleSuggestionClick(suggestion)}
+                className="rounded-full border border-accent/25 bg-accent-soft px-3 py-1.5 text-left text-xs font-medium text-accent-ink transition hover:border-accent hover:bg-accent/15"
+              >
+                {suggestion}
+              </button>
+            ))}
+          </div>
+        )}
+
         <form onSubmit={handleSend}>
           <div className="flex gap-2">
             <input

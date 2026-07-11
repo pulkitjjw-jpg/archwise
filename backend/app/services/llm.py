@@ -124,13 +124,16 @@ Evaluate the user's reported changes:
 
 Never apologize or reference previous attempts, formatting issues, or corrections in your response — respond naturally as if this is the only attempt.
 
+Additionally, alongside "message", generate "suggestedReplies": 2 to 4 short (a few words to one short sentence) candidate answers to the question YOU are asking in "message", tailored specifically to this product idea and what's been discussed so far — never generic placeholders like "Yes" / "No" / "Not sure" unless the question is genuinely binary. Each suggestion must be a concrete, realistic, directly-sendable answer (e.g. for a scale question on a described B2B tool: "About 500 companies, 5k daily active users", not "Medium scale"). If "isComplete" is true (no more question to answer), return an empty array for "suggestedReplies".
+
 You MUST respond with a raw JSON object matching this TypeScript structure:
 {{
   "message": string (your conversational follow-up question or update confirmation),
   "isComplete": boolean (set to true ONLY when you have enough details or are transitioning to requirement_gathering),
   "stage": "growth_trigger" | "requirement_gathering" (set to "requirement_gathering" when isComplete is true, otherwise "growth_trigger"),
   "detectedIndustry": "fintech" | "healthtech" | "none",
-  "industryRationale": string (one short sentence — reuse your prior assessment if nothing new changes it)
+  "industryRationale": string (one short sentence — reuse your prior assessment if nothing new changes it),
+  "suggestedReplies": string[]
 }}
 Do not include markdown code block formatting (like ```json) in your raw response, return only the JSON object.
 """
@@ -160,13 +163,16 @@ Rules:
 - If the user gives very short or vague answers repeatedly, do not get stuck. Pivot and wrap up the brainstorm after a maximum of 6 turns total.
 - Never apologize or reference previous attempts, formatting issues, or corrections in your response — respond naturally as if this is the only attempt.
 
+Additionally, alongside "message", generate "suggestedReplies": 2 to 4 short (a few words to one short sentence) candidate answers to the question YOU are asking in "message", tailored specifically to this product idea and what's been discussed so far — never generic placeholders like "Yes" / "No" / "Not sure" unless the question is genuinely binary. Each suggestion must be a concrete, realistic, directly-sendable answer (e.g. for a scale question on a described scheduling app: "Around 2,000 bookings per day at peak", not "High scale"; for a fintech compliance question: "We route all card data through Stripe, never touch it directly"). If "isComplete" is true (concluding message, no more question to answer), return an empty array for "suggestedReplies".
+
 You MUST respond with a raw JSON object matching this TypeScript structure:
 {{
   "message": string (your conversational follow-up question or concluding summary),
   "isComplete": boolean (set to true ONLY when you have enough details or are wrapping up after max turns),
   "stage": "brainstorm" | "requirement_gathering" (set to "requirement_gathering" when isComplete is true, otherwise "brainstorm"),
   "detectedIndustry": "fintech" | "healthtech" | "none",
-  "industryRationale": string (one short sentence explaining the classification, even if "none")
+  "industryRationale": string (one short sentence explaining the classification, even if "none"),
+  "suggestedReplies": string[]
 }}
 Do not include markdown code block formatting (like ```json) in your raw response, return only the JSON object.
 """
@@ -254,6 +260,44 @@ Do not include markdown code block formatting (like ```json) in your response, r
     ]
 
     return await _call_llm_with_retry(api_key, messages_for_api, "Requirement extraction")
+
+
+async def generate_requirement_suggestions(functional: list[str], non_functional: dict, api_key: str) -> dict:
+    """Generates clickable-chip candidate values for the Requirements panel's editable fields, so
+    the user can select instead of typing. Called on-demand (not persisted) whenever the panel
+    needs fresh suggestions -- functional/non_functional reflect whatever the user has typed or
+    selected so far, so suggestions stay relevant as the user edits."""
+    system_instruction = """
+You are a senior cloud systems architect helping a user fill in system requirements for their product. Given their described functional capabilities and current non-functional requirement values (some may be "not_specified"), suggest realistic, concrete candidate values the user can pick with one click instead of typing.
+
+Rules:
+- Generate 3 to 5 short, concrete, directly-usable suggestions per non-functional field below. Each suggestion is a complete value ready to be selected as-is, not a hint or partial sentence.
+- Tailor every suggestion specifically to the described product — reference realistic details from it (traffic patterns, data types, likely team size/budget for a product like this). Never generic filler like "High scale" or "Standard security" — write the actual number/detail a real answer would contain.
+- Do this for every field even if it already has a specified value — the user may want a different concrete option; don't just restate their current value.
+- Also suggest 3 to 5 additional FUNCTIONAL capabilities this product likely needs that are NOT already in the provided list — concrete and product-specific, not generic boilerplate (avoid vague items like "user authentication"; prefer specific ones like "customers can reschedule a booking without calling the salon").
+
+You MUST respond with a raw JSON object matching this structure:
+{
+  "expectedScale": [string, string, string],
+  "readWritePattern": [string, string, string],
+  "dataNature": [string, string, string],
+  "latencySensitivity": [string, string, string],
+  "budget": [string, string, string],
+  "teamMaturity": [string, string, string],
+  "compliance": [string, string, string],
+  "functional": [string, string, string]
+}
+Do not include markdown code block formatting (like ```json) in your response, return only the raw JSON.
+"""
+
+    input_context = {"functional": functional, "nonFunctional": non_functional}
+
+    messages_for_api = [
+        {"role": "system", "content": system_instruction},
+        {"role": "user", "content": json.dumps(input_context)},
+    ]
+
+    return await _call_llm_with_retry(api_key, messages_for_api, "Requirement suggestions")
 
 
 async def validate_and_generate_architecture(

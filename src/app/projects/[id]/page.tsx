@@ -14,6 +14,7 @@ type ConversationRecord = {
   role: string;
   message: string;
   stage: string;
+  suggestedReplies?: string[];
   createdAt: string;
 };
 
@@ -115,6 +116,7 @@ export default async function ProjectPage({ params }: ProjectPageProps) {
                 role: c.role,
                 message: c.message,
                 stage: c.stage,
+                suggestedReplies: c.suggestedReplies || [],
                 createdAt: c.createdAt,
               }))}
             />

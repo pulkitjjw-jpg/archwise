@@ -59,11 +59,46 @@ export default function RequirementsPanel({
     compliance: "",
   });
 
+  // AI-suggested chip options per field -- fetched fresh on entering edit mode so they reflect
+  // whatever's actually specified so far, not stale from a previous session.
+  type FieldSuggestions = Partial<Record<keyof typeof editedNFR | "functional", string[]>>;
+  const [fieldSuggestions, setFieldSuggestions] = useState<FieldSuggestions>({});
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false);
+
+  const loadSuggestions = async (functional: string[], nonFunctional: typeof editedNFR) => {
+    try {
+      setSuggestionsLoading(true);
+      const res = await fetch(`/api/projects/${projectId}/requirements/suggestions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ functional, nonFunctional }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setFieldSuggestions(data.suggestions || {});
+      }
+    } catch (err) {
+      console.error("Failed to load requirement suggestions:", err);
+    } finally {
+      setSuggestionsLoading(false);
+    }
+  };
+
   const startEditing = () => {
     if (!requirements) return;
     setEditedFunctional(requirements.functional.join("\n"));
     setEditedNFR({ ...requirements.nonFunctional });
     setEditMode(true);
+    setFieldSuggestions({});
+    loadSuggestions(requirements.functional, requirements.nonFunctional);
+  };
+
+  const applySuggestion = (fieldName: keyof typeof editedNFR, value: string) => {
+    setEditedNFR((prev) => ({ ...prev, [fieldName]: value }));
+  };
+
+  const applyFunctionalSuggestion = (value: string) => {
+    setEditedFunctional((prev) => (prev.trim() ? `${prev.replace(/\n+$/, "")}\n${value}` : value));
   };
 
   const handleExtract = async () => {
@@ -171,8 +206,9 @@ export default function RequirementsPanel({
     const isNotSpecified = value.toLowerCase() === "not_specified" || value.toLowerCase() === "not specified";
 
     if (editMode) {
+      const suggestions = fieldSuggestions[fieldName] || [];
       return (
-        <div className="space-y-1">
+        <div className="space-y-1.5">
           <label className="text-xs font-semibold text-ink-muted uppercase tracking-wider">{label}</label>
           <input
             id={`nfr-input-${fieldName}`}
@@ -183,6 +219,26 @@ export default function RequirementsPanel({
             }
             className="w-full rounded-xl border border-line bg-white px-3 py-2 text-xs text-ink shadow-sm focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent transition-all duration-200"
           />
+          {suggestionsLoading ? (
+            <div className="flex items-center gap-1.5 text-[10px] text-ink-faint italic">
+              <span className="h-2.5 w-2.5 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+              Generating suggestions...
+            </div>
+          ) : suggestions.length > 0 ? (
+            <div className="flex flex-wrap gap-1">
+              {suggestions.map((s, idx) => (
+                <button
+                  key={idx}
+                  type="button"
+                  onClick={() => applySuggestion(fieldName, s)}
+                  title={s}
+                  className="max-w-full truncate rounded-full border border-accent/25 bg-accent-soft px-2 py-0.5 text-[10px] font-medium text-accent-ink transition hover:border-accent hover:bg-accent/15"
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+          ) : null}
         </div>
       );
     }
@@ -283,7 +339,7 @@ export default function RequirementsPanel({
             <span>🚀</span> Functional Capabilities
           </h4>
           {editMode ? (
-            <div className="space-y-1">
+            <div className="space-y-1.5">
               <label className="text-xs font-semibold text-ink-muted uppercase tracking-wider">
                 Capabilities (one per line)
               </label>
@@ -293,6 +349,31 @@ export default function RequirementsPanel({
                 onChange={(e) => setEditedFunctional(e.target.value)}
                 className="w-full rounded-2xl border border-line bg-white px-4 py-3 text-sm text-ink shadow-sm focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent resize-none"
               />
+              {suggestionsLoading ? (
+                <div className="flex items-center gap-1.5 text-[10px] text-ink-faint italic">
+                  <span className="h-2.5 w-2.5 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+                  Generating suggestions...
+                </div>
+              ) : (fieldSuggestions.functional || []).length > 0 ? (
+                <div>
+                  <span className="text-[10px] font-semibold text-ink-faint uppercase tracking-wider">
+                    + Suggested additions
+                  </span>
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {(fieldSuggestions.functional || []).map((s, idx) => (
+                      <button
+                        key={idx}
+                        type="button"
+                        onClick={() => applyFunctionalSuggestion(s)}
+                        title={s}
+                        className="max-w-full truncate rounded-full border border-accent/25 bg-accent-soft px-2 py-0.5 text-[10px] font-medium text-accent-ink transition hover:border-accent hover:bg-accent/15"
+                      >
+                        + {s}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
             </div>
           ) : (
             <ul className="grid gap-2 text-sm text-ink-muted rounded-3xl bg-paper p-5">

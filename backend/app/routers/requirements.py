@@ -10,7 +10,7 @@ from app.db import get_db
 from app.models import Conversation, Requirement
 from app.schemas import RequirementsPutRequest
 from app.serializers import serialize_requirement
-from app.services.llm import extract_requirements_from_history
+from app.services.llm import extract_requirements_from_history, generate_requirement_suggestions
 
 router = APIRouter()
 
@@ -74,6 +74,21 @@ async def extract_requirements(project_id: uuid.UUID, db: AsyncSession = Depends
     await db.commit()
 
     return {"requirements": serialize_requirement(record)}
+
+
+@router.post("/projects/{project_id}/requirements/suggestions")
+async def get_requirement_suggestions(
+    project_id: uuid.UUID, payload: RequirementsPutRequest, db: AsyncSession = Depends(get_db)
+) -> dict:
+    # Stateless and not persisted -- recomputed on demand from whatever the client currently has
+    # (saved values, or the user's in-progress edit-mode draft), so suggestions stay relevant as
+    # the user types/selects rather than freezing at whatever was last saved.
+    suggestions = await generate_requirement_suggestions(
+        payload.functional if isinstance(payload.functional, list) else [],
+        payload.nonFunctional,
+        settings.openrouter_api_key,
+    )
+    return {"suggestions": suggestions}
 
 
 @router.put("/projects/{project_id}/requirements")
