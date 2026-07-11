@@ -1,8 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import dagre from "dagre";
+import { Icon } from "@iconify/react";
+import { TransformWrapper, TransformComponent } from "react-zoom-pan-pinch";
 import { runLldRulesEngine } from "@/lib/lld-rules";
 import { validateArchitectureLayout, getProviderMaturityWarning } from "@/lib/validation";
+import { resolveServiceIcon } from "@/lib/service-icons";
+import { getPlainDescription } from "@/lib/component-descriptions";
 
 type CloudProviderKey = "aws" | "azure" | "gcp" | "kubernetes" | "private";
 
@@ -13,6 +18,61 @@ const PROVIDER_LABELS: Record<CloudProviderKey, string> = {
   kubernetes: "K8s",
   private: "Private",
 };
+
+// Icon badge background per provider -- provider hues are fills/tints only, never chrome.
+const PROVIDER_SOFT_BG: Record<CloudProviderKey, string> = {
+  aws: "bg-aws-soft",
+  azure: "bg-azure-soft",
+  gcp: "bg-gcp-soft",
+  kubernetes: "bg-k8s-soft",
+  private: "bg-private-soft",
+};
+
+const DIAGRAM_NODE_WIDTH = 208;
+const DIAGRAM_NODE_HEIGHT = 68;
+
+type DiagramLayout = {
+  nodes: Record<string, { x: number; y: number; width: number; height: number }>;
+  edgePoints: Record<string, { x: number; y: number }[]>;
+  width: number;
+  height: number;
+};
+
+function computeDiagramLayout(components: ComponentData[], connections: ConnectionData[]): DiagramLayout {
+  if (components.length === 0) {
+    return { nodes: {}, edgePoints: {}, width: 400, height: 300 };
+  }
+
+  const g = new dagre.graphlib.Graph();
+  g.setGraph({ rankdir: "LR", nodesep: 44, ranksep: 110, marginx: 40, marginy: 40 });
+  g.setDefaultEdgeLabel(() => ({}));
+
+  const ids = new Set(components.map((c) => c.id));
+  components.forEach((c) => {
+    g.setNode(c.id, { width: DIAGRAM_NODE_WIDTH, height: DIAGRAM_NODE_HEIGHT });
+  });
+  connections.forEach((conn) => {
+    if (ids.has(conn.from) && ids.has(conn.to)) {
+      g.setEdge(conn.from, conn.to);
+    }
+  });
+
+  dagre.layout(g);
+
+  const nodes: DiagramLayout["nodes"] = {};
+  g.nodes().forEach((id) => {
+    const n = g.node(id);
+    nodes[id] = { x: n.x, y: n.y, width: n.width, height: n.height };
+  });
+
+  const edgePoints: DiagramLayout["edgePoints"] = {};
+  g.edges().forEach((e) => {
+    edgePoints[`${e.v}->${e.w}`] = g.edge(e).points;
+  });
+
+  const graph = g.graph();
+  return { nodes, edgePoints, width: graph.width || 400, height: graph.height || 300 };
+}
 
 // Honest, staged descriptions of what the generation call is actually doing server-side —
 // shown progressively (not tied to real server progress events) to make the ~30-45s wait
@@ -133,6 +193,9 @@ export default function ArchitectureWorkspace({
   const [activeProvider, setActiveProvider] = useState<CloudProviderKey>("aws");
   const [viewMode, setViewMode] = useState<"diagram" | "comparison">("diagram");
   const [isLldExpanded, setIsLldExpanded] = useState(false);
+  // Simple is the default for every new session -- matches the goal of being usable with
+  // zero architecture background. Technical is one click away, not buried.
+  const [explanationMode, setExplanationMode] = useState<"simple" | "technical">("simple");
   const [error, setError] = useState("");
   const [versionList, setVersionList] = useState<ArchitectureData[]>([]);
 
@@ -596,56 +659,33 @@ export default function ArchitectureWorkspace({
   }, [draftHld, activeProvider]);
 
   // Node Positions Calculation for Premium SVG Rendering
-  const getLayout = (components: ComponentData[]) => {
-    const columns: Record<string, string[]> = {
-      entry: [], // CDN, Auth
-      api: [], // Compute
-      buffers: [], // Cache, Queue
-      backend: [], // Database, Storage, Worker
-    };
-
-    components.forEach((c) => {
-      if (c.type === "cdn" || c.type === "auth") {
-        columns.entry.push(c.id);
-      } else if (c.type === "compute" && c.id !== "worker") {
-        columns.api.push(c.id);
-      } else if (c.type === "queue" || c.type === "cache") {
-        columns.buffers.push(c.id);
-      } else {
-        columns.backend.push(c.id);
-      }
-    });
-
-    const xCoords: Record<string, number> = {
-      entry: 85,
-      api: 250,
-      buffers: 415,
-      backend: 580,
-    };
-
-    const nodeCoords: Record<string, { x: number; y: number }> = {};
-    const height = 400;
-
-    Object.keys(columns).forEach((col) => {
-      const ids = columns[col];
-      const colX = xCoords[col];
-      const count = ids.length;
-
-      ids.forEach((id, index) => {
-        const colY = count === 1 ? height / 2 : (height / (count + 1)) * (index + 1);
-        nodeCoords[id] = { x: colX, y: colY };
-      });
-    });
-
-    return nodeCoords;
-  };
-
-  const nodeCoords = isEditing
-    ? (draftHld ? getLayout(draftHld.components) : {})
-    : (architecture ? getLayout(architecture.hld.components) : {});
+  const diagramComponents = isEditing
+    ? draftHld?.components || []
+    : architecture?.hld.components || [];
+  const diagramConnections = isEditing
+    ? draftHld?.connections || []
+    : architecture?.hld.connections || [];
+  const diagramLayout = computeDiagramLayout(diagramComponents, diagramConnections);
+  const nodeCoords = diagramLayout.nodes;
   const selectedNode = isEditing
     ? draftHld?.components.find((c) => c.id === selectedNodeId)
     : architecture?.hld.components.find((c) => c.id === selectedNodeId);
+
+  // Fit the graph to the visible canvas whenever its size changes (provider/version/edit-mode
+  // switches can all change the node count) -- a static initialScale can't adapt to that.
+  const diagramViewportRef = useRef<HTMLDivElement>(null);
+  const diagramTransformRef = useRef<any>(null);
+  useEffect(() => {
+    const viewport = diagramViewportRef.current;
+    const transform = diagramTransformRef.current;
+    if (!viewport || !transform || diagramLayout.width === 0) return;
+    const fitScale = Math.min(
+      (viewport.clientWidth - 24) / diagramLayout.width,
+      (viewport.clientHeight - 24) / diagramLayout.height,
+      1
+    );
+    transform.centerView(Math.max(fitScale, 0.1), 0);
+  }, [diagramLayout.width, diagramLayout.height]);
 
   const awsTotal = calculateTotalCost("aws");
   const azureTotal = calculateTotalCost("azure");
@@ -674,43 +714,6 @@ export default function ArchitectureWorkspace({
   const COMPLIANCE_TYPES = ["tokenization", "audit-log", "phi-vault", "deidentification"];
   const isComplianceNode = (type: string) => COMPLIANCE_TYPES.includes(type);
 
-  const getNodeColor = (type: string, isSelected: boolean) => {
-    const base = isSelected ? "stroke-cyan-500 stroke-[3px]" : "stroke-slate-200";
-    let bg = "fill-slate-50";
-
-    if (type === "cdn") bg = "fill-amber-50";
-    else if (type === "compute") bg = "fill-sky-50";
-    else if (type === "database") bg = "fill-purple-50";
-    else if (type === "storage") bg = "fill-emerald-50";
-    else if (type === "queue") bg = "fill-pink-50";
-    else if (type === "cache") bg = "fill-rose-50";
-    else if (type === "auth") bg = "fill-indigo-50";
-    // Compliance nodes get their own warm, visually distinct palette so they stand out from
-    // regular infra at a glance, on top of the shield badge drawn separately on each node.
-    else if (type === "tokenization") bg = "fill-orange-50";
-    else if (type === "audit-log") bg = "fill-stone-100";
-    else if (type === "phi-vault") bg = "fill-red-50";
-    else if (type === "deidentification") bg = "fill-teal-50";
-
-    const border = isComplianceNode(type) && !isSelected ? "stroke-amber-400/70" : base;
-
-    return { border, bg };
-  };
-
-  const getNodeEmoji = (type: string) => {
-    if (type === "cdn") return "🌐";
-    if (type === "compute") return "⚙️";
-    if (type === "database") return "💾";
-    if (type === "storage") return "📦";
-    if (type === "queue") return "📥";
-    if (type === "cache") return "⚡";
-    if (type === "auth") return "🔑";
-    if (type === "tokenization") return "🔐";
-    if (type === "audit-log") return "🧾";
-    if (type === "phi-vault") return "🏥";
-    if (type === "deidentification") return "🕶️";
-    return "🧩";
-  };
 
   if (loading) {
     return (
@@ -1314,138 +1317,168 @@ export default function ArchitectureWorkspace({
                   </div>
                 )}
 
-                {/* SVG Topology Diagram */}
-                <div className="relative mt-6 rounded-[2rem] border border-slate-200/80 bg-slate-950 shadow-inner overflow-hidden flex items-center justify-center">
-                  <svg viewBox="0 0 660 400" className="w-full h-auto max-h-[350px]">
-                    {/* Connections */}
-                    {(isEditing ? draftHld?.connections || [] : architecture.hld.connections).map((conn, idx) => {
-                      const from = nodeCoords[conn.from];
-                      const to = nodeCoords[conn.to];
-                      if (!from || !to) return null;
-
-                      const controlX = (from.x + to.x) / 2;
-                      return (
-                        <g key={idx}>
-                          <path
-                            d={`M ${from.x} ${from.y} C ${controlX} ${from.y}, ${controlX} ${to.y}, ${to.x} ${to.y}`}
-                            fill="none"
-                            className="stroke-cyan-500/30 stroke-2"
-                          />
-                          <path
-                            d={`M ${from.x} ${from.y} C ${controlX} ${from.y}, ${controlX} ${to.y}, ${to.x} ${to.y}`}
-                            fill="none"
-                            className="stroke-cyan-400/80 stroke-[1.5px]"
-                            strokeDasharray="5, 10"
-                            strokeDashoffset="0"
+                {/* Topology Diagram — dagre-laid-out SVG canvas with pan/zoom for larger graphs */}
+                <div ref={diagramViewportRef} className="relative mt-6 rounded-2xl border border-line bg-paper shadow-inner overflow-hidden" style={{ height: 520 }}>
+                  <TransformWrapper ref={diagramTransformRef} initialScale={1} minScale={0.15} maxScale={2.5}>
+                    {({ zoomIn, zoomOut }) => (
+                      <>
+                        <div className="absolute right-3 top-3 z-10 flex gap-1.5">
+                          <button
+                            onClick={() => zoomIn()}
+                            className="flex h-8 w-8 items-center justify-center rounded-lg border border-line-strong bg-panel text-ink-muted shadow-sm hover:text-ink"
+                            aria-label="Zoom in"
                           >
-                            <animate
-                              attributeName="stroke-dashoffset"
-                              values="60;0"
-                              dur="3s"
-                              repeatCount="indefinite"
-                            />
-                          </path>
-                        </g>
-                      );
-                    })}
-
-                    {/* Nodes */}
-                    {(isEditing ? draftHld?.components || [] : architecture.hld.components).map((node) => {
-                      const coord = nodeCoords[node.id];
-                      if (!coord) return null;
-
-                      const isSelected = selectedNodeId === node.id;
-                      const colors = getNodeColor(node.type, isSelected);
-                      const mapping = getMappingForProvider(node, activeProvider);
-                      const serviceName = mapping?.serviceName || node.name;
-
-                      return (
-                        <g
-                          key={node.id}
-                          transform={`translate(${coord.x}, ${coord.y})`}
-                          onClick={() => setSelectedNodeId(node.id)}
-                          className="cursor-pointer group"
-                        >
-                          <rect
-                            x="-70"
-                            y="-25"
-                            width="140"
-                            height="50"
-                            rx="12"
-                            className={`transition-all duration-200 fill-none ${
-                              isSelected
-                                ? "stroke-cyan-500/50 stroke-[6px]"
-                                : "group-hover:stroke-slate-500/20 group-hover:stroke-[4px]"
-                            }`}
-                          />
-                          <rect
-                            x="-65"
-                            y="-20"
-                            width="130"
-                            height="40"
-                            rx="10"
-                            strokeDasharray={node.metadata?.overrideSource === "user" ? "4, 3" : undefined}
-                            className={`transition duration-200 ${colors.bg} ${colors.border}`}
-                          />
-                          <text x="-52" y="5" className="text-base select-none">
-                            {getNodeEmoji(node.type)}
-                          </text>
-                          <text
-                            x="-30"
-                            y="-4"
-                            className="text-[7.5px] fill-slate-400 select-none font-bold uppercase tracking-wider"
+                            <Icon icon="mdi:plus" width={16} height={16} />
+                          </button>
+                          <button
+                            onClick={() => zoomOut()}
+                            className="flex h-8 w-8 items-center justify-center rounded-lg border border-line-strong bg-panel text-ink-muted shadow-sm hover:text-ink"
+                            aria-label="Zoom out"
                           >
-                            {node.name.length > 20 ? `${node.name.substring(0, 17)}...` : node.name}
-                          </text>
-                          <text
-                            x="-30"
-                            y="8"
-                            className="text-[8.5px] font-black fill-slate-800 select-none"
+                            <Icon icon="mdi:minus" width={16} height={16} />
+                          </button>
+                          <button
+                            onClick={() => {
+                              const viewport = diagramViewportRef.current;
+                              if (!viewport) return;
+                              const fitScale = Math.min(
+                                (viewport.clientWidth - 24) / diagramLayout.width,
+                                (viewport.clientHeight - 24) / diagramLayout.height,
+                                1
+                              );
+                              diagramTransformRef.current?.centerView(Math.max(fitScale, 0.1), 200);
+                            }}
+                            className="flex h-8 w-8 items-center justify-center rounded-lg border border-line-strong bg-panel text-ink-muted shadow-sm hover:text-ink"
+                            aria-label="Fit to view"
                           >
-                            {serviceName.length > 20 ? `${serviceName.substring(0, 17)}...` : serviceName}
-                          </text>
+                            <Icon icon="mdi:fit-to-page-outline" width={15} height={15} />
+                          </button>
+                        </div>
+                        <TransformComponent wrapperStyle={{ width: "100%", height: "100%" }}>
+                          <svg
+                            viewBox={`0 0 ${diagramLayout.width} ${diagramLayout.height}`}
+                            width={diagramLayout.width}
+                            height={diagramLayout.height}
+                          >
+                            {/* Connections — routed through dagre's own computed waypoints, so
+                                skip-rank edges (e.g. into the compliance cluster) don't cut through
+                                unrelated nodes. */}
+                            {diagramConnections.map((conn, idx) => {
+                              const points = diagramLayout.edgePoints[`${conn.from}->${conn.to}`];
+                              if (!points || points.length < 2) return null;
+                              const d = points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ");
+                              return (
+                                <g key={idx}>
+                                  <path d={d} fill="none" className="stroke-accent/25" strokeWidth={2.5} />
+                                  <path d={d} fill="none" className="stroke-accent/70" strokeWidth={1.5} strokeDasharray="5, 9">
+                                    <animate attributeName="stroke-dashoffset" values="56;0" dur="3s" repeatCount="indefinite" />
+                                  </path>
+                                </g>
+                              );
+                            })}
 
-                          {/* User Override Indicator Badge */}
-                          {node.metadata?.overrideSource === "user" && (
-                            <g transform="translate(58, -16)" className="pointer-events-none">
-                              <circle r="6" className="fill-amber-500 stroke-white stroke-1" />
-                              <text y="2" textAnchor="middle" className="text-[6px] fill-white font-black select-none">
-                                U
-                              </text>
-                            </g>
-                          )}
+                            {/* Compliance cluster — a subtle bounding box around HIPAA/PCI-style
+                                compliance components so they read as a group at any graph size. */}
+                            {(() => {
+                              const complianceBoxes = diagramComponents
+                                .filter((c) => isComplianceNode(c.type))
+                                .map((c) => nodeCoords[c.id])
+                                .filter(Boolean) as { x: number; y: number; width: number; height: number }[];
+                              if (complianceBoxes.length < 2) return null;
+                              const pad = 26;
+                              const minX = Math.min(...complianceBoxes.map((b) => b.x - b.width / 2)) - pad;
+                              const minY = Math.min(...complianceBoxes.map((b) => b.y - b.height / 2)) - (pad + 14);
+                              const maxX = Math.max(...complianceBoxes.map((b) => b.x + b.width / 2)) + pad;
+                              const maxY = Math.max(...complianceBoxes.map((b) => b.y + b.height / 2)) + pad;
+                              return (
+                                <g>
+                                  <rect
+                                    x={minX}
+                                    y={minY}
+                                    width={maxX - minX}
+                                    height={maxY - minY}
+                                    rx={16}
+                                    className="fill-warning-soft/50 stroke-warning"
+                                    strokeWidth={1.4}
+                                    strokeDasharray="6 5"
+                                  />
+                                  <text x={minX + 16} y={minY + 22} className="fill-warning text-[11px] font-bold uppercase tracking-wide">
+                                    Compliance &amp; Security
+                                  </text>
+                                </g>
+                              );
+                            })()}
 
-                          {/* Compliance Component Badge — marks nodes added by industry rules
-                              (audit log, tokenization, PHI vault, de-identification) */}
-                          {isComplianceNode(node.type) && (
-                            <g transform="translate(58, 16)" className="pointer-events-none">
-                              <circle r="7" className="fill-white stroke-amber-500 stroke-[1.5]" />
-                              <text y="3" textAnchor="middle" className="text-[8px] select-none">
-                                🛡️
-                              </text>
-                            </g>
-                          )}
+                            {/* Nodes — real per-service icons, rendered as HTML cards inside
+                                foreignObject so text truncates naturally and the icon library
+                                just works, rather than hand-rolled SVG text/rects. */}
+                            {diagramComponents.map((node) => {
+                              const coord = nodeCoords[node.id];
+                              if (!coord) return null;
 
-                          {/* Edit Mode Deletion Cross button */}
-                          {isEditing && (
-                            <g
-                              transform="translate(-62, -16)"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleRemoveNode(node.id);
-                              }}
-                              className="cursor-pointer hover:scale-115 transition"
-                            >
-                              <circle r="6" className="fill-red-600 stroke-white stroke-1" />
-                              <text y="2.2" textAnchor="middle" className="text-[7.5px] fill-white font-black select-none">
-                                ×
-                              </text>
-                            </g>
-                          )}
-                        </g>
-                      );
-                    })}
-                  </svg>
+                              const isSelected = selectedNodeId === node.id;
+                              const mapping = getMappingForProvider(node, activeProvider);
+                              const serviceName = mapping?.serviceName || node.name;
+                              const isOverride = node.metadata?.overrideSource === "user";
+
+                              return (
+                                <foreignObject
+                                  key={node.id}
+                                  x={coord.x - coord.width / 2}
+                                  y={coord.y - coord.height / 2}
+                                  width={coord.width}
+                                  height={coord.height}
+                                >
+                                  <div
+                                    onClick={() => setSelectedNodeId(node.id)}
+                                    className={`group relative flex h-full w-full cursor-pointer items-center gap-2.5 rounded-2xl border bg-panel px-3 py-2 shadow-sm transition-all ${
+                                      isSelected
+                                        ? "border-accent ring-2 ring-accent-soft"
+                                        : isComplianceNode(node.type)
+                                          ? "border-warning/50 hover:border-warning"
+                                          : "border-line-strong hover:border-ink-faint"
+                                    } ${isOverride ? "border-dashed" : ""}`}
+                                  >
+                                    <div className={`flex h-9 w-9 flex-none items-center justify-center rounded-lg ${PROVIDER_SOFT_BG[activeProvider]}`}>
+                                      <Icon icon={resolveServiceIcon(serviceName, node.type)} width={20} height={20} />
+                                    </div>
+                                    <div className="min-w-0 flex-1">
+                                      <div className="truncate text-[9.5px] font-bold uppercase tracking-wide text-ink-faint">
+                                        {node.name}
+                                      </div>
+                                      <div className="truncate text-[12.5px] font-bold text-ink">{serviceName}</div>
+                                    </div>
+
+                                    {isComplianceNode(node.type) && (
+                                      <Icon icon="mdi:shield-check-outline" width={15} height={15} className="flex-none text-warning" />
+                                    )}
+                                    {isOverride && (
+                                      <span className="absolute -right-1.5 -top-1.5 flex h-4 w-4 flex-none items-center justify-center rounded-full bg-warning text-[8px] font-black text-white ring-2 ring-panel">
+                                        U
+                                      </span>
+                                    )}
+
+                                    {isEditing && (
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleRemoveNode(node.id);
+                                        }}
+                                        className="absolute -left-1.5 -top-1.5 flex h-5 w-5 flex-none items-center justify-center rounded-full bg-danger text-white ring-2 ring-panel transition hover:scale-110"
+                                        aria-label={`Remove ${node.name}`}
+                                      >
+                                        <Icon icon="mdi:close" width={12} height={12} />
+                                      </button>
+                                    )}
+                                  </div>
+                                </foreignObject>
+                              );
+                            })}
+                          </svg>
+                        </TransformComponent>
+                      </>
+                    )}
+                  </TransformWrapper>
                 </div>
               </div>
 
@@ -1468,13 +1501,29 @@ export default function ArchitectureWorkspace({
               {selectedNode ? (
                 <div className="space-y-6">
                   <div>
-                    <div className="flex items-center gap-2">
-                      <span className="rounded-full bg-cyan-100 border border-cyan-200 px-2 py-0.5 text-[9px] font-bold text-cyan-800 uppercase tracking-wider">
-                        {selectedNode.type}
-                      </span>
-                      <span className="rounded-full bg-slate-200 border border-slate-300 px-2 py-0.5 text-[9px] font-bold text-slate-700 uppercase tracking-wider">
-                        {activeProvider} Mapped
-                      </span>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="rounded-full bg-accent-soft border border-accent/30 px-2 py-0.5 text-[9px] font-bold text-accent-ink uppercase tracking-wider">
+                          {selectedNode.type}
+                        </span>
+                        <span className="rounded-full bg-slate-200 border border-slate-300 px-2 py-0.5 text-[9px] font-bold text-slate-700 uppercase tracking-wider">
+                          {activeProvider} Mapped
+                        </span>
+                      </div>
+                      <div className="flex flex-none rounded-lg border border-line-strong bg-panel p-0.5 text-[9px] font-bold uppercase tracking-wide">
+                        <button
+                          onClick={() => setExplanationMode("simple")}
+                          className={`rounded-md px-2 py-1 transition ${explanationMode === "simple" ? "bg-accent text-white" : "text-ink-muted hover:text-ink"}`}
+                        >
+                          Simple
+                        </button>
+                        <button
+                          onClick={() => setExplanationMode("technical")}
+                          className={`rounded-md px-2 py-1 transition ${explanationMode === "technical" ? "bg-accent text-white" : "text-ink-muted hover:text-ink"}`}
+                        >
+                          Technical
+                        </button>
+                      </div>
                     </div>
                     <h4 className="text-base font-bold text-slate-950 mt-2">
                       {selectedMapping?.serviceName || selectedNode.name}
@@ -1482,7 +1531,14 @@ export default function ArchitectureWorkspace({
                     <p className="text-[10px] text-slate-400 font-semibold uppercase mt-0.5 tracking-wider">
                       Generic Component: {selectedNode.name}
                     </p>
-                    <p className="text-xs text-slate-600 mt-2 leading-relaxed">{selectedNode.description}</p>
+
+                    <div className="mt-3 rounded-2xl border border-accent/25 bg-accent-soft p-3.5 text-xs text-ink leading-relaxed">
+                      {getPlainDescription(selectedNode.type, selectedNode.id)}
+                    </div>
+
+                    {explanationMode === "technical" && (
+                      <p className="text-xs text-slate-600 mt-2 leading-relaxed">{selectedNode.description}</p>
+                    )}
 
                     {isEditing && (
                       <div className="space-y-1.5 bg-white border border-slate-200 rounded-2xl p-3 mt-3 shadow-sm">
@@ -1514,8 +1570,9 @@ export default function ArchitectureWorkspace({
                     </div>
                   )}
 
-                  {/* Expandable LLD Configs section */}
-                  {lldData && (
+                  {/* Expandable LLD Configs section -- stays available while editing regardless
+                      of explanation mode, since swapping/tuning config is an editing action. */}
+                  {lldData && (explanationMode === "technical" || isEditing) && (
                     <div className="border-t border-slate-200/80 pt-4">
                       <button
                         onClick={() => setIsLldExpanded(!isLldExpanded)}
@@ -1625,12 +1682,14 @@ export default function ArchitectureWorkspace({
                     </div>
                   )}
 
-                  <div>
-                    <h5 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Architect Rationale</h5>
-                    <div className="mt-2 rounded-2xl border border-cyan-100 bg-cyan-50/30 p-3.5 text-xs text-cyan-950 font-medium leading-relaxed">
-                      {selectedNode.reasoning}
+                  {explanationMode === "technical" && (
+                    <div>
+                      <h5 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Architect Rationale</h5>
+                      <div className="mt-2 rounded-2xl border border-cyan-100 bg-cyan-50/30 p-3.5 text-xs text-cyan-950 font-medium leading-relaxed">
+                        {selectedNode.reasoning}
+                      </div>
                     </div>
-                  </div>
+                  )}
                 </div>
               ) : (
                 <div className="flex-1 flex flex-col justify-center items-center text-center text-slate-400">
@@ -1647,11 +1706,11 @@ export default function ArchitectureWorkspace({
           /* Compare Clouds View Mode (Table/Grid) */
           <div className="h-full overflow-y-auto p-6 space-y-6">
             {/* Recommended Cloud Choice Banner */}
-            <div className="rounded-3xl border border-cyan-200 bg-gradient-to-r from-cyan-50/50 to-emerald-50/30 p-6 shadow-sm">
+            <div className="rounded-3xl border border-accent/25 bg-gradient-to-r from-accent-soft/60 to-success-soft/40 p-6 shadow-sm">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div>
                   <div className="flex items-center gap-2">
-                    <span className="rounded-full bg-cyan-600 px-3 py-1 text-xs font-extrabold text-white uppercase tracking-wider">
+                    <span className="rounded-full bg-accent px-3 py-1 text-xs font-extrabold text-white uppercase tracking-wider">
                       ★ Recommended Provider
                     </span>
                     <span className="rounded-full bg-slate-950 px-3 py-1 text-xs font-extrabold text-white uppercase tracking-wider">
@@ -1671,7 +1730,7 @@ export default function ArchitectureWorkspace({
                   <ul className="mt-2.5 space-y-2 text-xs text-slate-700 font-medium">
                     {recommendation.keyTradeoffs.map((t, idx) => (
                       <li key={idx} className="flex gap-2.5">
-                        <span className="text-cyan-500 font-extrabold">▪</span>
+                        <span className="text-accent font-extrabold">▪</span>
                         <span>{t}</span>
                       </li>
                     ))}
@@ -1680,29 +1739,30 @@ export default function ArchitectureWorkspace({
               )}
             </div>
 
-            {/* Side-by-Side Comparison Table */}
+            {/* Side-by-Side Comparison Table -- first column stays pinned while the provider
+                columns scroll horizontally, so K8s/Private never silently disappear off-screen. */}
             <div className="rounded-[2rem] border border-slate-200 bg-white shadow-sm overflow-hidden">
               <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse table-fixed min-w-[1100px]">
+                <table className="w-full text-left border-collapse table-fixed min-w-[1300px]">
                   <thead>
                     <tr className="bg-slate-50 border-b border-slate-200">
-                      <th className="p-4 text-xs font-bold text-slate-500 uppercase tracking-wider w-[180px]">
+                      <th className="sticky left-0 z-10 bg-slate-50 p-4 text-xs font-bold text-slate-500 uppercase tracking-wider w-[180px] border-r border-line">
                         Generic Component
                       </th>
                       <th className="p-4 text-xs font-bold text-slate-500 uppercase tracking-wider">
-                        Amazon Web Services (AWS)
+                        <span className="flex items-center gap-1.5"><Icon icon="logos:aws" width={16} height={16} /> Amazon Web Services</span>
                       </th>
                       <th className="p-4 text-xs font-bold text-slate-500 uppercase tracking-wider">
-                        Microsoft Azure
+                        <span className="flex items-center gap-1.5"><Icon icon="logos:microsoft-azure" width={16} height={16} /> Microsoft Azure</span>
                       </th>
                       <th className="p-4 text-xs font-bold text-slate-500 uppercase tracking-wider">
-                        Google Cloud Platform (GCP)
+                        <span className="flex items-center gap-1.5"><Icon icon="logos:google-cloud" width={16} height={16} /> Google Cloud</span>
                       </th>
                       <th className="p-4 text-xs font-bold text-slate-500 uppercase tracking-wider">
-                        Kubernetes
+                        <span className="flex items-center gap-1.5"><Icon icon="mdi:kubernetes" width={16} height={16} className="text-k8s" /> Kubernetes</span>
                       </th>
                       <th className="p-4 text-xs font-bold text-slate-500 uppercase tracking-wider">
-                        Private Cloud
+                        <span className="flex items-center gap-1.5"><Icon icon="mdi:server" width={16} height={16} className="text-private" /> Private Cloud</span>
                       </th>
                     </tr>
                   </thead>
@@ -1717,7 +1777,7 @@ export default function ArchitectureWorkspace({
                       return (
                         <tr key={c.id} className="hover:bg-slate-50/40">
                           {/* Component name */}
-                          <td className="p-4 align-top">
+                          <td className="sticky left-0 z-10 bg-white p-4 align-top border-r border-line">
                             <span className="font-extrabold text-slate-900 block">{c.name}</span>
                             <span className="text-[10px] text-slate-400 font-semibold block mt-0.5 uppercase tracking-wide">
                               {c.type}
@@ -1804,7 +1864,7 @@ export default function ArchitectureWorkspace({
 
                     {/* Totals Row */}
                     <tr className="bg-slate-50/80 font-black border-t-2 border-slate-200">
-                      <td className="p-4 text-xs text-slate-900">Total Estimated Cost</td>
+                      <td className="sticky left-0 z-10 bg-slate-50 p-4 text-xs text-slate-900 border-r border-line">Total Estimated Cost</td>
                       <td className="p-4 text-xs text-emerald-800 font-extrabold">
                         <div>${awsTotal.min} - ${awsTotal.max}/mo</div>
                         {getProviderCostDeltaString("aws") && (
@@ -1838,6 +1898,10 @@ export default function ArchitectureWorkspace({
                     </tr>
                   </tbody>
                 </table>
+              </div>
+              <div className="flex items-center gap-1.5 border-t border-line bg-slate-50 px-4 py-2 text-[10px] font-semibold text-ink-faint">
+                <Icon icon="mdi:gesture-swipe-horizontal" width={13} height={13} />
+                Scroll horizontally to compare all 5 providers, including Kubernetes and Private Cloud
               </div>
             </div>
           </div>

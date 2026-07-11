@@ -30,15 +30,15 @@ const STATUS_META: Record<ProjectStatus, { label: string; classes: string }> = {
   },
   brainstorm_in_progress: {
     label: "Brainstorm In Progress",
-    classes: "bg-cyan-50 text-cyan-700 border-cyan-200",
+    classes: "bg-accent-soft text-accent-ink border-accent/25",
   },
   requirements_complete: {
     label: "Requirements Complete",
-    classes: "bg-amber-50 text-amber-700 border-amber-200",
+    classes: "bg-warning-soft text-warning border-warning/25",
   },
   architecture_ready: {
     label: "Architecture Ready",
-    classes: "bg-emerald-50 text-emerald-700 border-emerald-200",
+    classes: "bg-success-soft text-success border-success/25",
   },
 };
 
@@ -88,7 +88,7 @@ function ProjectCard({ project, onOpen }: { project: ProjectSummary; onOpen: (id
         </div>
       </dl>
 
-      <div className="flex items-center justify-end text-xs font-semibold text-cyan-700 opacity-0 transition group-hover:opacity-100">
+      <div className="flex items-center justify-end text-xs font-semibold text-accent-ink opacity-0 transition group-hover:opacity-100">
         Open workspace ➜
       </div>
     </button>
@@ -130,7 +130,7 @@ export default function HomePage() {
         <div className="overflow-hidden rounded-[2.5rem] border border-white/70 bg-slate-950 shadow-2xl shadow-slate-300/40">
           <div className="flex flex-col gap-4 p-8 sm:flex-row sm:items-center sm:justify-between sm:p-10">
             <div>
-              <span className="rounded-full bg-white/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-cyan-300">
+              <span className="rounded-full bg-white/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-accent-on-dark">
                 Workspace Dashboard
               </span>
               <h1 className="mt-4 text-3xl font-black tracking-tight text-white sm:text-4xl">
@@ -144,7 +144,7 @@ export default function HomePage() {
             {!isEmpty && (
               <button
                 onClick={() => setShowIntake((v) => !v)}
-                className="flex shrink-0 items-center justify-center rounded-2xl bg-cyan-600 px-5 py-3 text-sm font-semibold text-white shadow-md transition-all hover:bg-cyan-700 active:scale-[0.98]"
+                className="flex shrink-0 items-center justify-center rounded-2xl bg-accent px-5 py-3 text-sm font-semibold text-white shadow-md transition-all hover:bg-accent-ink active:scale-[0.98]"
               >
                 {showIntake ? "Cancel" : "+ New Project"}
               </button>
@@ -161,7 +161,7 @@ export default function HomePage() {
         {/* Loading */}
         {loading && (
           <div className="mt-16 flex flex-col items-center justify-center text-slate-500">
-            <div className="h-8 w-8 animate-spin rounded-full border-4 border-cyan-500 border-t-transparent" />
+            <div className="h-8 w-8 animate-spin rounded-full border-4 border-accent border-t-transparent" />
             <span className="mt-4 text-sm font-semibold">Loading projects...</span>
           </div>
         )}

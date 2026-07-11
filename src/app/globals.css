@@ -1,1 +1,45 @@
 @import "tailwindcss";
+
+@theme {
+  /* Neutrals */
+  --color-ink: #12161F;
+  --color-ink-muted: #5B6472;
+  --color-ink-faint: #8891A0;
+  --color-paper: #F6F7FB;
+  --color-panel: #FFFFFF;
+  --color-line: #E2E6ED;
+  --color-line-strong: #CBD1DC;
+
+  /* Accent -- active/selected/primary action only */
+  --color-accent: #5B4FE8;
+  --color-accent-ink: #4638C2;
+  --color-accent-soft: #EEECFC;
+  /* Accent text/icons specifically on dark surfaces need a lighter shade to
+     clear 4.5:1 contrast -- #5B4FE8 only hits 3.21:1 on dark ink. */
+  --color-accent-on-dark: #9089FF;
+
+  /* Semantic -- one meaning each, never reused for anything else */
+  --color-success: #157347;
+  --color-success-soft: #E6F4EC;
+  --color-warning: #9A5B0A;
+  --color-warning-soft: #FBF0DC;
+  --color-danger: #B02A37;
+  --color-danger-soft: #FBE7E9;
+
+  /* Provider marks -- icon fills / soft-tint chip backgrounds only, never
+     body text color (raw AWS orange is 2.75:1 on white, fails AA text). */
+  --color-aws: #E8821B;
+  --color-aws-soft: #FDF0E1;
+  --color-azure: #0F78D4;
+  --color-azure-soft: #E6F1FC;
+  --color-gcp: #1B7A43;
+  --color-gcp-soft: #E7F5EC;
+  /* Kubernetes is a deployment target, not a cloud provider brand -- kept
+     desaturated so it doesn't collide with accent or Azure at a glance. */
+  --color-k8s: #47536B;
+  --color-k8s-soft: #E9EBEF;
+  --color-private: #6B5B47;
+  --color-private-soft: #F3EDE7;
+
+  --font-mono-app: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+}

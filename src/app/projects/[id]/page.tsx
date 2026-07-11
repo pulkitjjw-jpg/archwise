@@ -1,6 +1,3 @@
-import { db } from "@/db";
-import { conversations as conversationsTable, projects as projectsTable } from "@/db/schema";
-import { asc, eq } from "drizzle-orm";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import ChatArea from "@/app/components/ChatArea";
@@ -12,25 +9,46 @@ interface ProjectPageProps {
   params: Promise<{ id: string }>;
 }
 
+type ConversationRecord = {
+  id: string;
+  role: string;
+  message: string;
+  stage: string;
+  createdAt: string;
+};
+
+// Server component -- runs on the Next.js server itself, so it reaches the backend directly
+// over the same private path the catch-all proxy uses (BACKEND_URL + X-Internal-Auth), rather
+// than looping back through its own proxy route over HTTP.
+async function backendFetch(path: string) {
+  const backendUrl = process.env.BACKEND_URL;
+  const internalAuthSecret = process.env.INTERNAL_AUTH_SECRET;
+  if (!backendUrl || !internalAuthSecret) {
+    throw new Error("Backend is not configured");
+  }
+  return fetch(`${backendUrl}${path}`, {
+    headers: { "x-internal-auth": internalAuthSecret },
+    cache: "no-store",
+  });
+}
+
 export default async function ProjectPage({ params }: ProjectPageProps) {
   const { id } = await params;
 
-  // Query project from DB
-  const [project] = await db
-    .select()
-    .from(projectsTable)
-    .where(eq(projectsTable.id, id));
-
-  if (!project) {
+  const projectRes = await backendFetch(`/api/projects/${id}`);
+  if (projectRes.status === 404) {
     notFound();
   }
+  if (!projectRes.ok) {
+    throw new Error("Failed to load project");
+  }
+  const { project } = await projectRes.json();
 
-  // Query conversation history
-  const conversations = await db
-    .select()
-    .from(conversationsTable)
-    .where(eq(conversationsTable.projectId, id))
-    .orderBy(asc(conversationsTable.createdAt));
+  const conversationsRes = await backendFetch(`/api/projects/${id}/conversations`);
+  if (!conversationsRes.ok) {
+    throw new Error("Failed to load conversations");
+  }
+  const { conversations }: { conversations: ConversationRecord[] } = await conversationsRes.json();
 
   // Determine if brainstorming is complete (at least one turn has stage === "requirement_gathering")
   const isBrainstormComplete = conversations.some((c) => c.stage === "requirement_gathering");
@@ -94,7 +112,7 @@ export default async function ProjectPage({ params }: ProjectPageProps) {
                 role: c.role,
                 message: c.message,
                 stage: c.stage,
-                createdAt: c.createdAt.toISOString(),
+                createdAt: c.createdAt,
               }))}
             />
           </div>

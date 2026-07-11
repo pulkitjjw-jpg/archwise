@@ -118,9 +118,9 @@ export default function RequirementsPanel({
         if (inputElement) {
           inputElement.focus();
           inputElement.scrollIntoView({ behavior: "smooth", block: "center" });
-          inputElement.classList.add("ring-4", "ring-cyan-500/50");
+          inputElement.classList.add("ring-4", "ring-accent/40");
           setTimeout(() => {
-            inputElement.classList.remove("ring-4", "ring-cyan-500/50");
+            inputElement.classList.remove("ring-4", "ring-accent/40");
           }, 1500);
         }
         clearFocusField?.();
@@ -181,7 +181,7 @@ export default function RequirementsPanel({
             onChange={(e) =>
               setEditedNFR((prev) => ({ ...prev, [fieldName]: e.target.value }))
             }
-            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 shadow-sm focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500 transition-all duration-200"
+            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 shadow-sm focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent transition-all duration-200"
           />
         </div>
       );
@@ -196,7 +196,7 @@ export default function RequirementsPanel({
               <span>Not specified in brainstorm</span>
               <button
                 onClick={startEditing}
-                className="text-[10px] font-bold text-cyan-600 uppercase tracking-wider hover:underline"
+                className="text-[10px] font-bold text-accent-ink uppercase tracking-wider hover:underline"
               >
                 + specify
               </button>
@@ -212,7 +212,7 @@ export default function RequirementsPanel({
   if (loading && !extracting) {
     return (
       <div className="flex h-full flex-col items-center justify-center p-8 text-slate-500">
-        <div className="h-8 w-8 animate-spin rounded-full border-4 border-cyan-500 border-t-transparent" />
+        <div className="h-8 w-8 animate-spin rounded-full border-4 border-accent border-t-transparent" />
         <span className="mt-4 text-sm font-semibold">Loading system requirements...</span>
       </div>
     );
@@ -221,7 +221,7 @@ export default function RequirementsPanel({
   if (extracting) {
     return (
       <div className="flex h-full flex-col items-center justify-center p-8 text-slate-500 text-center">
-        <div className="h-10 w-10 animate-bounce rounded-full bg-cyan-600 flex items-center justify-center text-white font-bold text-xl shadow-md">
+        <div className="h-10 w-10 animate-bounce rounded-full bg-accent flex items-center justify-center text-white font-bold text-xl shadow-md">
           ⚙️
         </div>
         <span className="mt-4 text-base font-semibold text-slate-900">Synthesizing requirements...</span>
@@ -253,7 +253,7 @@ export default function RequirementsPanel({
             <h3 className="text-xl font-bold text-slate-950">System Requirements Workspace</h3>
             {requirements.industryContext &&
               requirements.industryContext.industry !== "none" && (
-                <span className="inline-flex items-center gap-1 rounded-full bg-cyan-50 border border-cyan-200 px-2.5 py-1 text-[10px] font-bold text-cyan-700 uppercase tracking-wider">
+                <span className="inline-flex items-center gap-1 rounded-full bg-accent-soft border border-accent/25 px-2.5 py-1 text-[10px] font-bold text-accent-ink uppercase tracking-wider">
                   {INDUSTRY_BADGE[requirements.industryContext.industry].emoji} Industry:{" "}
                   {INDUSTRY_BADGE[requirements.industryContext.industry].label}
                 </span>
@@ -291,14 +291,14 @@ export default function RequirementsPanel({
                 rows={5}
                 value={editedFunctional}
                 onChange={(e) => setEditedFunctional(e.target.value)}
-                className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500 resize-none"
+                className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent resize-none"
               />
             </div>
           ) : (
             <ul className="grid gap-2 text-sm text-slate-700 rounded-3xl bg-slate-50 p-5">
               {requirements.functional.map((func, index) => (
                 <li key={index} className="flex gap-3">
-                  <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-cyan-500" />
+                  <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-accent-soft" />
                   <span className="leading-5">{func}</span>
                 </li>
               ))}
@@ -345,7 +345,7 @@ export default function RequirementsPanel({
       {!editMode && (
         <div className="mt-8 border-t border-slate-100 pt-6">
           <button
-            className="flex w-full items-center justify-center rounded-2xl bg-cyan-600 px-5 py-3.5 text-sm font-semibold text-white shadow-md transition-all hover:bg-cyan-700 active:scale-[0.98]"
+            className="flex w-full items-center justify-center rounded-2xl bg-accent px-5 py-3.5 text-sm font-semibold text-white shadow-md transition-all hover:bg-accent-ink active:scale-[0.98]"
             onClick={() => alert("HLD Generation (Step 4) will be implemented next!")}
           >
             Synthesize HLD Architecture Design ➜
