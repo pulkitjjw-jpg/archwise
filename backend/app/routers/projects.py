@@ -108,6 +108,9 @@ async def create_project(payload: ProjectCreateRequest, db: AsyncSession = Depen
         )
         first_question = turn["message"]
         first_suggested_replies = turn.get("suggestedReplies") or []
+        detected_level = turn.get("knowledgeLevel")
+        if detected_level in ("technical", "beginner"):
+            project.knowledge_level = detected_level
     except Exception as llm_err:
         logger.error("Failed to generate first brainstorm question: %s", llm_err)
 

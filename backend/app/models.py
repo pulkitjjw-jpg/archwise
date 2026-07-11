@@ -27,6 +27,11 @@ class Project(Base):
         TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
     )
     current_version: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'0.1.0'"))
+    # Set once, early in the brainstorm, by get_next_brainstorm_turn's self-classification and
+    # locked in thereafter (never re-classified once non-"unknown") so question depth/pacing
+    # doesn't flip-flop mid-conversation. Same "mutable project-level pointer" precedent as
+    # current_version, not a versioned content field.
+    knowledge_level: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'unknown'"))
 
     conversations: Mapped[list["Conversation"]] = relationship(back_populates="project", passive_deletes=True)
     requirements: Mapped[list["Requirement"]] = relationship(back_populates="project", passive_deletes=True)

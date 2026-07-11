@@ -8,6 +8,7 @@ def serialize_project(p: Project) -> dict:
         "owner": p.owner,
         "createdAt": p.created_at,
         "currentVersion": p.current_version,
+        "knowledgeLevel": p.knowledge_level,
     }
 
 

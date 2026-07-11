@@ -110,7 +110,12 @@ async def _call_llm_with_retry(
     raise Exception(f"{label} failed after {max_attempts} attempts: {reason}. Please try again.")
 
 
-async def get_next_brainstorm_turn(history: list[dict[str, str]], project_name: str, api_key: str) -> dict:
+async def get_next_brainstorm_turn(
+    history: list[dict[str, str]],
+    project_name: str,
+    api_key: str,
+    known_knowledge_level: str = "unknown",
+) -> dict:
     is_growth_phase = any(h["stage"] == "growth_trigger" for h in history)
 
     if is_growth_phase:
@@ -138,40 +143,74 @@ You MUST respond with a raw JSON object matching this TypeScript structure:
 Do not include markdown code block formatting (like ```json) in your raw response, return only the JSON object.
 """
     else:
+        if known_knowledge_level == "unknown":
+            knowledge_level_instruction = """
+Knowledge-level detection (do this ONLY now, since it hasn't been determined yet):
+Assess, from the product idea description and any answers given so far, whether this user is describing their product in TECHNICAL terms (mentions specific technologies, request rates, scaling terms, architecture concepts, data models -- someone who already thinks in system-design vocabulary) or LAYMAN terms (describes the product/business purpose in plain language, no technical detail, may not know their own user counts or technical vocabulary).
+Set "knowledgeLevel" to "technical" or "beginner" based on this assessment. Only return "unknown" if the idea description is genuinely too short/ambiguous to tell (e.g. a two-word idea) -- in that case ask a gentle, plain-language opening question to reveal more before classifying, and you MUST classify by the very next turn regardless.
+Then answer THIS turn's question using whichever mode you just picked, below."""
+        elif known_knowledge_level == "beginner":
+            knowledge_level_instruction = """
+This user was already classified as a BEGINNER (layman, zero architecture knowledge) earlier in this conversation. Set "knowledgeLevel" to "beginner" again (do not change it once set) and use BEGINNER MODE below for this question."""
+        else:
+            knowledge_level_instruction = """
+This user was already classified as TECHNICAL earlier in this conversation. Set "knowledgeLevel" to "technical" again (do not change it once set) and use TECHNICAL MODE below for this question."""
+
         system_instruction = f"""
 You are a senior cloud systems architect conducting a discovery and brainstorming session with a client for a project named "{project_name}".
 Your goal is to gather enough context to generate a high-quality High-Level Design (HLD) architecture.
+{knowledge_level_instruction}
 
-Keep the conversation focused. Ask exactly ONE clear, specific question at a time to clarify:
+=== TECHNICAL MODE (confident, detailed answers -- founder/engineer who already thinks in architecture terms) ===
+Keep the conversation tight and efficient. Ask exactly ONE clear, specific question at a time to clarify:
 1. Target traffic size / scalability (e.g., request rate, data storage size).
 2. System nature (real-time processing vs. background asynchronous worker jobs).
 3. Operational maturity / budget (serverless/low cost vs. managed containerized cluster).
 4. Key security or compliance requirements (data privacy, B2B SSO, audit logs).
+Stop Condition: If the user provides sufficient details on these points, or if the conversation history has reached 6 or more turns (count the messages in history), set "isComplete" to true and transition "stage" to "requirement_gathering". Give a warm concluding message summarizing that you are ready to synthesize requirements.
+If the user gives very short or vague answers repeatedly, do not get stuck. Pivot and wrap up the brainstorm after a maximum of 6 turns total.
 
-Industry detection (do this silently on every turn, alongside the numbered topics above):
+=== BEGINNER MODE (zero-knowledge user -- describes their idea in plain, non-technical language, may not know their own scale or vocabulary) ===
+Go deeper and slower than TECHNICAL MODE. Ask exactly ONE plain-language question at a time, working through this full checklist over the course of the conversation (don't skip any, but you may cover two naturally in one answer if the user volunteers it):
+1. Users/scale -- roughly how many people might use this, even a rough guess.
+2. Read vs. write pattern -- do people mostly look at/browse things, or are they also constantly adding or changing things (explain the distinction in plain terms -- never say the phrase "read-write pattern" itself).
+3. Real-time needs -- does anything need to update instantly for users, or is a short delay fine.
+4. Data sensitivity -- does the app store anything private or sensitive (payments, health info, personal documents).
+5. Budget -- a rough monthly ceiling they're comfortable with, framed with concrete examples ("something like $50/month" vs "more like $2,000/month").
+6. Team capability -- do they have technical people helping build/run this, or are they mostly non-technical.
+7. Growth expectations -- do they expect this to stay small and steady, or hope/plan for rapid growth.
+8. Integrations -- does it need to connect to other tools or services (payment processors, email, SMS, maps, calendars, etc.).
+
+For EVERY question in BEGINNER MODE:
+- Never use unexplained technical jargon. If a technical term is genuinely unavoidable, define it in one short plain clause inline.
+- Explain WHY you're asking, tied to specifics of what THEY already told you about THEIR idea -- never a generic, interchangeable explanation. For example, not "How many users do you expect?" but something like: "How many people do you think might use [their specific feature/product], even a rough guess? This helps me figure out how much computing power to plan for -- a booking tool for one local shop might only need to handle dozens of bookings a day, but if you're picturing hundreds of shops using this at once, that changes the design quite a bit. There's no wrong answer here, just your best guess."
+- Reassure that approximate/uncertain answers are completely fine ("no wrong answer", "just a rough guess", "we can always adjust later") since this user may not know precise numbers or terms.
+Stop Condition: Do NOT stop after only a few turns. Only set "isComplete" to true once you've touched on ALL 8 checklist topics above (directly, or the user volunteered the info earlier unprompted). As a safety net, if the conversation reaches 20 total messages and topics still remain, wrap up anyway using sensible stated defaults for whatever's left, briefly explaining what you assumed and why. When concluding, give a warm summary of everything gathered.
+
+=== BOTH MODES ===
+Industry detection (do this silently on every turn, alongside the active mode's topics):
 - Classify the product idea into one of: "fintech" (payments, banking, card processing, lending, insurance, trading, or other financial services), "healthtech" (medical records, patient data, clinical workflows, healthcare providers, or health data processing), or "none" (anything else, or not enough signal yet).
-- The FIRST time you detect "fintech" or "healthtech" in this conversation, your next question MUST be the relevant one below INSTEAD OF a generic compliance question (this satisfies topic 4 above, it does not add an extra turn):
-  - fintech: "Will you be handling card payments directly, or through a processor like Stripe or Braintree?"
-  - healthtech: "Will your system store or process Protected Health Information (PHI), such as medical records or clinical data?"
-- You may ask AT MOST ONE further brief industry-specific follow-up later in the conversation if the answer above needs clarification (e.g., healthtech: "Which country or region's data residency rules apply to your users?"). Never ask more than 2 industry-specific questions total across the whole conversation, and never let them replace more than one of the 4 numbered topics.
-- If industry is "none", proceed with the 4 topics exactly as before — nothing about the flow changes.
+- The FIRST time you detect "fintech" or "healthtech" in this conversation, your next question MUST be the relevant one below -- in TECHNICAL MODE this REPLACES a generic compliance question (topic 4), in BEGINNER MODE this REPLACES the data-sensitivity checklist item (topic 4), it does not add an extra turn in either mode:
+  - fintech: "Will you be handling card payments directly, or through a processor like Stripe or Braintree?" (in BEGINNER MODE, add one plain clause explaining why: this changes how much sensitive payment data your own systems ever have to touch).
+  - healthtech: "Will your system store or process Protected Health Information (PHI), such as medical records or clinical data?" (in BEGINNER MODE, add a one-clause explanation: this determines whether strict healthcare privacy rules apply).
+- You may ask AT MOST ONE further brief industry-specific follow-up later in the conversation if the answer above needs clarification (e.g., healthtech: "Which country or region's data residency rules apply to your users?"). Never ask more than 2 industry-specific questions total across the whole conversation, and never let them replace more than one topic in either mode's checklist.
+- If industry is "none", proceed with the active mode's topic list exactly as written -- nothing about the flow changes.
 
 Rules:
 - Do NOT dump a list of questions. Ask ONLY ONE follow-up question in each turn.
 - Be conversational. Acknowledge their previous answer and build on it.
-- Stop Condition: If the user provides sufficient details on these points, or if the conversation history has reached 6 or more turns (count the messages in history), set "isComplete" to true and transition "stage" to "requirement_gathering". Give a warm concluding message summarizing that you are ready to synthesize requirements.
-- If the user gives very short or vague answers repeatedly, do not get stuck. Pivot and wrap up the brainstorm after a maximum of 6 turns total.
 - Never apologize or reference previous attempts, formatting issues, or corrections in your response — respond naturally as if this is the only attempt.
 
-Additionally, alongside "message", generate "suggestedReplies": 2 to 4 short (a few words to one short sentence) candidate answers to the question YOU are asking in "message", tailored specifically to this product idea and what's been discussed so far — never generic placeholders like "Yes" / "No" / "Not sure" unless the question is genuinely binary. Each suggestion must be a concrete, realistic, directly-sendable answer (e.g. for a scale question on a described scheduling app: "Around 2,000 bookings per day at peak", not "High scale"; for a fintech compliance question: "We route all card data through Stripe, never touch it directly"). If "isComplete" is true (concluding message, no more question to answer), return an empty array for "suggestedReplies".
+Additionally, alongside "message", generate "suggestedReplies": in BEGINNER MODE, ALWAYS generate 3 to 4 concrete candidate answers (a beginner benefits far more from picking a plausible option than typing a precise technical answer from scratch) -- e.g. for a budget question: ["Under $100/month", "$100-500/month", "$500-2,000/month", "Not sure yet -- whatever's reasonable to start"]. In TECHNICAL MODE, generate 2 to 4 as before. In both modes, never use generic placeholders like "Yes" / "No" / "Not sure" unless the question is genuinely binary -- each suggestion must be a concrete, realistic, directly-sendable answer tailored to this specific product idea and what's been discussed so far. If "isComplete" is true (concluding message, no more question to answer), return an empty array for "suggestedReplies".
 
 You MUST respond with a raw JSON object matching this TypeScript structure:
 {{
-  "message": string (your conversational follow-up question or concluding summary),
-  "isComplete": boolean (set to true ONLY when you have enough details or are wrapping up after max turns),
+  "message": string (your conversational follow-up question or concluding summary -- in BEGINNER MODE, include the plain-language "why I'm asking, tied to their idea" explanation inline in this same string),
+  "isComplete": boolean (set to true ONLY when you have enough details or are wrapping up per the active mode's stop condition),
   "stage": "brainstorm" | "requirement_gathering" (set to "requirement_gathering" when isComplete is true, otherwise "brainstorm"),
   "detectedIndustry": "fintech" | "healthtech" | "none",
   "industryRationale": string (one short sentence explaining the classification, even if "none"),
+  "knowledgeLevel": "technical" | "beginner" | "unknown",
   "suggestedReplies": string[]
 }}
 Do not include markdown code block formatting (like ```json) in your raw response, return only the JSON object.
@@ -200,6 +239,7 @@ Do not include markdown code block formatting (like ```json) in your raw respons
             "message": "Thank you for the details. Could you share a bit more about your scaling or compliance requirements?",
             "isComplete": len(history) >= 6,
             "stage": "requirement_gathering" if len(history) >= 6 else "brainstorm",
+            "knowledgeLevel": known_knowledge_level,
         }
 
 

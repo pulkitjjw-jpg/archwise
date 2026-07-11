@@ -48,6 +48,7 @@ async def create_conversation_turn(
     # 3. Load project context
     project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
     project_name = (project.name if project else None) or "Cloud Project"
+    known_knowledge_level = (project.knowledge_level if project else None) or "unknown"
 
     # 4. Generate AI follow-up
     assistant_turn_data = {
@@ -61,12 +62,16 @@ async def create_conversation_turn(
             [{"role": h.role, "message": h.message, "stage": h.stage} for h in history],
             project_name,
             settings.openrouter_api_key,
+            known_knowledge_level,
         )
         assistant_turn_data = {
             "message": next_turn["message"],
             "stage": next_turn["stage"],
             "suggestedReplies": next_turn.get("suggestedReplies") or [],
         }
+        detected_level = next_turn.get("knowledgeLevel")
+        if project is not None and known_knowledge_level == "unknown" and detected_level in ("technical", "beginner"):
+            project.knowledge_level = detected_level
     except Exception as llm_err:
         logger.error("Failed to generate assistant response: %s", llm_err)
 
