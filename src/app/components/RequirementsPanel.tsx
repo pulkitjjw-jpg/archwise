@@ -201,6 +201,35 @@ export default function RequirementsPanel({
     loadRequirements();
   }, [projectId, isBrainstormComplete]);
 
+  // Auto-refresh when requirements change elsewhere (chat brainstorm/growth-trigger conclusion,
+  // manual edits saved from a different tab instance, etc). `isBrainstormComplete` alone can't
+  // catch this: it's a prop computed once server-side on page load and never changes on the
+  // client afterward, so without this listener the Requirements tab only ever reflected fresh
+  // data after a full page reload. Skipped while actively editing so a background update can't
+  // silently blow away in-progress form edits -- shows the fallback banner instead in that case.
+  const [hasStaleData, setHasStaleData] = useState(false);
+  useEffect(() => {
+    const handleUpdate = () => {
+      if (editMode) {
+        setHasStaleData(true);
+        return;
+      }
+      loadRequirements();
+    };
+    window.addEventListener("requirementsUpdated", handleUpdate);
+    return () => window.removeEventListener("requirementsUpdated", handleUpdate);
+  }, [editMode]);
+
+  const handleManualRefresh = async () => {
+    setHasStaleData(false);
+    // If mid-edit, discard the in-progress draft rather than refreshing underneath it -- the
+    // draft (editedFunctional/editedNFR) has no way to reconcile with newly-fetched data, and
+    // silently leaving edit mode active with a now-stale draft risks the next Save clobbering
+    // the fresh data being pulled in here.
+    if (editMode) setEditMode(false);
+    await loadRequirements();
+  };
+
   useEffect(() => {
     if (focusField && requirements) {
       startEditing();
@@ -386,14 +415,40 @@ export default function RequirementsPanel({
           </p>
         </div>
         {!editMode && (
-          <button
-            onClick={startEditing}
-            className="rounded-xl border border-line bg-white px-3.5 py-2 text-xs font-semibold text-ink-muted shadow-sm transition hover:bg-paper active:scale-95"
-          >
-            Edit
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleManualRefresh}
+              disabled={loading}
+              title="Refresh"
+              aria-label="Refresh requirements"
+              className="rounded-xl border border-line bg-white px-2.5 py-2 text-xs font-semibold text-ink-muted shadow-sm transition hover:bg-paper active:scale-95 disabled:opacity-50"
+            >
+              🔄
+            </button>
+            <button
+              onClick={startEditing}
+              className="rounded-xl border border-line bg-white px-3.5 py-2 text-xs font-semibold text-ink-muted shadow-sm transition hover:bg-paper active:scale-95"
+            >
+              Edit
+            </button>
+          </div>
         )}
       </div>
+
+      {/* Fallback safety net -- normally requirementsUpdated auto-refreshes silently, but this
+          is deliberately skipped while editMode is active (see the listener above) so an
+          in-progress edit is never clobbered. */}
+      {hasStaleData && (
+        <div className="mt-4 flex items-center justify-between gap-3 rounded-2xl border border-accent/30 bg-accent-soft px-4 py-2.5 text-xs font-semibold text-accent-ink">
+          <span>New data available — refreshing will discard your in-progress edits.</span>
+          <button
+            onClick={handleManualRefresh}
+            className="flex-none rounded-lg bg-accent px-3 py-1.5 text-[10px] font-extrabold uppercase text-white transition hover:bg-accent-ink"
+          >
+            Refresh
+          </button>
+        </div>
+      )}
 
       {error && <p className="mt-4 text-xs font-medium text-danger">{error}</p>}
 

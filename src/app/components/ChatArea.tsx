@@ -78,30 +78,43 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
             .concat(assistantConversation)
         );
 
-        // Auto-extract requirements if LLM confirms the change was clear
-        if (assistantConversation.stage === "requirement_gathering" && isGrowthPhase) {
+        // Auto-extract requirements whenever the LLM concludes discovery has enough detail --
+        // both the very first brainstorm's conclusion AND every later growth-trigger's
+        // conclusion land here (assistantConversation.stage transitions to
+        // "requirement_gathering" in both cases). Previously this was gated on isGrowthPhase,
+        // which is false for the very first completion (computed from the stage *before* this
+        // send), so the Requirements tab never auto-refreshed after the initial brainstorm
+        // without a page reload -- extraction only ran later, lazily, when RequirementsPanel
+        // happened to mount fresh. Dispatching "requirementsUpdated" unconditionally here fixes
+        // that: RequirementsPanel now listens for it directly (see RequirementsPanel.tsx).
+        if (assistantConversation.stage === "requirement_gathering") {
           try {
             await fetch(`/api/projects/${projectId}/requirements`, {
               method: "POST",
             });
             window.dispatchEvent(new Event("requirementsUpdated"));
 
-            // Gather this growth-trigger's full description from fresh server-side history
-            // (not the local `messages` closure, which can be stale) so multi-turn
-            // clarification isn't lost, then hand it to the architecture panel so it can
-            // propose component-level changes for review -- see ArchitectureWorkspace's
-            // "growthTriggerCompleted" listener.
-            const historyRes = await fetch(`/api/projects/${projectId}/conversations`);
-            if (historyRes.ok) {
-              const { conversations } = await historyRes.json();
-              const growthDescription = conversations
-                .filter((c: ConversationTurn) => c.role === "user" && c.stage === "growth_trigger")
-                .map((c: ConversationTurn) => c.message)
-                .join(" ");
-              if (growthDescription.trim()) {
-                window.dispatchEvent(
-                  new CustomEvent("growthTriggerCompleted", { detail: { description: growthDescription } })
-                );
+            // The chat-proposed-changes review flow (growthTriggerCompleted) only makes sense
+            // for a growth trigger against an *existing* architecture -- the very first
+            // completion has no architecture yet to propose changes against.
+            if (isGrowthPhase) {
+              // Gather this growth-trigger's full description from fresh server-side history
+              // (not the local `messages` closure, which can be stale) so multi-turn
+              // clarification isn't lost, then hand it to the architecture panel so it can
+              // propose component-level changes for review -- see ArchitectureWorkspace's
+              // "growthTriggerCompleted" listener.
+              const historyRes = await fetch(`/api/projects/${projectId}/conversations`);
+              if (historyRes.ok) {
+                const { conversations } = await historyRes.json();
+                const growthDescription = conversations
+                  .filter((c: ConversationTurn) => c.role === "user" && c.stage === "growth_trigger")
+                  .map((c: ConversationTurn) => c.message)
+                  .join(" ");
+                if (growthDescription.trim()) {
+                  window.dispatchEvent(
+                    new CustomEvent("growthTriggerCompleted", { detail: { description: growthDescription } })
+                  );
+                }
               }
             }
           } catch (err) {
