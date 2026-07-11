@@ -173,7 +173,7 @@ export default function RequirementsPanel({
     if (editMode) {
       return (
         <div className="space-y-1">
-          <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">{label}</label>
+          <label className="text-xs font-semibold text-ink-muted uppercase tracking-wider">{label}</label>
           <input
             id={`nfr-input-${fieldName}`}
             type="text"
@@ -181,18 +181,18 @@ export default function RequirementsPanel({
             onChange={(e) =>
               setEditedNFR((prev) => ({ ...prev, [fieldName]: e.target.value }))
             }
-            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 shadow-sm focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent transition-all duration-200"
+            className="w-full rounded-xl border border-line bg-white px-3 py-2 text-xs text-ink shadow-sm focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent transition-all duration-200"
           />
         </div>
       );
     }
 
     return (
-      <div className="rounded-2xl border border-slate-100 bg-white p-4 shadow-sm">
-        <dt className="text-xs font-semibold text-slate-400 uppercase tracking-wider">{label}</dt>
+      <div className="rounded-2xl border border-line bg-white p-4 shadow-sm">
+        <dt className="text-xs font-semibold text-ink-faint uppercase tracking-wider">{label}</dt>
         <dd className="mt-2 text-sm">
           {isNotSpecified ? (
-            <span className="flex items-center justify-between text-slate-400 italic">
+            <span className="flex items-center justify-between text-ink-faint italic">
               <span>Not specified in brainstorm</span>
               <button
                 onClick={startEditing}
@@ -202,7 +202,7 @@ export default function RequirementsPanel({
               </button>
             </span>
           ) : (
-            <span className="text-slate-800 font-medium">{value}</span>
+            <span className="text-ink font-medium">{value}</span>
           )}
         </dd>
       </div>
@@ -211,7 +211,7 @@ export default function RequirementsPanel({
 
   if (loading && !extracting) {
     return (
-      <div className="flex h-full flex-col items-center justify-center p-8 text-slate-500">
+      <div className="flex h-full flex-col items-center justify-center p-8 text-ink-muted">
         <div className="h-8 w-8 animate-spin rounded-full border-4 border-accent border-t-transparent" />
         <span className="mt-4 text-sm font-semibold">Loading system requirements...</span>
       </div>
@@ -220,12 +220,12 @@ export default function RequirementsPanel({
 
   if (extracting) {
     return (
-      <div className="flex h-full flex-col items-center justify-center p-8 text-slate-500 text-center">
+      <div className="flex h-full flex-col items-center justify-center p-8 text-ink-muted text-center">
         <div className="h-10 w-10 animate-bounce rounded-full bg-accent flex items-center justify-center text-white font-bold text-xl shadow-md">
           ⚙️
         </div>
-        <span className="mt-4 text-base font-semibold text-slate-900">Synthesizing requirements...</span>
-        <span className="mt-2 text-xs text-slate-500 max-w-sm">
+        <span className="mt-4 text-base font-semibold text-ink">Synthesizing requirements...</span>
+        <span className="mt-2 text-xs text-ink-muted max-w-sm">
           Analyzing the chat transcript to structure functional features and non-functional constraints.
         </span>
       </div>
@@ -234,10 +234,10 @@ export default function RequirementsPanel({
 
   if (!requirements) {
     return (
-      <div className="flex h-full flex-col items-center justify-center p-8 text-slate-500 text-center border-2 border-dashed border-slate-200 rounded-3xl">
+      <div className="flex h-full flex-col items-center justify-center p-8 text-ink-muted text-center border-2 border-dashed border-line rounded-3xl">
         <span className="text-4xl">🔒</span>
-        <h4 className="mt-4 font-bold text-slate-800">Requirements Locked</h4>
-        <p className="mt-2 text-sm text-slate-500 max-w-xs">
+        <h4 className="mt-4 font-bold text-ink">Requirements Locked</h4>
+        <p className="mt-2 text-sm text-ink-muted max-w-xs">
           Please complete the discovery conversation on the left. The AI will extract requirements once brainstorming concludes.
         </p>
       </div>
@@ -247,10 +247,10 @@ export default function RequirementsPanel({
   return (
     <div className="flex h-full flex-col p-6 sm:p-8 overflow-y-auto">
       {/* Panel Header */}
-      <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+      <div className="flex items-center justify-between border-b border-line pb-4">
         <div>
           <div className="flex items-center gap-2">
-            <h3 className="text-xl font-bold text-slate-950">System Requirements Workspace</h3>
+            <h3 className="text-xl font-bold text-ink">System Requirements Workspace</h3>
             {requirements.industryContext &&
               requirements.industryContext.industry !== "none" && (
                 <span className="inline-flex items-center gap-1 rounded-full bg-accent-soft border border-accent/25 px-2.5 py-1 text-[10px] font-bold text-accent-ink uppercase tracking-wider">
@@ -259,43 +259,43 @@ export default function RequirementsPanel({
                 </span>
               )}
           </div>
-          <p className="text-xs text-slate-500 mt-1">
+          <p className="text-xs text-ink-muted mt-1">
             Review and refine the system parameters before generating high-level design recommendations.
           </p>
         </div>
         {!editMode && (
           <button
             onClick={startEditing}
-            className="rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 active:scale-95"
+            className="rounded-xl border border-line bg-white px-3.5 py-2 text-xs font-semibold text-ink-muted shadow-sm transition hover:bg-paper active:scale-95"
           >
             Edit
           </button>
         )}
       </div>
 
-      {error && <p className="mt-4 text-xs font-medium text-red-600">{error}</p>}
+      {error && <p className="mt-4 text-xs font-medium text-danger">{error}</p>}
 
       {/* Main Content */}
       <div className="mt-6 flex-1 space-y-6">
         {/* Functional Requirements */}
         <div>
-          <h4 className="text-sm font-bold text-slate-950 mb-3 flex items-center gap-2">
+          <h4 className="text-sm font-bold text-ink mb-3 flex items-center gap-2">
             <span>🚀</span> Functional Capabilities
           </h4>
           {editMode ? (
             <div className="space-y-1">
-              <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+              <label className="text-xs font-semibold text-ink-muted uppercase tracking-wider">
                 Capabilities (one per line)
               </label>
               <textarea
                 rows={5}
                 value={editedFunctional}
                 onChange={(e) => setEditedFunctional(e.target.value)}
-                className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent resize-none"
+                className="w-full rounded-2xl border border-line bg-white px-4 py-3 text-sm text-ink shadow-sm focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent resize-none"
               />
             </div>
           ) : (
-            <ul className="grid gap-2 text-sm text-slate-700 rounded-3xl bg-slate-50 p-5">
+            <ul className="grid gap-2 text-sm text-ink-muted rounded-3xl bg-paper p-5">
               {requirements.functional.map((func, index) => (
                 <li key={index} className="flex gap-3">
                   <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-accent-soft" />
@@ -308,7 +308,7 @@ export default function RequirementsPanel({
 
         {/* Non-Functional Requirements */}
         <div>
-          <h4 className="text-sm font-bold text-slate-950 mb-4 flex items-center gap-2">
+          <h4 className="text-sm font-bold text-ink mb-4 flex items-center gap-2">
             <span>⚙️</span> Architectural Constraints (NFRs)
           </h4>
           <div className="grid gap-4 md:grid-cols-2">
@@ -325,16 +325,16 @@ export default function RequirementsPanel({
 
       {/* Edit Mode Actions */}
       {editMode && (
-        <div className="mt-8 border-t border-slate-100 pt-4 flex justify-end gap-3">
+        <div className="mt-8 border-t border-line pt-4 flex justify-end gap-3">
           <button
             onClick={() => setEditMode(false)}
-            className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-semibold text-slate-700 shadow-sm hover:bg-slate-50"
+            className="rounded-xl border border-line bg-white px-4 py-2.5 text-xs font-semibold text-ink-muted shadow-sm hover:bg-paper"
           >
             Cancel
           </button>
           <button
             onClick={handleSave}
-            className="rounded-xl bg-slate-950 px-4 py-2.5 text-xs font-semibold text-white shadow-md hover:bg-slate-800"
+            className="rounded-xl bg-ink px-4 py-2.5 text-xs font-semibold text-white shadow-md hover:bg-ink/90"
           >
             Save Requirements
           </button>
@@ -343,7 +343,7 @@ export default function RequirementsPanel({
 
       {/* Workspace Footer Action */}
       {!editMode && (
-        <div className="mt-8 border-t border-slate-100 pt-6">
+        <div className="mt-8 border-t border-line pt-6">
           <button
             className="flex w-full items-center justify-center rounded-2xl bg-accent px-5 py-3.5 text-sm font-semibold text-white shadow-md transition-all hover:bg-accent-ink active:scale-[0.98]"
             onClick={() => alert("HLD Generation (Step 4) will be implemented next!")}

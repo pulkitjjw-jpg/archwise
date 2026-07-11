@@ -28,6 +28,23 @@ const PROVIDER_SOFT_BG: Record<CloudProviderKey, string> = {
   private: "bg-private-soft",
 };
 
+// Plain-language labels for the component-type badge in Simple mode -- the raw type slug
+// (e.g. "phi-vault", "audit-log") is the Technical-mode value; falls back to the raw type for
+// any type not listed here rather than hiding the badge.
+const TYPE_LABELS: Record<string, string> = {
+  cdn: "Content Delivery",
+  compute: "Compute",
+  database: "Database",
+  storage: "File Storage",
+  queue: "Task Queue",
+  cache: "Cache",
+  auth: "Authentication",
+  tokenization: "Tokenization",
+  "audit-log": "Audit Log",
+  "phi-vault": "Health Data Vault",
+  deidentification: "De-identification",
+};
+
 const DIAGRAM_NODE_WIDTH = 208;
 const DIAGRAM_NODE_HEIGHT = 68;
 
@@ -717,8 +734,8 @@ export default function ArchitectureWorkspace({
 
   if (loading) {
     return (
-      <div className="flex h-96 flex-col items-center justify-center p-8 text-slate-500">
-        <div className="h-8 w-8 animate-spin rounded-full border-4 border-cyan-500 border-t-transparent" />
+      <div className="flex h-96 flex-col items-center justify-center p-8 text-ink-muted">
+        <div className="h-8 w-8 animate-spin rounded-full border-4 border-accent border-t-transparent" />
         <span className="mt-4 text-sm font-semibold">Loading system architecture...</span>
       </div>
     );
@@ -726,14 +743,14 @@ export default function ArchitectureWorkspace({
 
   if (generating) {
     return (
-      <div className="flex h-96 flex-col items-center justify-center p-8 text-slate-500 text-center">
-        <div className="h-10 w-10 animate-spin rounded-full border-4 border-cyan-600 border-t-transparent flex items-center justify-center shadow-md">
+      <div className="flex h-96 flex-col items-center justify-center p-8 text-ink-muted text-center">
+        <div className="h-10 w-10 animate-spin rounded-full border-4 border-accent border-t-transparent flex items-center justify-center shadow-md">
           🌀
         </div>
-        <span className="mt-4 text-base font-semibold text-slate-900 font-bold">
+        <span className="mt-4 text-base font-semibold text-ink font-bold">
           {GENERATION_STAGES[generationStageIndex]}
         </span>
-        <span className="mt-2 text-xs text-slate-500 max-w-sm">
+        <span className="mt-2 text-xs text-ink-muted max-w-sm">
           Generating cost metrics and resolving senior architect cloud recommendations across AWS, Azure, and GCP.
         </span>
       </div>
@@ -768,13 +785,13 @@ export default function ArchitectureWorkspace({
     return (
       <div className="p-6 sm:p-8 flex flex-col h-full justify-between overflow-y-auto">
         <div>
-          <h3 className="text-xl font-bold text-slate-950">Synthesize System Architecture</h3>
-          <p className="text-sm text-slate-600 mt-1">
+          <h3 className="text-xl font-bold text-ink">Synthesize System Architecture</h3>
+          <p className="text-sm text-ink-muted mt-1">
             Generate an architecture diagram complete with cloud service mappings for AWS, Azure, and GCP.
           </p>
 
           {error && (
-            <div className="mt-4 flex items-center justify-between rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-950 shadow-sm animate-fadeIn">
+            <div className="mt-4 flex items-center justify-between rounded-2xl border border-danger/25 bg-danger-soft p-4 text-sm text-danger shadow-sm animate-fadeIn">
               <div className="flex items-center gap-2">
                 <span>⚠️</span>
                 <span>{error}</span>
@@ -782,13 +799,13 @@ export default function ArchitectureWorkspace({
               <div className="flex items-center gap-2">
                 <button
                   onClick={handleGenerate}
-                  className="rounded-lg bg-red-100 hover:bg-red-200 text-red-900 px-2 py-1 text-xs font-bold transition"
+                  className="rounded-lg bg-danger-soft hover:bg-danger/15 text-danger px-2 py-1 text-xs font-bold transition"
                 >
                   Retry
                 </button>
                 <button
                   onClick={() => setError("")}
-                  className="text-red-500 hover:text-red-700 font-extrabold text-xs px-2 py-1"
+                  className="text-danger transition hover:opacity-70 font-extrabold text-xs px-2 py-1"
                 >
                   Dismiss
                 </button>
@@ -797,21 +814,21 @@ export default function ArchitectureWorkspace({
           )}
 
           {isGenerationBlocked ? (
-            <div className="mt-6 rounded-3xl border border-amber-200 bg-amber-50/50 p-5">
-              <h4 className="font-semibold text-amber-950 flex items-center gap-2">
+            <div className="mt-6 rounded-3xl border border-warning/25 bg-warning-soft/50 p-5">
+              <h4 className="font-semibold text-warning flex items-center gap-2">
                 <span>⚠️</span> Generation Locked
               </h4>
-              <p className="mt-2 text-sm text-amber-900 leading-relaxed">
+              <p className="mt-2 text-sm text-warning leading-relaxed">
                 We are missing critical parameters required to run the architecture rules engine. Click specify on the fields below to edit them:
               </p>
               <ul className="mt-4 space-y-2 text-xs">
                 {isScaleUnspecified && (
                   <li className="flex items-center gap-2">
-                    <span className="text-amber-600 font-bold">•</span>
-                    <span className="text-amber-950 font-medium mr-1">Expected Traffic / Scale</span>
+                    <span className="text-warning font-bold">•</span>
+                    <span className="text-warning font-medium mr-1">Expected Traffic / Scale</span>
                     <button
                       onClick={() => onSwitchTab("requirements", "expectedScale")}
-                      className="text-cyan-700 font-bold hover:underline bg-cyan-100/50 px-2 py-0.5 rounded border border-cyan-200"
+                      className="text-accent-ink font-bold hover:underline bg-accent-soft/50 px-2 py-0.5 rounded border border-accent/25"
                     >
                       specify ➜
                     </button>
@@ -819,11 +836,11 @@ export default function ArchitectureWorkspace({
                 )}
                 {isBudgetUnspecified && (
                   <li className="flex items-center gap-2">
-                    <span className="text-amber-600 font-bold">•</span>
-                    <span className="text-amber-950 font-medium mr-1">Budget Range</span>
+                    <span className="text-warning font-bold">•</span>
+                    <span className="text-warning font-medium mr-1">Budget Range</span>
                     <button
                       onClick={() => onSwitchTab("requirements", "budget")}
-                      className="text-cyan-700 font-bold hover:underline bg-cyan-100/50 px-2 py-0.5 rounded border border-cyan-200"
+                      className="text-accent-ink font-bold hover:underline bg-accent-soft/50 px-2 py-0.5 rounded border border-accent/25"
                     >
                       specify ➜
                     </button>
@@ -831,11 +848,11 @@ export default function ArchitectureWorkspace({
                 )}
                 {isDataUnspecified && (
                   <li className="flex items-center gap-2">
-                    <span className="text-amber-600 font-bold">•</span>
-                    <span className="text-amber-950 font-medium mr-1">Data Types / Nature</span>
+                    <span className="text-warning font-bold">•</span>
+                    <span className="text-warning font-medium mr-1">Data Types / Nature</span>
                     <button
                       onClick={() => onSwitchTab("requirements", "dataNature")}
-                      className="text-cyan-700 font-bold hover:underline bg-cyan-100/50 px-2 py-0.5 rounded border border-cyan-200"
+                      className="text-accent-ink font-bold hover:underline bg-accent-soft/50 px-2 py-0.5 rounded border border-accent/25"
                     >
                       specify ➜
                     </button>
@@ -844,22 +861,22 @@ export default function ArchitectureWorkspace({
               </ul>
             </div>
           ) : (
-            <div className="mt-6 rounded-3xl border border-cyan-200 bg-cyan-50/50 p-5">
-              <h4 className="font-semibold text-cyan-950 flex items-center gap-2">
+            <div className="mt-6 rounded-3xl border border-accent/25 bg-accent-soft/50 p-5">
+              <h4 className="font-semibold text-accent-ink flex items-center gap-2">
                 <span>✓</span> Requirements Complete
               </h4>
-              <p className="mt-1 text-sm text-cyan-900 leading-relaxed">
+              <p className="mt-1 text-sm text-accent-ink leading-relaxed">
                 All critical parameters have been specified. You are ready to generate your multi-cloud architecture.
               </p>
             </div>
           )}
         </div>
 
-        <div className="mt-8 border-t border-slate-100 pt-6">
+        <div className="mt-8 border-t border-line pt-6">
           <button
             onClick={handleGenerate}
             disabled={isGenerationBlocked}
-            className="flex w-full items-center justify-center rounded-2xl bg-cyan-600 px-5 py-4 text-sm font-semibold text-white shadow-md transition-all hover:bg-cyan-700 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex w-full items-center justify-center rounded-2xl bg-accent px-5 py-4 text-sm font-semibold text-white shadow-md transition-all hover:bg-accent-ink active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Generate Architecture Design ➜
           </button>
@@ -883,20 +900,20 @@ export default function ArchitectureWorkspace({
   return (
     <div className="flex h-full flex-col overflow-hidden">
       {/* Workspace Header */}
-      <div className="border-b border-slate-200 bg-white px-6 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+      <div className="border-b border-line bg-white px-6 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h3 className="text-base font-extrabold text-slate-950">Multi-Cloud Design Board</h3>
-          <p className="text-xs text-slate-500 mt-0.5">
+          <h3 className="text-base font-extrabold text-ink">Multi-Cloud Design Board</h3>
+          <p className="text-xs text-ink-muted mt-0.5">
             Design dynamic architectures and compare alternatives across cloud platforms.
           </p>
         </div>
 
         <div className="flex items-center gap-3">
-          <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200 shadow-sm">
+          <div className="flex bg-paper p-1 rounded-xl border border-line shadow-sm">
             <button
               onClick={() => setViewMode("diagram")}
               className={`px-3 py-1.5 text-xs font-bold rounded-lg transition ${
-                viewMode === "diagram" ? "bg-white text-slate-950 shadow-sm" : "text-slate-500 hover:text-slate-800"
+                viewMode === "diagram" ? "bg-white text-ink shadow-sm" : "text-ink-muted hover:text-ink"
               }`}
             >
               Topology View
@@ -904,19 +921,19 @@ export default function ArchitectureWorkspace({
             <button
               onClick={() => setViewMode("comparison")}
               className={`px-3 py-1.5 text-xs font-bold rounded-lg transition ${
-                viewMode === "comparison" ? "bg-white text-slate-950 shadow-sm" : "text-slate-500 hover:text-slate-800"
+                viewMode === "comparison" ? "bg-white text-ink shadow-sm" : "text-ink-muted hover:text-ink"
               }`}
             >
               Compare Clouds
             </button>
           </div>
-          <div className="flex items-center gap-1 bg-slate-100 px-3 py-1.5 rounded-xl border border-slate-200 shadow-sm">
-            <span className="text-[10px] font-extrabold text-slate-500 uppercase tracking-wider">Version:</span>
+          <div className="flex items-center gap-1 bg-paper px-3 py-1.5 rounded-xl border border-line shadow-sm">
+            <span className="text-[10px] font-extrabold text-ink-muted uppercase tracking-wider">Version:</span>
             <select
               value={architecture.version}
               onChange={(e) => loadArchitecture(e.target.value)}
               disabled={isEditing}
-              className={`bg-transparent text-xs font-bold text-slate-950 focus:outline-none cursor-pointer ${isEditing ? "opacity-50 cursor-not-allowed" : ""}`}
+              className={`bg-transparent text-xs font-bold text-ink focus:outline-none cursor-pointer ${isEditing ? "opacity-50 cursor-not-allowed" : ""}`}
             >
               {versionList.map((v) => (
                 <option key={v.version} value={v.version}>
@@ -935,15 +952,15 @@ export default function ArchitectureWorkspace({
                   disabled={savingManualChanges || !validationResults.isValid}
                   className={`rounded-xl px-3 py-1.5 text-xs font-bold uppercase transition shadow-sm flex items-center gap-1 ${
                     validationResults.isValid
-                      ? "bg-emerald-600 hover:bg-emerald-700 text-white active:scale-95"
-                      : "bg-slate-300 text-slate-500 cursor-not-allowed"
+                      ? "bg-success hover:opacity-90 text-white active:scale-95"
+                      : "bg-line-strong text-ink-muted cursor-not-allowed"
                   }`}
                 >
                   <span>{savingManualChanges ? "Saving..." : "💾 Save Changes"}</span>
                 </button>
                 <button
                   onClick={handleCancelEditMode}
-                  className="rounded-xl bg-slate-500 hover:bg-slate-600 text-white px-3 py-1.5 text-xs font-bold uppercase transition shadow-sm active:scale-95"
+                  className="rounded-xl bg-ink-muted hover:bg-ink text-white px-3 py-1.5 text-xs font-bold uppercase transition shadow-sm active:scale-95"
                 >
                   Cancel
                 </button>
@@ -952,7 +969,7 @@ export default function ArchitectureWorkspace({
               architecture.version === versionList[0]?.version && (
                 <button
                   onClick={handleEnterEditMode}
-                  className="rounded-xl bg-slate-900 hover:bg-slate-800 text-white px-3 py-1.5 text-xs font-bold uppercase transition shadow-sm active:scale-95"
+                  className="rounded-xl bg-ink hover:bg-ink/90 text-white px-3 py-1.5 text-xs font-bold uppercase transition shadow-sm active:scale-95"
                 >
                   🔧 Edit Architecture
                 </button>
@@ -963,7 +980,7 @@ export default function ArchitectureWorkspace({
       </div>
 
       {error && (
-        <div className="mx-6 mt-4 flex items-center justify-between rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-950 shadow-sm animate-fadeIn shrink-0">
+        <div className="mx-6 mt-4 flex items-center justify-between rounded-2xl border border-danger/25 bg-danger-soft p-4 text-sm text-danger shadow-sm animate-fadeIn shrink-0">
           <div className="flex items-center gap-2">
             <span>⚠️</span>
             <span>{error}</span>
@@ -971,13 +988,13 @@ export default function ArchitectureWorkspace({
           <div className="flex items-center gap-2">
             <button
               onClick={handleGenerate}
-              className="rounded-lg bg-red-100 hover:bg-red-200 text-red-900 px-2 py-1 text-xs font-bold transition"
+              className="rounded-lg bg-danger-soft hover:bg-danger/15 text-danger px-2 py-1 text-xs font-bold transition"
             >
               Retry
             </button>
             <button
               onClick={() => setError("")}
-              className="text-red-500 hover:text-red-700 font-extrabold text-xs px-2 py-1"
+              className="text-danger transition hover:opacity-70 font-extrabold text-xs px-2 py-1"
             >
               Dismiss
             </button>
@@ -990,45 +1007,45 @@ export default function ArchitectureWorkspace({
         {viewMode === "diagram" ? (
           <div className="flex h-full flex-col lg:flex-row overflow-hidden">
             {/* Interactive Diagram Canvas (Left) */}
-            <div className="flex-1 p-6 flex flex-col justify-between border-b lg:border-b-0 lg:border-r border-slate-100 overflow-y-auto">
+            <div className="min-w-0 flex-1 p-6 flex flex-col justify-between border-b lg:border-b-0 lg:border-r border-line overflow-y-auto">
               <div>
-                <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-                  <span className="text-xs text-slate-500 font-semibold uppercase tracking-wider">
+                <div className="flex flex-wrap items-center justify-between gap-y-2 border-b border-line pb-3">
+                  <span className="text-xs text-ink-muted font-semibold uppercase tracking-wider">
                     Interactive Topology
                   </span>
-                  
-                  <div className="flex items-center gap-3">
+
+                  <div className="flex flex-wrap items-center gap-2">
                     {/* Export Button */}
                     <button
                       onClick={handleExport}
-                      className="rounded-xl bg-cyan-600 hover:bg-cyan-700 text-white px-3 py-1.5 text-[9.5px] font-extrabold uppercase transition shadow-sm active:scale-95 flex items-center gap-1"
+                      className="rounded-xl bg-accent hover:bg-accent-ink text-white px-3 py-1.5 text-[9.5px] font-extrabold uppercase transition shadow-sm active:scale-95 flex items-center gap-1"
                     >
                       <span>📥</span> {activeProvider === "kubernetes" ? "Export Manifests" : "Export TF"}
                     </button>
 
                     {/* Deployment Target Toggle */}
-                    <div className="flex bg-slate-100/80 p-0.5 rounded-lg border border-slate-200 shadow-sm">
+                    <div className="flex bg-paper/80 p-0.5 rounded-lg border border-line shadow-sm">
                       {(["aws", "azure", "gcp", "kubernetes", "private"] as const).map((p) => (
                         <button
                           key={p}
                           onClick={() => setActiveProvider(p)}
                           className={`px-2 py-1 text-[9px] font-extrabold uppercase rounded transition ${
                             activeProvider === p
-                              ? "bg-slate-950 text-white shadow-sm"
-                              : "text-slate-500 hover:text-slate-800"
+                              ? "bg-ink text-white shadow-sm"
+                              : "text-ink-muted hover:text-ink"
                           }`}
                         >
                           {PROVIDER_LABELS[p]}
                         </button>
                       ))}
                     </div>
-                    <span className="rounded-full bg-emerald-100 border border-emerald-200 text-emerald-800 px-2.5 py-0.5 text-[9px] font-extrabold flex items-center gap-1">
+                    <span className="rounded-full bg-success-soft border border-success/25 text-success px-2.5 py-0.5 text-[9px] font-extrabold flex items-center gap-1">
                       <span>Est: ${totalMinCost} - ${totalMaxCost}/mo</span>
                       {getProviderCostDeltaString(activeProvider) && (
                         <span className={`px-1 rounded font-black ${
                           ((architecture.reasoning.diff?.costDelta as Record<string, { min: number; max: number }> | undefined)?.[activeProvider]?.min || 0) < 0
-                            ? "text-emerald-700 bg-emerald-50"
-                            : "text-amber-700 bg-amber-50"
+                            ? "text-success bg-success-soft"
+                            : "text-warning bg-warning-soft"
                         }`}>
                           {getProviderCostDeltaString(activeProvider)}
                         </span>
@@ -1039,10 +1056,10 @@ export default function ArchitectureWorkspace({
 
                 {/* Team Maturity / Deployment Target Advisory */}
                 {providerMaturityWarning && (
-                  <div className="mt-4 flex items-start gap-2.5 rounded-2xl border border-amber-200 bg-amber-50/60 p-3.5 text-xs text-amber-950 shadow-sm animate-fadeIn">
+                  <div className="mt-4 flex items-start gap-2.5 rounded-2xl border border-warning/25 bg-warning-soft/60 p-3.5 text-xs text-warning shadow-sm animate-fadeIn">
                     <span className="text-sm">⚠️</span>
                     <div className="leading-relaxed">
-                      <span className="font-extrabold uppercase text-[9px] tracking-wider text-amber-800 block">
+                      <span className="font-extrabold uppercase text-[9px] tracking-wider text-warning block">
                         Recommendation
                       </span>
                       {providerMaturityWarning}
@@ -1052,13 +1069,13 @@ export default function ArchitectureWorkspace({
 
                 {/* Manual Editing Controls Toolbar */}
                 {isEditing && draftHld && (
-                  <div className="mt-4 border border-slate-200 bg-slate-50/50 rounded-[1.5rem] p-4 space-y-4 animate-fadeIn">
+                  <div className="mt-4 border border-line bg-paper/50 rounded-[1.5rem] p-4 space-y-4 animate-fadeIn">
                     {/* Panel Title */}
-                    <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-                      <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">
+                    <div className="flex items-center justify-between border-b border-line pb-2">
+                      <span className="text-[10px] font-black text-ink-muted uppercase tracking-widest">
                         🔧 Manual Editor Controls
                       </span>
-                      <span className="text-[9px] font-bold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">
+                      <span className="text-[9px] font-bold text-ink-faint bg-paper px-1.5 py-0.5 rounded">
                         Draft Mode
                       </span>
                     </div>
@@ -1066,13 +1083,13 @@ export default function ArchitectureWorkspace({
                     <div className="grid gap-4 md:grid-cols-2">
                       {/* Form 1: Add Component */}
                       <form onSubmit={handleAddComponent} className="space-y-3">
-                        <div className="text-[10px] font-bold text-slate-700">➕ Add Generic Component</div>
+                        <div className="text-[10px] font-bold text-ink-muted">➕ Add Generic Component</div>
                         <div className="flex flex-col gap-2">
                           <div className="flex gap-2">
                             <select
                               value={newNodeType}
                               onChange={(e) => setNewNodeType(e.target.value)}
-                              className="bg-white border border-slate-200 rounded-xl px-2.5 py-1.5 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-cyan-500 animate-fadeIn"
+                              className="bg-white border border-line rounded-xl px-2.5 py-1.5 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-accent animate-fadeIn"
                             >
                               <option value="compute">Compute</option>
                               <option value="db">Database</option>
@@ -1092,7 +1109,7 @@ export default function ArchitectureWorkspace({
                               value={newNodeName}
                               onChange={(e) => setNewNodeName(e.target.value)}
                               placeholder="Component Name (e.g. MemoryDB)"
-                              className="flex-1 bg-white border border-slate-200 rounded-xl px-3 py-1.5 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-cyan-500"
+                              className="flex-1 bg-white border border-line rounded-xl px-3 py-1.5 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-accent"
                             />
                           </div>
                           <input
@@ -1100,11 +1117,11 @@ export default function ArchitectureWorkspace({
                             value={newNodeReasoning}
                             onChange={(e) => setNewNodeReasoning(e.target.value)}
                             placeholder="Optional: Rationale / Reason for adding..."
-                            className="bg-white border border-slate-200 rounded-xl px-3 py-1.5 text-xs font-medium focus:outline-none focus:ring-1 focus:ring-cyan-500"
+                            className="bg-white border border-line rounded-xl px-3 py-1.5 text-xs font-medium focus:outline-none focus:ring-1 focus:ring-accent"
                           />
                           <button
                             type="submit"
-                            className="w-full bg-cyan-600 hover:bg-cyan-700 text-white rounded-xl py-1.5 text-[10px] font-extrabold uppercase tracking-wide transition shadow-sm"
+                            className="w-full bg-accent hover:bg-accent-ink text-white rounded-xl py-1.5 text-[10px] font-extrabold uppercase tracking-wide transition shadow-sm"
                           >
                             Add Component Node
                           </button>
@@ -1113,13 +1130,13 @@ export default function ArchitectureWorkspace({
 
                       {/* Form 2: Add Connection */}
                       <form onSubmit={handleAddConnection} className="space-y-3">
-                        <div className="text-[10px] font-bold text-slate-700">🔗 Add Connection Link</div>
+                        <div className="text-[10px] font-bold text-ink-muted">🔗 Add Connection Link</div>
                         <div className="flex flex-col gap-2">
                           <div className="flex gap-2">
                             <select
                               value={newEdgeFrom}
                               onChange={(e) => setNewEdgeFrom(e.target.value)}
-                              className="flex-1 bg-white border border-slate-200 rounded-xl px-2.5 py-1.5 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-cyan-500"
+                              className="flex-1 bg-white border border-line rounded-xl px-2.5 py-1.5 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-accent"
                             >
                               <option value="">Select From...</option>
                               {draftHld.components.map((c) => (
@@ -1131,7 +1148,7 @@ export default function ArchitectureWorkspace({
                             <select
                               value={newEdgeTo}
                               onChange={(e) => setNewEdgeTo(e.target.value)}
-                              className="flex-1 bg-white border border-slate-200 rounded-xl px-2.5 py-1.5 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-cyan-500"
+                              className="flex-1 bg-white border border-line rounded-xl px-2.5 py-1.5 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-accent"
                             >
                               <option value="">Select To...</option>
                               {draftHld.components.map((c) => (
@@ -1147,11 +1164,11 @@ export default function ArchitectureWorkspace({
                               value={newEdgeProtocol}
                               onChange={(e) => setNewEdgeProtocol(e.target.value)}
                               placeholder="Protocol (e.g. HTTPS, TCP)"
-                              className="flex-1 bg-white border border-slate-200 rounded-xl px-3 py-1.5 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-cyan-500"
+                              className="flex-1 bg-white border border-line rounded-xl px-3 py-1.5 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-accent"
                             />
                             <button
                               type="submit"
-                              className="bg-slate-900 hover:bg-slate-800 text-white rounded-xl px-4 py-1.5 text-[10px] font-extrabold uppercase tracking-wide transition shadow-sm"
+                              className="bg-ink hover:bg-ink/90 text-white rounded-xl px-4 py-1.5 text-[10px] font-extrabold uppercase tracking-wide transition shadow-sm"
                             >
                               Connect
                             </button>
@@ -1161,13 +1178,13 @@ export default function ArchitectureWorkspace({
                     </div>
 
                     {/* Active Connections List (for simple deletion) */}
-                    <div className="border-t border-slate-100 pt-3">
-                      <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block mb-2">
+                    <div className="border-t border-line pt-3">
+                      <span className="text-[9px] font-black text-ink-faint uppercase tracking-widest block mb-2">
                         Active Connection Links
                       </span>
                       <div className="flex flex-wrap gap-2 max-h-[100px] overflow-y-auto pr-1">
                         {draftHld.connections.length === 0 ? (
-                          <span className="text-[10px] text-slate-400 italic">No active connections.</span>
+                          <span className="text-[10px] text-ink-faint italic">No active connections.</span>
                         ) : (
                           draftHld.connections.map((conn, idx) => {
                             const fromNode = draftHld.components.find((c) => c.id === conn.from);
@@ -1175,16 +1192,16 @@ export default function ArchitectureWorkspace({
                             return (
                               <div
                                 key={idx}
-                                className="flex items-center gap-1.5 bg-white border border-slate-200 rounded-xl px-2.5 py-1 text-[10px] font-bold text-slate-700 shadow-sm"
+                                className="flex items-center gap-1.5 bg-white border border-line rounded-xl px-2.5 py-1 text-[10px] font-bold text-ink-muted shadow-sm"
                               >
                                 <span>{fromNode?.name || conn.from}</span>
-                                <span className="text-slate-400 font-normal">➜</span>
+                                <span className="text-ink-faint font-normal">➜</span>
                                 <span>{toNode?.name || conn.to}</span>
-                                <span className="text-slate-400">({conn.protocol})</span>
+                                <span className="text-ink-faint">({conn.protocol})</span>
                                 <button
                                   type="button"
                                   onClick={() => handleRemoveConnection(conn.from, conn.to)}
-                                  className="text-red-500 hover:text-red-700 font-black ml-1 scale-110"
+                                  className="text-danger transition hover:opacity-70 font-black ml-1 scale-110"
                                 >
                                   ×
                                 </button>
@@ -1204,11 +1221,11 @@ export default function ArchitectureWorkspace({
                     {validationResults.errors.map((err, idx) => (
                       <div
                         key={idx}
-                        className="flex items-start gap-2.5 rounded-2xl border border-red-200 bg-red-50 p-3 text-xs text-red-950 shadow-sm animate-fadeIn"
+                        className="flex items-start gap-2.5 rounded-2xl border border-danger/25 bg-danger-soft p-3 text-xs text-danger shadow-sm animate-fadeIn"
                       >
                         <span className="text-sm">❌</span>
                         <div className="leading-relaxed">
-                          <span className="font-extrabold uppercase text-[9px] tracking-wider text-red-800 block">
+                          <span className="font-extrabold uppercase text-[9px] tracking-wider text-danger block">
                             Blocker
                           </span>
                           {err}
@@ -1220,11 +1237,11 @@ export default function ArchitectureWorkspace({
                     {validationResults.warnings.map((warn, idx) => (
                       <div
                         key={idx}
-                        className="flex items-start gap-2.5 rounded-2xl border border-amber-200 bg-amber-50/50 p-3 text-xs text-amber-950 shadow-sm animate-fadeIn"
+                        className="flex items-start gap-2.5 rounded-2xl border border-warning/25 bg-warning-soft/50 p-3 text-xs text-warning shadow-sm animate-fadeIn"
                       >
                         <span className="text-sm">⚠️</span>
                         <div className="leading-relaxed">
-                          <span className="font-extrabold uppercase text-[9px] tracking-wider text-amber-800 block">
+                          <span className="font-extrabold uppercase text-[9px] tracking-wider text-warning block">
                             Warning
                           </span>
                           {warn}
@@ -1235,7 +1252,7 @@ export default function ArchitectureWorkspace({
                     {validationResults.isValid &&
                       validationResults.errors.length === 0 &&
                       validationResults.warnings.length === 0 && (
-                        <div className="flex items-center gap-2 rounded-2xl border border-emerald-200 bg-emerald-50/50 px-3 py-2.5 text-xs text-emerald-950 shadow-sm">
+                        <div className="flex items-center gap-2 rounded-2xl border border-success/25 bg-success-soft/50 px-3 py-2.5 text-xs text-success shadow-sm">
                           <span className="text-sm">✅</span>
                           <span className="font-semibold">All structural validation checks passed. Ready to save!</span>
                         </div>
@@ -1245,26 +1262,26 @@ export default function ArchitectureWorkspace({
 
                 {/* What Changed Diff Panel */}
                 {architecture.reasoning.diff && (
-                  <div className="mt-6 rounded-3xl border border-cyan-200/80 bg-cyan-50/10 p-5 shadow-sm">
-                    <h4 className="font-extrabold text-slate-950 flex items-center gap-2 text-xs uppercase tracking-wider">
+                  <div className="mt-6 rounded-3xl border border-accent/25/80 bg-accent-soft/10 p-5 shadow-sm">
+                    <h4 className="font-extrabold text-ink flex items-center gap-2 text-xs uppercase tracking-wider">
                       <span>🔄</span> What Changed in Version {architecture.version}
                     </h4>
-                    <p className="text-[11px] text-slate-500 mt-1">
+                    <p className="text-[11px] text-ink-muted mt-1">
                       Delta modifications generated in response to growth triggers or updates:
                     </p>
-                    <div className="mt-4 grid gap-4 md:grid-cols-2 lg:grid-cols-3 border-t border-slate-100 pt-4">
+                    <div className="mt-4 grid gap-4 md:grid-cols-2 lg:grid-cols-3 border-t border-line pt-4">
                       {/* Added Components */}
                       {architecture.reasoning.diff.added && architecture.reasoning.diff.added.length > 0 && (
                         <div className="space-y-2">
-                          <span className="text-[9px] font-black text-emerald-700 uppercase tracking-widest block bg-emerald-100/60 border border-emerald-200 px-2 py-0.5 rounded w-max">
+                          <span className="text-[9px] font-black text-success uppercase tracking-widest block bg-success-soft/60 border border-success/25 px-2 py-0.5 rounded w-max">
                             + Added
                           </span>
-                          <ul className="text-xs space-y-2 text-slate-700">
+                          <ul className="text-xs space-y-2 text-ink-muted">
                             {architecture.reasoning.diff.added.map((item: any, idx: number) => (
                               <li key={idx} className="leading-relaxed">
-                                <span className="font-bold text-slate-950 block">{item.name}</span>
-                                <span className="text-[10px] text-slate-400 font-semibold uppercase">{item.type}</span>
-                                <span className="block text-[11px] text-slate-500 italic mt-0.5">{item.reasoning}</span>
+                                <span className="font-bold text-ink block">{item.name}</span>
+                                <span className="text-[10px] text-ink-faint font-semibold uppercase">{item.type}</span>
+                                <span className="block text-[11px] text-ink-muted italic mt-0.5">{item.reasoning}</span>
                               </li>
                             ))}
                           </ul>
@@ -1274,20 +1291,20 @@ export default function ArchitectureWorkspace({
                       {/* Modified Components */}
                       {architecture.reasoning.diff.modified && architecture.reasoning.diff.modified.length > 0 && (
                         <div className="space-y-2">
-                          <span className="text-[9px] font-black text-amber-700 uppercase tracking-widest block bg-amber-100/60 border border-amber-200 px-2 py-0.5 rounded w-max">
+                          <span className="text-[9px] font-black text-warning uppercase tracking-widest block bg-warning-soft/60 border border-warning/25 px-2 py-0.5 rounded w-max">
                             ~ Modified
                           </span>
-                          <ul className="text-xs space-y-3 text-slate-700">
+                          <ul className="text-xs space-y-3 text-ink-muted">
                             {architecture.reasoning.diff.modified.map((item: any, idx: number) => (
                               <li key={idx} className="leading-relaxed">
-                                <span className="font-bold text-slate-950 block">{item.name}</span>
-                                <div className="mt-1 space-y-1.5 pl-2 border-l-2 border-slate-200">
+                                <span className="font-bold text-ink block">{item.name}</span>
+                                <div className="mt-1 space-y-1.5 pl-2 border-l-2 border-line">
                                   {item.changes.map((ch: any, cIdx: number) => (
                                     <div key={cIdx} className="text-[11px]">
-                                      <span className="font-semibold text-slate-600 block uppercase text-[9px]">{ch.parameter}</span>
-                                      <span className="text-slate-400 line-through">{ch.oldVal}</span> ➜{" "}
-                                      <span className="text-slate-950 font-bold">{ch.newVal}</span>
-                                      <span className="block text-[10px] text-slate-500 italic mt-0.5">{ch.reasoning}</span>
+                                      <span className="font-semibold text-ink-muted block uppercase text-[9px]">{ch.parameter}</span>
+                                      <span className="text-ink-faint line-through">{ch.oldVal}</span> ➜{" "}
+                                      <span className="text-ink font-bold">{ch.newVal}</span>
+                                      <span className="block text-[10px] text-ink-muted italic mt-0.5">{ch.reasoning}</span>
                                     </div>
                                   ))}
                                 </div>
@@ -1300,14 +1317,14 @@ export default function ArchitectureWorkspace({
                       {/* Removed Components */}
                       {architecture.reasoning.diff.removed && architecture.reasoning.diff.removed.length > 0 && (
                         <div className="space-y-2">
-                          <span className="text-[9px] font-black text-red-700 uppercase tracking-widest block bg-red-100/60 border border-red-200 px-2 py-0.5 rounded w-max">
+                          <span className="text-[9px] font-black text-danger uppercase tracking-widest block bg-danger-soft/60 border border-danger/25 px-2 py-0.5 rounded w-max">
                             − Removed
                           </span>
-                          <ul className="text-xs space-y-2 text-slate-700">
+                          <ul className="text-xs space-y-2 text-ink-muted">
                             {architecture.reasoning.diff.removed.map((item: any, idx: number) => (
                               <li key={idx} className="leading-relaxed">
-                                <span className="font-bold text-slate-950 line-through block">{item.name}</span>
-                                <span className="text-[10px] text-slate-400 font-semibold uppercase">{item.type}</span>
+                                <span className="font-bold text-ink line-through block">{item.name}</span>
+                                <span className="text-[10px] text-ink-faint font-semibold uppercase">{item.type}</span>
                               </li>
                             ))}
                           </ul>
@@ -1482,14 +1499,14 @@ export default function ArchitectureWorkspace({
                 </div>
               </div>
 
-              <div className="mt-6 border-t border-slate-100 pt-4 flex items-center justify-between">
-                <span className="text-xs text-slate-500 font-medium">
+              <div className="mt-6 border-t border-line pt-4 flex items-center justify-between">
+                <span className="text-xs text-ink-muted font-medium">
                   Active Provider view: <strong className="uppercase">{activeProvider}</strong>
                 </span>
                 <button
                   onClick={handleGenerate}
                   disabled={isGenerationBlocked}
-                  className="rounded-xl bg-slate-900 hover:bg-slate-800 text-white px-4 py-2 text-xs font-bold transition shadow-sm active:scale-95 disabled:opacity-50"
+                  className="rounded-xl bg-ink hover:bg-ink/90 text-white px-4 py-2 text-xs font-bold transition shadow-sm active:scale-95 disabled:opacity-50"
                 >
                   Regenerate Design
                 </button>
@@ -1497,16 +1514,16 @@ export default function ArchitectureWorkspace({
             </div>
 
             {/* Topology Drawer (Right) */}
-            <div className="w-full lg:w-[360px] bg-slate-50/50 p-6 overflow-y-auto flex flex-col justify-between border-t lg:border-t-0 border-slate-100">
+            <div className="w-full lg:w-[360px] bg-paper/50 p-6 overflow-y-auto flex flex-col justify-between border-t lg:border-t-0 border-line">
               {selectedNode ? (
                 <div className="space-y-6">
                   <div>
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex items-center gap-2">
                         <span className="rounded-full bg-accent-soft border border-accent/30 px-2 py-0.5 text-[9px] font-bold text-accent-ink uppercase tracking-wider">
-                          {selectedNode.type}
+                          {explanationMode === "simple" ? TYPE_LABELS[selectedNode.type] || selectedNode.type : selectedNode.type}
                         </span>
-                        <span className="rounded-full bg-slate-200 border border-slate-300 px-2 py-0.5 text-[9px] font-bold text-slate-700 uppercase tracking-wider">
+                        <span className="rounded-full bg-line border border-line-strong px-2 py-0.5 text-[9px] font-bold text-ink-muted uppercase tracking-wider">
                           {activeProvider} Mapped
                         </span>
                       </div>
@@ -1525,10 +1542,10 @@ export default function ArchitectureWorkspace({
                         </button>
                       </div>
                     </div>
-                    <h4 className="text-base font-bold text-slate-950 mt-2">
+                    <h4 className="text-base font-bold text-ink mt-2">
                       {selectedMapping?.serviceName || selectedNode.name}
                     </h4>
-                    <p className="text-[10px] text-slate-400 font-semibold uppercase mt-0.5 tracking-wider">
+                    <p className="text-[10px] text-ink-faint font-semibold uppercase mt-0.5 tracking-wider">
                       Generic Component: {selectedNode.name}
                     </p>
 
@@ -1537,12 +1554,12 @@ export default function ArchitectureWorkspace({
                     </div>
 
                     {explanationMode === "technical" && (
-                      <p className="text-xs text-slate-600 mt-2 leading-relaxed">{selectedNode.description}</p>
+                      <p className="text-xs text-ink-muted mt-2 leading-relaxed">{selectedNode.description}</p>
                     )}
 
                     {isEditing && (
-                      <div className="space-y-1.5 bg-white border border-slate-200 rounded-2xl p-3 mt-3 shadow-sm">
-                        <label className="text-[9px] font-black text-slate-500 uppercase tracking-widest block">
+                      <div className="space-y-1.5 bg-white border border-line rounded-2xl p-3 mt-3 shadow-sm">
+                        <label className="text-[9px] font-black text-ink-muted uppercase tracking-widest block">
                           Component Override Rationale
                         </label>
                         <textarea
@@ -1550,7 +1567,7 @@ export default function ArchitectureWorkspace({
                           placeholder="Why are manual overrides or adjustments needed?"
                           rows={3}
                           onChange={(e) => handleUpdateComponentReasoning(selectedNode.id, e.target.value)}
-                          className="w-full text-xs text-slate-800 bg-slate-50 border border-slate-200 rounded-xl p-2 focus:outline-none focus:ring-1 focus:ring-cyan-500 leading-relaxed shadow-inner"
+                          className="w-full text-xs text-ink bg-paper border border-line rounded-xl p-2 focus:outline-none focus:ring-1 focus:ring-accent leading-relaxed shadow-inner"
                         />
                       </div>
                     )}
@@ -1558,12 +1575,12 @@ export default function ArchitectureWorkspace({
 
                   {selectedMapping?.costEstimate && (
                     <div>
-                      <h5 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Estimated Cost</h5>
-                      <div className="mt-2 rounded-2xl border border-emerald-100 bg-emerald-50/40 p-3.5">
-                        <div className="text-sm font-extrabold text-emerald-950">
+                      <h5 className="text-xs font-bold text-ink-muted uppercase tracking-wider">Estimated Cost</h5>
+                      <div className="mt-2 rounded-2xl border border-success/25 bg-success-soft/40 p-3.5">
+                        <div className="text-sm font-extrabold text-success">
                           ${selectedMapping.costEstimate.min} - ${selectedMapping.costEstimate.max}/mo
                         </div>
-                        <div className="text-[11px] text-emerald-900 font-medium leading-normal mt-1 italic">
+                        <div className="text-[11px] text-success font-medium leading-normal mt-1 italic">
                           Assumptions: {selectedMapping.costEstimate.assumptions}
                         </div>
                       </div>
@@ -1573,10 +1590,10 @@ export default function ArchitectureWorkspace({
                   {/* Expandable LLD Configs section -- stays available while editing regardless
                       of explanation mode, since swapping/tuning config is an editing action. */}
                   {lldData && (explanationMode === "technical" || isEditing) && (
-                    <div className="border-t border-slate-200/80 pt-4">
+                    <div className="border-t border-line/80 pt-4">
                       <button
                         onClick={() => setIsLldExpanded(!isLldExpanded)}
-                        className="flex w-full items-center justify-between py-2 text-xs font-bold text-slate-700 uppercase tracking-wider hover:text-slate-950 transition"
+                        className="flex w-full items-center justify-between py-2 text-xs font-bold text-ink-muted uppercase tracking-wider hover:text-ink transition"
                       >
                         <span>⚙️ Technical Details (LLD)</span>
                         <span>{isLldExpanded ? "▲" : "▼"}</span>
@@ -1590,10 +1607,10 @@ export default function ArchitectureWorkspace({
                             return (
                               <div
                                 key={key}
-                                className="rounded-2xl border border-slate-200 bg-white p-3 space-y-2.5 shadow-sm"
+                                className="rounded-2xl border border-line bg-white p-3 space-y-2.5 shadow-sm"
                               >
                                 <div className="flex justify-between items-center gap-2">
-                                  <span className="font-mono text-[10px] font-bold text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded">
+                                  <span className="font-mono text-[10px] font-bold text-ink-muted bg-paper px-1.5 py-0.5 rounded">
                                     {key}
                                   </span>
                                   {isEditing ? (
@@ -1603,10 +1620,10 @@ export default function ArchitectureWorkspace({
                                       onChange={(e) =>
                                         handleUpdateLldConfig(selectedNode.id, activeProvider, key, e.target.value)
                                       }
-                                      className="font-mono text-[10px] font-bold text-slate-800 bg-slate-50 border border-slate-200 px-1.5 py-0.5 rounded text-right focus:outline-none focus:ring-1 focus:ring-cyan-500 w-32"
+                                      className="font-mono text-[10px] font-bold text-ink bg-paper border border-line px-1.5 py-0.5 rounded text-right focus:outline-none focus:ring-1 focus:ring-accent w-32"
                                     />
                                   ) : (
-                                    <span className="font-mono text-[10px] font-bold text-slate-800 bg-slate-100 px-1.5 py-0.5 rounded text-right">
+                                    <span className="font-mono text-[10px] font-bold text-ink bg-paper px-1.5 py-0.5 rounded text-right">
                                       {val}
                                     </span>
                                   )}
@@ -1619,11 +1636,11 @@ export default function ArchitectureWorkspace({
                                     onChange={(e) =>
                                       handleUpdateLldReasoning(selectedNode.id, activeProvider, key, e.target.value)
                                     }
-                                    className="w-full text-[10px] text-slate-600 bg-slate-50 border border-slate-200 rounded-lg p-1.5 focus:outline-none focus:ring-1 focus:ring-cyan-500 leading-normal"
+                                    className="w-full text-[10px] text-ink-muted bg-paper border border-line rounded-lg p-1.5 focus:outline-none focus:ring-1 focus:ring-accent leading-normal"
                                   />
                                 ) : (
                                   note && (
-                                    <p className="text-[10px] text-slate-500 font-medium leading-relaxed italic">
+                                    <p className="text-[10px] text-ink-muted font-medium leading-relaxed italic">
                                       {note}
                                     </p>
                                   )
@@ -1636,9 +1653,9 @@ export default function ArchitectureWorkspace({
                     </div>
                   )}
 
-                  {selectedMapping?.alternatives && selectedMapping.alternatives.length > 0 && (
+                  {selectedMapping?.alternatives && selectedMapping.alternatives.length > 0 && (explanationMode === "technical" || isEditing) && (
                     <div>
-                      <h5 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Alternatives Considered</h5>
+                      <h5 className="text-xs font-bold text-ink-muted uppercase tracking-wider">Alternatives Considered</h5>
 
                       {isEditing && (
                         <input
@@ -1646,7 +1663,7 @@ export default function ArchitectureWorkspace({
                           value={swapReason}
                           onChange={(e) => setSwapReason(e.target.value)}
                           placeholder="Optional: reason for switching service..."
-                          className="mt-2 w-full bg-white border border-slate-200 rounded-xl px-3 py-1.5 text-xs font-medium focus:outline-none focus:ring-1 focus:ring-cyan-500"
+                          className="mt-2 w-full bg-white border border-line rounded-xl px-3 py-1.5 text-xs font-medium focus:outline-none focus:ring-1 focus:ring-accent"
                         />
                       )}
 
@@ -1654,25 +1671,25 @@ export default function ArchitectureWorkspace({
                         {selectedMapping.alternatives.map((alt, idx) => (
                           <div
                             key={idx}
-                            className="rounded-2xl border border-slate-200 bg-white p-3.5 text-xs text-slate-800 leading-normal"
+                            className="rounded-2xl border border-line bg-white p-3.5 text-xs text-ink leading-normal"
                           >
                             <div className="flex items-start justify-between gap-2">
-                              <div className="font-bold text-slate-950">Alternative: {alt.serviceName}</div>
+                              <div className="font-bold text-ink">Alternative: {alt.serviceName}</div>
                               {isEditing && (
                                 <button
                                   type="button"
                                   disabled={!alt.costEstimate}
                                   onClick={() => handleSwapService(selectedNode.id, activeProvider, idx)}
                                   title={!alt.costEstimate ? "Cost data unavailable for this alternative on this architecture version." : undefined}
-                                  className="shrink-0 rounded-lg bg-cyan-600 hover:bg-cyan-700 text-white px-2 py-1 text-[9px] font-extrabold uppercase tracking-wide transition shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
+                                  className="shrink-0 rounded-lg bg-accent hover:bg-accent-ink text-white px-2 py-1 text-[9px] font-extrabold uppercase tracking-wide transition shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
                                 >
                                   Switch to this
                                 </button>
                               )}
                             </div>
-                            <div className="text-slate-600 mt-1 font-medium leading-relaxed">{alt.reason}</div>
+                            <div className="text-ink-muted mt-1 font-medium leading-relaxed">{alt.reason}</div>
                             {alt.costEstimate && (
-                              <div className="text-[11px] text-emerald-700 font-bold mt-1.5">
+                              <div className="text-[11px] text-success font-bold mt-1.5">
                                 ${alt.costEstimate.min} - ${alt.costEstimate.max}/mo
                               </div>
                             )}
@@ -1684,18 +1701,18 @@ export default function ArchitectureWorkspace({
 
                   {explanationMode === "technical" && (
                     <div>
-                      <h5 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Architect Rationale</h5>
-                      <div className="mt-2 rounded-2xl border border-cyan-100 bg-cyan-50/30 p-3.5 text-xs text-cyan-950 font-medium leading-relaxed">
+                      <h5 className="text-xs font-bold text-ink-muted uppercase tracking-wider">Architect Rationale</h5>
+                      <div className="mt-2 rounded-2xl border border-accent/25 bg-accent-soft/30 p-3.5 text-xs text-accent-ink font-medium leading-relaxed">
                         {selectedNode.reasoning}
                       </div>
                     </div>
                   )}
                 </div>
               ) : (
-                <div className="flex-1 flex flex-col justify-center items-center text-center text-slate-400">
+                <div className="flex-1 flex flex-col justify-center items-center text-center text-ink-faint">
                   <span className="text-3xl">👈</span>
-                  <h4 className="font-semibold text-sm mt-3 text-slate-700">Select a Component</h4>
-                  <p className="text-xs text-slate-500 max-w-[220px] mt-1">
+                  <h4 className="font-semibold text-sm mt-3 text-ink-muted">Select a Component</h4>
+                  <p className="text-xs text-ink-muted max-w-[220px] mt-1">
                     Click elements in the diagram to inspect rationale, mapping, alternatives, and cost estimates.
                   </p>
                 </div>
@@ -1713,21 +1730,21 @@ export default function ArchitectureWorkspace({
                     <span className="rounded-full bg-accent px-3 py-1 text-xs font-extrabold text-white uppercase tracking-wider">
                       ★ Recommended Provider
                     </span>
-                    <span className="rounded-full bg-slate-950 px-3 py-1 text-xs font-extrabold text-white uppercase tracking-wider">
+                    <span className="rounded-full bg-ink px-3 py-1 text-xs font-extrabold text-white uppercase tracking-wider">
                       {recommendation.recommendedProvider}
                     </span>
                   </div>
-                  <h4 className="text-lg font-black text-slate-950 mt-3">Architect&apos;s Overall Selection Rationale</h4>
-                  <p className="text-sm text-slate-700 leading-relaxed mt-2 max-w-4xl">
+                  <h4 className="text-lg font-black text-ink mt-3">Architect&apos;s Overall Selection Rationale</h4>
+                  <p className="text-sm text-ink-muted leading-relaxed mt-2 max-w-4xl">
                     {recommendation.rationale}
                   </p>
                 </div>
               </div>
 
               {recommendation.keyTradeoffs && recommendation.keyTradeoffs.length > 0 && (
-                <div className="mt-5 border-t border-slate-200/60 pt-4">
-                  <h5 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Key Trade-offs Considered</h5>
-                  <ul className="mt-2.5 space-y-2 text-xs text-slate-700 font-medium">
+                <div className="mt-5 border-t border-line/60 pt-4">
+                  <h5 className="text-xs font-bold text-ink-muted uppercase tracking-wider">Key Trade-offs Considered</h5>
+                  <ul className="mt-2.5 space-y-2 text-xs text-ink-muted font-medium">
                     {recommendation.keyTradeoffs.map((t, idx) => (
                       <li key={idx} className="flex gap-2.5">
                         <span className="text-accent font-extrabold">▪</span>
@@ -1741,32 +1758,32 @@ export default function ArchitectureWorkspace({
 
             {/* Side-by-Side Comparison Table -- first column stays pinned while the provider
                 columns scroll horizontally, so K8s/Private never silently disappear off-screen. */}
-            <div className="rounded-[2rem] border border-slate-200 bg-white shadow-sm overflow-hidden">
+            <div className="rounded-[2rem] border border-line bg-white shadow-sm overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-left border-collapse table-fixed min-w-[1300px]">
                   <thead>
-                    <tr className="bg-slate-50 border-b border-slate-200">
-                      <th className="sticky left-0 z-10 bg-slate-50 p-4 text-xs font-bold text-slate-500 uppercase tracking-wider w-[180px] border-r border-line">
+                    <tr className="bg-paper border-b border-line">
+                      <th className="sticky left-0 z-10 bg-paper p-4 text-xs font-bold text-ink-muted uppercase tracking-wider w-[180px] border-r border-line">
                         Generic Component
                       </th>
-                      <th className="p-4 text-xs font-bold text-slate-500 uppercase tracking-wider">
+                      <th className="p-4 text-xs font-bold text-ink-muted uppercase tracking-wider">
                         <span className="flex items-center gap-1.5"><Icon icon="logos:aws" width={16} height={16} /> Amazon Web Services</span>
                       </th>
-                      <th className="p-4 text-xs font-bold text-slate-500 uppercase tracking-wider">
+                      <th className="p-4 text-xs font-bold text-ink-muted uppercase tracking-wider">
                         <span className="flex items-center gap-1.5"><Icon icon="logos:microsoft-azure" width={16} height={16} /> Microsoft Azure</span>
                       </th>
-                      <th className="p-4 text-xs font-bold text-slate-500 uppercase tracking-wider">
+                      <th className="p-4 text-xs font-bold text-ink-muted uppercase tracking-wider">
                         <span className="flex items-center gap-1.5"><Icon icon="logos:google-cloud" width={16} height={16} /> Google Cloud</span>
                       </th>
-                      <th className="p-4 text-xs font-bold text-slate-500 uppercase tracking-wider">
+                      <th className="p-4 text-xs font-bold text-ink-muted uppercase tracking-wider">
                         <span className="flex items-center gap-1.5"><Icon icon="mdi:kubernetes" width={16} height={16} className="text-k8s" /> Kubernetes</span>
                       </th>
-                      <th className="p-4 text-xs font-bold text-slate-500 uppercase tracking-wider">
+                      <th className="p-4 text-xs font-bold text-ink-muted uppercase tracking-wider">
                         <span className="flex items-center gap-1.5"><Icon icon="mdi:server" width={16} height={16} className="text-private" /> Private Cloud</span>
                       </th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100 text-xs font-medium text-slate-700">
+                  <tbody className="divide-y divide-line text-xs font-medium text-ink-muted">
                     {architecture.hld.components.map((c) => {
                       const awsM = getMappingForProvider(c, "aws");
                       const azureM = getMappingForProvider(c, "azure");
@@ -1775,25 +1792,25 @@ export default function ArchitectureWorkspace({
                       const privateM = getMappingForProvider(c, "private");
 
                       return (
-                        <tr key={c.id} className="hover:bg-slate-50/40">
+                        <tr key={c.id} className="hover:bg-paper/40">
                           {/* Component name */}
                           <td className="sticky left-0 z-10 bg-white p-4 align-top border-r border-line">
-                            <span className="font-extrabold text-slate-900 block">{c.name}</span>
-                            <span className="text-[10px] text-slate-400 font-semibold block mt-0.5 uppercase tracking-wide">
+                            <span className="font-extrabold text-ink block">{c.name}</span>
+                            <span className="text-[10px] text-ink-faint font-semibold block mt-0.5 uppercase tracking-wide">
                               {c.type}
                             </span>
                           </td>
 
                           {/* AWS Column */}
                           <td className="p-4 align-top space-y-1">
-                            <div className="font-extrabold text-slate-900">{awsM?.serviceName || "—"}</div>
+                            <div className="font-extrabold text-ink">{awsM?.serviceName || "—"}</div>
                             {awsM?.costEstimate && (
-                              <div className="text-[11px] text-emerald-700 font-bold">
+                              <div className="text-[11px] text-success font-bold">
                                 ${awsM.costEstimate.min} - ${awsM.costEstimate.max}/mo
                               </div>
                             )}
-                            {awsM?.costEstimate.assumptions && (
-                              <div className="text-[10px] text-slate-400 leading-normal font-medium">
+                            {awsM?.costEstimate?.assumptions && (
+                              <div className="text-[10px] text-ink-faint leading-normal font-medium">
                                 {awsM.costEstimate.assumptions}
                               </div>
                             )}
@@ -1801,14 +1818,14 @@ export default function ArchitectureWorkspace({
 
                           {/* Azure Column */}
                           <td className="p-4 align-top space-y-1">
-                            <div className="font-extrabold text-slate-900">{azureM?.serviceName || "—"}</div>
+                            <div className="font-extrabold text-ink">{azureM?.serviceName || "—"}</div>
                             {azureM?.costEstimate && (
-                              <div className="text-[11px] text-emerald-700 font-bold">
+                              <div className="text-[11px] text-success font-bold">
                                 ${azureM.costEstimate.min} - ${azureM.costEstimate.max}/mo
                               </div>
                             )}
-                            {azureM?.costEstimate.assumptions && (
-                              <div className="text-[10px] text-slate-400 leading-normal font-medium">
+                            {azureM?.costEstimate?.assumptions && (
+                              <div className="text-[10px] text-ink-faint leading-normal font-medium">
                                 {azureM.costEstimate.assumptions}
                               </div>
                             )}
@@ -1816,14 +1833,14 @@ export default function ArchitectureWorkspace({
 
                           {/* GCP Column */}
                           <td className="p-4 align-top space-y-1">
-                            <div className="font-extrabold text-slate-900">{gcpM?.serviceName || "—"}</div>
+                            <div className="font-extrabold text-ink">{gcpM?.serviceName || "—"}</div>
                             {gcpM?.costEstimate && (
-                              <div className="text-[11px] text-emerald-700 font-bold">
+                              <div className="text-[11px] text-success font-bold">
                                 ${gcpM.costEstimate.min} - ${gcpM.costEstimate.max}/mo
                               </div>
                             )}
-                            {gcpM?.costEstimate.assumptions && (
-                              <div className="text-[10px] text-slate-400 leading-normal font-medium">
+                            {gcpM?.costEstimate?.assumptions && (
+                              <div className="text-[10px] text-ink-faint leading-normal font-medium">
                                 {gcpM.costEstimate.assumptions}
                               </div>
                             )}
@@ -1831,14 +1848,14 @@ export default function ArchitectureWorkspace({
 
                           {/* Kubernetes Column */}
                           <td className="p-4 align-top space-y-1">
-                            <div className="font-extrabold text-slate-900">{k8sM?.serviceName || "—"}</div>
+                            <div className="font-extrabold text-ink">{k8sM?.serviceName || "—"}</div>
                             {k8sM?.costEstimate && (
-                              <div className="text-[11px] text-emerald-700 font-bold">
+                              <div className="text-[11px] text-success font-bold">
                                 ${k8sM.costEstimate.min} - ${k8sM.costEstimate.max}/mo
                               </div>
                             )}
-                            {k8sM?.costEstimate.assumptions && (
-                              <div className="text-[10px] text-slate-400 leading-normal font-medium">
+                            {k8sM?.costEstimate?.assumptions && (
+                              <div className="text-[10px] text-ink-faint leading-normal font-medium">
                                 {k8sM.costEstimate.assumptions}
                               </div>
                             )}
@@ -1846,14 +1863,14 @@ export default function ArchitectureWorkspace({
 
                           {/* Private Cloud Column */}
                           <td className="p-4 align-top space-y-1">
-                            <div className="font-extrabold text-slate-900">{privateM?.serviceName || "—"}</div>
+                            <div className="font-extrabold text-ink">{privateM?.serviceName || "—"}</div>
                             {privateM?.costEstimate && (
-                              <div className="text-[11px] text-emerald-700 font-bold">
+                              <div className="text-[11px] text-success font-bold">
                                 ${privateM.costEstimate.min} - ${privateM.costEstimate.max}/mo
                               </div>
                             )}
-                            {privateM?.costEstimate.assumptions && (
-                              <div className="text-[10px] text-slate-400 leading-normal font-medium">
+                            {privateM?.costEstimate?.assumptions && (
+                              <div className="text-[10px] text-ink-faint leading-normal font-medium">
                                 {privateM.costEstimate.assumptions}
                               </div>
                             )}
@@ -1863,43 +1880,43 @@ export default function ArchitectureWorkspace({
                     })}
 
                     {/* Totals Row */}
-                    <tr className="bg-slate-50/80 font-black border-t-2 border-slate-200">
-                      <td className="sticky left-0 z-10 bg-slate-50 p-4 text-xs text-slate-900 border-r border-line">Total Estimated Cost</td>
-                      <td className="p-4 text-xs text-emerald-800 font-extrabold">
+                    <tr className="bg-paper/80 font-black border-t-2 border-line">
+                      <td className="sticky left-0 z-10 bg-paper p-4 text-xs text-ink border-r border-line">Total Estimated Cost</td>
+                      <td className="p-4 text-xs text-success font-extrabold">
                         <div>${awsTotal.min} - ${awsTotal.max}/mo</div>
                         {getProviderCostDeltaString("aws") && (
-                          <div className={`text-[10px] font-bold ${(architecture.reasoning.diff?.costDelta?.aws?.min || 0) < 0 ? "text-emerald-700" : "text-amber-700"}`}>
+                          <div className={`text-[10px] font-bold ${(architecture.reasoning.diff?.costDelta?.aws?.min || 0) < 0 ? "text-success" : "text-warning"}`}>
                             {getProviderCostDeltaString("aws")}
                           </div>
                         )}
                       </td>
-                      <td className="p-4 text-xs text-emerald-800 font-extrabold">
+                      <td className="p-4 text-xs text-success font-extrabold">
                         <div>${azureTotal.min} - ${azureTotal.max}/mo</div>
                         {getProviderCostDeltaString("azure") && (
-                          <div className={`text-[10px] font-bold ${(architecture.reasoning.diff?.costDelta?.azure?.min || 0) < 0 ? "text-emerald-700" : "text-amber-700"}`}>
+                          <div className={`text-[10px] font-bold ${(architecture.reasoning.diff?.costDelta?.azure?.min || 0) < 0 ? "text-success" : "text-warning"}`}>
                             {getProviderCostDeltaString("azure")}
                           </div>
                         )}
                       </td>
-                      <td className="p-4 text-xs text-emerald-800 font-extrabold">
+                      <td className="p-4 text-xs text-success font-extrabold">
                         <div>${gcpTotal.min} - ${gcpTotal.max}/mo</div>
                         {getProviderCostDeltaString("gcp") && (
-                          <div className={`text-[10px] font-bold ${(architecture.reasoning.diff?.costDelta?.gcp?.min || 0) < 0 ? "text-emerald-700" : "text-amber-700"}`}>
+                          <div className={`text-[10px] font-bold ${(architecture.reasoning.diff?.costDelta?.gcp?.min || 0) < 0 ? "text-success" : "text-warning"}`}>
                             {getProviderCostDeltaString("gcp")}
                           </div>
                         )}
                       </td>
-                      <td className="p-4 text-xs text-emerald-800 font-extrabold">
+                      <td className="p-4 text-xs text-success font-extrabold">
                         <div>${k8sTotal.min} - ${k8sTotal.max}/mo</div>
                       </td>
-                      <td className="p-4 text-xs text-emerald-800 font-extrabold">
+                      <td className="p-4 text-xs text-success font-extrabold">
                         <div>${privateTotal.min} - ${privateTotal.max}/mo</div>
                       </td>
                     </tr>
                   </tbody>
                 </table>
               </div>
-              <div className="flex items-center gap-1.5 border-t border-line bg-slate-50 px-4 py-2 text-[10px] font-semibold text-ink-faint">
+              <div className="flex items-center gap-1.5 border-t border-line bg-paper px-4 py-2 text-[10px] font-semibold text-ink-faint">
                 <Icon icon="mdi:gesture-swipe-horizontal" width={13} height={13} />
                 Scroll horizontally to compare all 5 providers, including Kubernetes and Private Cloud
               </div>
