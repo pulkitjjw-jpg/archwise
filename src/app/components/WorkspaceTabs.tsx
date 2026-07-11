@@ -7,9 +7,16 @@ import ArchitectureWorkspace from "./ArchitectureWorkspace";
 interface WorkspaceTabsProps {
   projectId: string;
   isBrainstormComplete: boolean;
+  focusMode?: boolean;
+  onToggleFocusMode?: () => void;
 }
 
-export default function WorkspaceTabs({ projectId, isBrainstormComplete }: WorkspaceTabsProps) {
+export default function WorkspaceTabs({
+  projectId,
+  isBrainstormComplete,
+  focusMode,
+  onToggleFocusMode,
+}: WorkspaceTabsProps) {
   const [activeTab, setActiveTab] = useState<"requirements" | "hld">("requirements");
   const [requirements, setRequirements] = useState<any>(null);
   const [focusField, setFocusField] = useState<string | null>(null);
@@ -87,6 +94,8 @@ export default function WorkspaceTabs({ projectId, isBrainstormComplete }: Works
             requirements={requirements}
             onRequirementsChange={loadRequirements}
             onSwitchTab={handleSwitchTab}
+            focusMode={focusMode}
+            onToggleFocusMode={onToggleFocusMode}
           />
         )}
       </div>

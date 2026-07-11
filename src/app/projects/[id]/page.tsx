@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import ChatArea from "@/app/components/ChatArea";
-import WorkspaceTabs from "@/app/components/WorkspaceTabs";
+import ProjectWorkspaceGrid from "@/app/components/ProjectWorkspaceGrid";
 
 export const dynamic = "force-dynamic";
 
@@ -103,12 +103,10 @@ export default async function ProjectPage({ params }: ProjectPageProps) {
         </header>
 
         {/* Dynamic Workspace Layout */}
-        <div className="grid gap-8 lg:grid-cols-12">
-          {/* Chat Workspace (Left) -- narrower than the workspace panel: it's a plain message
-              thread, while the architecture side packs a 5-provider toggle, drawer, and
-              comparison table that need the room (see ArchitectureWorkspace's provider-row
-              overflow fix -- this ratio is the other half of that fix). */}
-          <div className="lg:col-span-4">
+        <ProjectWorkspaceGrid
+          projectId={project.id}
+          isBrainstormComplete={isBrainstormComplete}
+          chatArea={
             <ChatArea
               projectId={project.id}
               initialConversations={conversations.map((c) => ({
@@ -120,16 +118,8 @@ export default async function ProjectPage({ params }: ProjectPageProps) {
                 createdAt: c.createdAt,
               }))}
             />
-          </div>
-
-          {/* Architecture Workspace / Requirements Panel (Right) */}
-          <div className="lg:col-span-8">
-            <WorkspaceTabs
-              projectId={project.id}
-              isBrainstormComplete={isBrainstormComplete}
-            />
-          </div>
-        </div>
+          }
+        />
       </div>
     </main>
   );

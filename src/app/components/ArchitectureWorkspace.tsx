@@ -196,6 +196,8 @@ interface ArchitectureWorkspaceProps {
   requirements: any;
   onRequirementsChange: () => void;
   onSwitchTab: (tab: "requirements" | "hld", fieldToFocus?: string) => void;
+  focusMode?: boolean;
+  onToggleFocusMode?: () => void;
 }
 
 export default function ArchitectureWorkspace({
@@ -203,6 +205,8 @@ export default function ArchitectureWorkspace({
   requirements,
   onRequirementsChange,
   onSwitchTab,
+  focusMode,
+  onToggleFocusMode,
 }: ArchitectureWorkspaceProps) {
   const [architecture, setArchitecture] = useState<ArchitectureData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1012,6 +1016,22 @@ export default function ArchitectureWorkspace({
               Compare Clouds
             </button>
           </div>
+          {onToggleFocusMode && (
+            <span className="inline-flex items-center gap-1">
+              <button
+                onClick={onToggleFocusMode}
+                className={`flex h-9 w-9 items-center justify-center rounded-xl border shadow-sm transition ${
+                  focusMode
+                    ? "border-accent bg-accent text-white"
+                    : "border-line bg-paper text-ink-muted hover:text-ink"
+                }`}
+                aria-label={focusMode ? "Exit focus mode" : "Enter focus mode"}
+              >
+                <Icon icon={focusMode ? "mdi:arrow-collapse" : "mdi:arrow-expand"} width={16} height={16} />
+              </button>
+              <InfoTooltip text="Focus mode hides the discovery chat panel so this workspace can use the full page width — handy for the wide Compare Clouds table. Toggle it off to bring chat back." />
+            </span>
+          )}
           <div className="flex items-center gap-1 bg-paper px-3 py-1.5 rounded-xl border border-line shadow-sm">
             <span className="text-[10px] font-extrabold text-ink-muted uppercase tracking-wider">Version:</span>
             <select
@@ -2003,14 +2023,23 @@ export default function ArchitectureWorkspace({
                       <th className="sticky left-0 z-10 bg-paper p-4 text-xs font-bold text-ink-muted uppercase tracking-wider w-[180px] border-r border-line">
                         Generic Component
                       </th>
-                      <th className="p-4 text-xs font-bold text-ink-muted uppercase tracking-wider">
-                        <span className="flex items-center gap-1.5"><Icon icon="logos:aws" width={16} height={16} /> Amazon Web Services</span>
+                      <th className={`p-4 text-xs font-bold text-ink-muted uppercase tracking-wider ${recommendation.recommendedProvider === "aws" ? "bg-accent-soft/50" : ""}`}>
+                        <span className="flex items-center gap-1.5">
+                          <Icon icon="logos:aws" width={16} height={16} /> Amazon Web Services
+                          {recommendation.recommendedProvider === "aws" && <span title="Recommended">★</span>}
+                        </span>
                       </th>
-                      <th className="p-4 text-xs font-bold text-ink-muted uppercase tracking-wider">
-                        <span className="flex items-center gap-1.5"><Icon icon="logos:microsoft-azure" width={16} height={16} /> Microsoft Azure</span>
+                      <th className={`p-4 text-xs font-bold text-ink-muted uppercase tracking-wider ${recommendation.recommendedProvider === "azure" ? "bg-accent-soft/50" : ""}`}>
+                        <span className="flex items-center gap-1.5">
+                          <Icon icon="logos:microsoft-azure" width={16} height={16} /> Microsoft Azure
+                          {recommendation.recommendedProvider === "azure" && <span title="Recommended">★</span>}
+                        </span>
                       </th>
-                      <th className="p-4 text-xs font-bold text-ink-muted uppercase tracking-wider">
-                        <span className="flex items-center gap-1.5"><Icon icon="logos:google-cloud" width={16} height={16} /> Google Cloud</span>
+                      <th className={`p-4 text-xs font-bold text-ink-muted uppercase tracking-wider ${recommendation.recommendedProvider === "gcp" ? "bg-accent-soft/50" : ""}`}>
+                        <span className="flex items-center gap-1.5">
+                          <Icon icon="logos:google-cloud" width={16} height={16} /> Google Cloud
+                          {recommendation.recommendedProvider === "gcp" && <span title="Recommended">★</span>}
+                        </span>
                       </th>
                       <th className="p-4 text-xs font-bold text-ink-muted uppercase tracking-wider">
                         <span className="flex items-center gap-1.5"><Icon icon="mdi:kubernetes" width={16} height={16} className="text-k8s" /> Kubernetes</span>
@@ -2032,14 +2061,17 @@ export default function ArchitectureWorkspace({
                         <tr key={c.id} className="hover:bg-paper/40">
                           {/* Component name */}
                           <td className="sticky left-0 z-10 bg-white p-4 align-top border-r border-line">
-                            <span className="font-extrabold text-ink block">{c.name}</span>
+                            <span className="flex items-center gap-1.5 font-extrabold text-ink">
+                              {c.name}
+                              {c.reasoning && <InfoTooltip text={c.reasoning} />}
+                            </span>
                             <span className="text-[10px] text-ink-faint font-semibold block mt-0.5 uppercase tracking-wide">
                               {c.type}
                             </span>
                           </td>
 
                           {/* AWS Column */}
-                          <td className="p-4 align-top space-y-1">
+                          <td className={`p-4 align-top space-y-1 ${recommendation.recommendedProvider === "aws" ? "bg-accent-soft/20" : ""}`}>
                             <div className="font-extrabold text-ink">{awsM?.serviceName || "—"}</div>
                             {awsM?.costEstimate && (
                               <div className="text-[11px] text-success font-bold">
@@ -2054,7 +2086,7 @@ export default function ArchitectureWorkspace({
                           </td>
 
                           {/* Azure Column */}
-                          <td className="p-4 align-top space-y-1">
+                          <td className={`p-4 align-top space-y-1 ${recommendation.recommendedProvider === "azure" ? "bg-accent-soft/20" : ""}`}>
                             <div className="font-extrabold text-ink">{azureM?.serviceName || "—"}</div>
                             {azureM?.costEstimate && (
                               <div className="text-[11px] text-success font-bold">
@@ -2069,7 +2101,7 @@ export default function ArchitectureWorkspace({
                           </td>
 
                           {/* GCP Column */}
-                          <td className="p-4 align-top space-y-1">
+                          <td className={`p-4 align-top space-y-1 ${recommendation.recommendedProvider === "gcp" ? "bg-accent-soft/20" : ""}`}>
                             <div className="font-extrabold text-ink">{gcpM?.serviceName || "—"}</div>
                             {gcpM?.costEstimate && (
                               <div className="text-[11px] text-success font-bold">
@@ -2119,7 +2151,7 @@ export default function ArchitectureWorkspace({
                     {/* Totals Row */}
                     <tr className="bg-paper/80 font-black border-t-2 border-line">
                       <td className="sticky left-0 z-10 bg-paper p-4 text-xs text-ink border-r border-line">Total Estimated Cost</td>
-                      <td className="p-4 text-xs text-success font-extrabold">
+                      <td className={`p-4 text-xs text-success font-extrabold ${recommendation.recommendedProvider === "aws" ? "bg-accent-soft/20" : ""}`}>
                         <div>${awsTotal.min} - ${awsTotal.max}/mo</div>
                         {getProviderCostDeltaString("aws") && (
                           <div className={`text-[10px] font-bold ${(architecture.reasoning.diff?.costDelta?.aws?.min || 0) < 0 ? "text-success" : "text-warning"}`}>
@@ -2127,7 +2159,7 @@ export default function ArchitectureWorkspace({
                           </div>
                         )}
                       </td>
-                      <td className="p-4 text-xs text-success font-extrabold">
+                      <td className={`p-4 text-xs text-success font-extrabold ${recommendation.recommendedProvider === "azure" ? "bg-accent-soft/20" : ""}`}>
                         <div>${azureTotal.min} - ${azureTotal.max}/mo</div>
                         {getProviderCostDeltaString("azure") && (
                           <div className={`text-[10px] font-bold ${(architecture.reasoning.diff?.costDelta?.azure?.min || 0) < 0 ? "text-success" : "text-warning"}`}>
@@ -2135,7 +2167,7 @@ export default function ArchitectureWorkspace({
                           </div>
                         )}
                       </td>
-                      <td className="p-4 text-xs text-success font-extrabold">
+                      <td className={`p-4 text-xs text-success font-extrabold ${recommendation.recommendedProvider === "gcp" ? "bg-accent-soft/20" : ""}`}>
                         <div>${gcpTotal.min} - ${gcpTotal.max}/mo</div>
                         {getProviderCostDeltaString("gcp") && (
                           <div className={`text-[10px] font-bold ${(architecture.reasoning.diff?.costDelta?.gcp?.min || 0) < 0 ? "text-success" : "text-warning"}`}>
