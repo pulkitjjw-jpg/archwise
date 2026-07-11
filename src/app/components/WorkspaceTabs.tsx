@@ -79,6 +79,7 @@ export default function WorkspaceTabs({ projectId, isBrainstormComplete }: Works
             onSaveComplete={loadRequirements} // Update local state when requirements are modified
             focusField={focusField}
             clearFocusField={() => setFocusField(null)}
+            onGoToArchitecture={() => setActiveTab("hld")}
           />
         ) : (
           <ArchitectureWorkspace

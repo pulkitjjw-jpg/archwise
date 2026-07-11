@@ -1,6 +1,28 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import InfoTooltip from "./InfoTooltip";
+
+// Plain-language explanations of what each field actually means -- static, since the meaning of
+// "Read/Write Pattern" doesn't change per project (only the suggested values do, which come from
+// the LLM). Written for someone with zero architecture background.
+const FIELD_EXPLANATIONS: Record<string, string> = {
+  expectedScale:
+    "How many people will use this and how often. Bigger numbers mean the system needs to handle more simultaneous requests without slowing down.",
+  readWritePattern:
+    "Whether your app mostly saves new data (writes) or mostly looks up existing data (reads). This changes what kind of database setup works best.",
+  dataNature:
+    "What kind of information you're storing — structured records like accounts, or files like photos and PDFs. This affects which storage technology fits.",
+  latencySensitivity:
+    "How fast responses need to feel to users. A live chat needs near-instant responses; a monthly report can take longer.",
+  budget: "Your rough monthly spending ceiling for cloud infrastructure — steers us toward cheaper or more premium services.",
+  teamMaturity:
+    "How much cloud/ops experience your team has. Less experience steers us toward simpler, more managed services that need less babysitting.",
+  compliance:
+    "Any legal or industry rules your data has to follow (e.g. healthcare or payment regulations). This can require extra security components.",
+  functional:
+    "The concrete features your product needs. Each one may translate into specific infrastructure — e.g. \"SMS reminders\" needs a messaging integration.",
+};
 
 type RequirementsData = {
   functional: string[];
@@ -32,6 +54,7 @@ interface RequirementsPanelProps {
   onSaveComplete?: () => void;
   focusField?: string | null;
   clearFocusField?: () => void;
+  onGoToArchitecture?: () => void;
 }
 
 export default function RequirementsPanel({
@@ -40,6 +63,7 @@ export default function RequirementsPanel({
   onSaveComplete,
   focusField,
   clearFocusField,
+  onGoToArchitecture,
 }: RequirementsPanelProps) {
   const [requirements, setRequirements] = useState<RequirementsData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -60,8 +84,10 @@ export default function RequirementsPanel({
   });
 
   // AI-suggested chip options per field -- fetched fresh on entering edit mode so they reflect
-  // whatever's actually specified so far, not stale from a previous session.
-  type FieldSuggestions = Partial<Record<keyof typeof editedNFR | "functional", string[]>>;
+  // whatever's actually specified so far, not stale from a previous session. Each suggestion
+  // carries a short "why" grounded in the actual project context, shown via an info tooltip.
+  type Suggestion = { value: string; why: string };
+  type FieldSuggestions = Partial<Record<keyof typeof editedNFR | "functional", Suggestion[]>>;
   const [fieldSuggestions, setFieldSuggestions] = useState<FieldSuggestions>({});
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
 
@@ -209,7 +235,10 @@ export default function RequirementsPanel({
       const suggestions = fieldSuggestions[fieldName] || [];
       return (
         <div className="space-y-1.5">
-          <label className="text-xs font-semibold text-ink-muted uppercase tracking-wider">{label}</label>
+          <label className="flex items-center gap-1.5 text-xs font-semibold text-ink-muted uppercase tracking-wider">
+            {label}
+            {FIELD_EXPLANATIONS[fieldName] && <InfoTooltip text={FIELD_EXPLANATIONS[fieldName]} />}
+          </label>
           <input
             id={`nfr-input-${fieldName}`}
             type="text"
@@ -227,15 +256,19 @@ export default function RequirementsPanel({
           ) : suggestions.length > 0 ? (
             <div className="flex flex-wrap gap-1">
               {suggestions.map((s, idx) => (
-                <button
+                <span
                   key={idx}
-                  type="button"
-                  onClick={() => applySuggestion(fieldName, s)}
-                  title={s}
-                  className="max-w-full truncate rounded-full border border-accent/25 bg-accent-soft px-2 py-0.5 text-[10px] font-medium text-accent-ink transition hover:border-accent hover:bg-accent/15"
+                  className="inline-flex max-w-full items-center gap-1 rounded-full border border-accent/25 bg-accent-soft py-0.5 pl-2 pr-1.5 transition hover:border-accent hover:bg-accent/15"
                 >
-                  {s}
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => applySuggestion(fieldName, s.value)}
+                    className="max-w-[220px] truncate text-[10px] font-medium text-accent-ink"
+                  >
+                    {s.value}
+                  </button>
+                  {s.why && <InfoTooltip text={`Why suggested: ${s.why}`} />}
+                </span>
               ))}
             </div>
           ) : null}
@@ -245,7 +278,10 @@ export default function RequirementsPanel({
 
     return (
       <div className="rounded-2xl border border-line bg-white p-4 shadow-sm">
-        <dt className="text-xs font-semibold text-ink-faint uppercase tracking-wider">{label}</dt>
+        <dt className="flex items-center gap-1.5 text-xs font-semibold text-ink-faint uppercase tracking-wider">
+          {label}
+          {FIELD_EXPLANATIONS[fieldName] && <InfoTooltip text={FIELD_EXPLANATIONS[fieldName]} />}
+        </dt>
         <dd className="mt-2 text-sm">
           {isNotSpecified ? (
             <span className="flex items-center justify-between text-ink-faint italic">
@@ -335,8 +371,9 @@ export default function RequirementsPanel({
       <div className="mt-6 flex-1 space-y-6">
         {/* Functional Requirements */}
         <div>
-          <h4 className="text-sm font-bold text-ink mb-3 flex items-center gap-2">
+          <h4 className="mb-3 flex items-center gap-2 text-sm font-bold text-ink">
             <span>🚀</span> Functional Capabilities
+            <InfoTooltip text={FIELD_EXPLANATIONS.functional} />
           </h4>
           {editMode ? (
             <div className="space-y-1.5">
@@ -361,15 +398,19 @@ export default function RequirementsPanel({
                   </span>
                   <div className="mt-1 flex flex-wrap gap-1">
                     {(fieldSuggestions.functional || []).map((s, idx) => (
-                      <button
+                      <span
                         key={idx}
-                        type="button"
-                        onClick={() => applyFunctionalSuggestion(s)}
-                        title={s}
-                        className="max-w-full truncate rounded-full border border-accent/25 bg-accent-soft px-2 py-0.5 text-[10px] font-medium text-accent-ink transition hover:border-accent hover:bg-accent/15"
+                        className="inline-flex max-w-full items-center gap-1 rounded-full border border-accent/25 bg-accent-soft py-0.5 pl-2 pr-1.5 transition hover:border-accent hover:bg-accent/15"
                       >
-                        + {s}
-                      </button>
+                        <button
+                          type="button"
+                          onClick={() => applyFunctionalSuggestion(s.value)}
+                          className="max-w-[220px] truncate text-[10px] font-medium text-accent-ink"
+                        >
+                          + {s.value}
+                        </button>
+                        {s.why && <InfoTooltip text={`Why suggested: ${s.why}`} />}
+                      </span>
                     ))}
                   </div>
                 </div>
@@ -391,6 +432,7 @@ export default function RequirementsPanel({
         <div>
           <h4 className="text-sm font-bold text-ink mb-4 flex items-center gap-2">
             <span>⚙️</span> Architectural Constraints (NFRs)
+            <InfoTooltip text="Non-functional requirements: constraints on HOW the system behaves (speed, cost, scale) rather than WHAT it does. These drive most of the technical decisions in your generated architecture." />
           </h4>
           <div className="grid gap-4 md:grid-cols-2">
             {renderNFRField("Expected Traffic / Scale", requirements.nonFunctional.expectedScale, "expectedScale")}
@@ -425,11 +467,15 @@ export default function RequirementsPanel({
       {/* Workspace Footer Action */}
       {!editMode && (
         <div className="mt-8 border-t border-line pt-6">
+          <div className="mb-2 flex items-center justify-center gap-1.5 text-center text-[11px] text-ink-faint">
+            <span>Takes you to the Architecture tab, where you can generate or review the design</span>
+            <InfoTooltip text="Requirements themselves aren't consumed here — generation happens on the Architecture Diagram (HLD) tab, using whatever is currently saved above." />
+          </div>
           <button
             className="flex w-full items-center justify-center rounded-2xl bg-accent px-5 py-3.5 text-sm font-semibold text-white shadow-md transition-all hover:bg-accent-ink active:scale-[0.98]"
-            onClick={() => alert("HLD Generation (Step 4) will be implemented next!")}
+            onClick={() => onGoToArchitecture?.()}
           >
-            Synthesize HLD Architecture Design ➜
+            Go to Architecture Diagram ➜
           </button>
         </div>
       )}

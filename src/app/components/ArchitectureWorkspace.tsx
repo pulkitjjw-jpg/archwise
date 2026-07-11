@@ -8,6 +8,7 @@ import { runLldRulesEngine } from "@/lib/lld-rules";
 import { validateArchitectureLayout, getProviderMaturityWarning } from "@/lib/validation";
 import { resolveServiceIcon } from "@/lib/service-icons";
 import { getPlainDescription } from "@/lib/component-descriptions";
+import InfoTooltip from "./InfoTooltip";
 
 type CloudProviderKey = "aws" | "azure" | "gcp" | "kubernetes" | "private";
 
@@ -941,6 +942,7 @@ export default function ArchitectureWorkspace({
                 </option>
               ))}
             </select>
+            <InfoTooltip text="Every regenerate or manual save creates a new version instead of overwriting — older versions stay here, read-only, so you can always see what the design looked like before a change." />
           </div>
 
           {/* Manual Editing Toggles */}
@@ -967,12 +969,15 @@ export default function ArchitectureWorkspace({
               </div>
             ) : (
               architecture.version === versionList[0]?.version && (
-                <button
-                  onClick={handleEnterEditMode}
-                  className="rounded-xl bg-ink hover:bg-ink/90 text-white px-3 py-1.5 text-xs font-bold uppercase transition shadow-sm active:scale-95"
-                >
-                  🔧 Edit Architecture
-                </button>
+                <span className="inline-flex items-center gap-1.5">
+                  <button
+                    onClick={handleEnterEditMode}
+                    className="rounded-xl bg-ink hover:bg-ink/90 text-white px-3 py-1.5 text-xs font-bold uppercase transition shadow-sm active:scale-95"
+                  >
+                    🔧 Edit Architecture
+                  </button>
+                  <InfoTooltip text="Add or remove components, rewire connections, swap a service, or edit config directly — instead of only regenerating from requirements. Saving creates a new version, same as Regenerate does." />
+                </span>
               )
             )
           )}
@@ -1010,35 +1015,48 @@ export default function ArchitectureWorkspace({
             <div className="min-w-0 flex-1 p-6 flex flex-col justify-between border-b lg:border-b-0 lg:border-r border-line overflow-y-auto">
               <div>
                 <div className="flex flex-wrap items-center justify-between gap-y-2 border-b border-line pb-3">
-                  <span className="text-xs text-ink-muted font-semibold uppercase tracking-wider">
+                  <span className="flex items-center gap-1.5 text-xs text-ink-muted font-semibold uppercase tracking-wider">
                     Interactive Topology
+                    <InfoTooltip text="Each box is a piece of your infrastructure (a database, a compute service, etc). Click one to see cost, config, and why it was chosen. Lines show what talks to what." />
                   </span>
 
                   <div className="flex flex-wrap items-center gap-2">
                     {/* Export Button */}
-                    <button
-                      onClick={handleExport}
-                      className="rounded-xl bg-accent hover:bg-accent-ink text-white px-3 py-1.5 text-[9.5px] font-extrabold uppercase transition shadow-sm active:scale-95 flex items-center gap-1"
-                    >
-                      <span>📥</span> {activeProvider === "kubernetes" ? "Export Manifests" : "Export TF"}
-                    </button>
+                    <span className="inline-flex items-center gap-1">
+                      <button
+                        onClick={handleExport}
+                        className="rounded-xl bg-accent hover:bg-accent-ink text-white px-3 py-1.5 text-[9.5px] font-extrabold uppercase transition shadow-sm active:scale-95 flex items-center gap-1"
+                      >
+                        <span>📥</span> {activeProvider === "kubernetes" ? "Export Manifests" : "Export TF"}
+                      </button>
+                      <InfoTooltip
+                        text={
+                          activeProvider === "kubernetes"
+                            ? "Downloads ready-to-apply Kubernetes YAML manifests (Deployments, Services, etc.) for this design — the actual deployable config, not a picture of it."
+                            : "Downloads ready-to-run Terraform (.tf) files for the selected cloud provider — the actual deployable infrastructure code, not a picture of it. Switch providers above to export a different cloud's config."
+                        }
+                      />
+                    </span>
 
                     {/* Deployment Target Toggle */}
-                    <div className="flex bg-paper/80 p-0.5 rounded-lg border border-line shadow-sm">
-                      {(["aws", "azure", "gcp", "kubernetes", "private"] as const).map((p) => (
-                        <button
-                          key={p}
-                          onClick={() => setActiveProvider(p)}
-                          className={`px-2 py-1 text-[9px] font-extrabold uppercase rounded transition ${
-                            activeProvider === p
-                              ? "bg-ink text-white shadow-sm"
-                              : "text-ink-muted hover:text-ink"
-                          }`}
-                        >
-                          {PROVIDER_LABELS[p]}
-                        </button>
-                      ))}
-                    </div>
+                    <span className="inline-flex items-center gap-1">
+                      <div className="flex bg-paper/80 p-0.5 rounded-lg border border-line shadow-sm">
+                        {(["aws", "azure", "gcp", "kubernetes", "private"] as const).map((p) => (
+                          <button
+                            key={p}
+                            onClick={() => setActiveProvider(p)}
+                            className={`px-2 py-1 text-[9px] font-extrabold uppercase rounded transition ${
+                              activeProvider === p
+                                ? "bg-ink text-white shadow-sm"
+                                : "text-ink-muted hover:text-ink"
+                            }`}
+                          >
+                            {PROVIDER_LABELS[p]}
+                          </button>
+                        ))}
+                      </div>
+                      <InfoTooltip text="Same architecture, mapped to different deployment targets. Switching re-maps every component to that provider's equivalent services and recalculates cost — nothing about your requirements changes." />
+                    </span>
                     <span className="rounded-full bg-success-soft border border-success/25 text-success px-2.5 py-0.5 text-[9px] font-extrabold flex items-center gap-1">
                       <span>Est: ${totalMinCost} - ${totalMaxCost}/mo</span>
                       {getProviderCostDeltaString(activeProvider) && (
@@ -1370,6 +1388,9 @@ export default function ArchitectureWorkspace({
                           >
                             <Icon icon="mdi:fit-to-page-outline" width={15} height={15} />
                           </button>
+                          <span className="flex h-8 w-8 items-center justify-center rounded-lg border border-line-strong bg-panel shadow-sm">
+                            <InfoTooltip text="Zoom in/out with these buttons or your scroll wheel. Drag anywhere on the canvas to pan around. Fit-to-view re-centers and re-scales everything back into frame." />
+                          </span>
                         </div>
                         <TransformComponent wrapperStyle={{ width: "100%", height: "100%" }}>
                           <svg
@@ -1503,13 +1524,16 @@ export default function ArchitectureWorkspace({
                 <span className="text-xs text-ink-muted font-medium">
                   Active Provider view: <strong className="uppercase">{activeProvider}</strong>
                 </span>
-                <button
-                  onClick={handleGenerate}
-                  disabled={isGenerationBlocked}
-                  className="rounded-xl bg-ink hover:bg-ink/90 text-white px-4 py-2 text-xs font-bold transition shadow-sm active:scale-95 disabled:opacity-50"
-                >
-                  Regenerate Design
-                </button>
+                <span className="inline-flex items-center gap-1.5">
+                  <InfoTooltip text="Creates a new version (e.g. v0.1.0 → v0.1.1) from your current requirements — it does not overwrite this one. Past versions stay browsable from the Version dropdown above, with a full What-Changed diff." />
+                  <button
+                    onClick={handleGenerate}
+                    disabled={isGenerationBlocked}
+                    className="rounded-xl bg-ink hover:bg-ink/90 text-white px-4 py-2 text-xs font-bold transition shadow-sm active:scale-95 disabled:opacity-50"
+                  >
+                    Regenerate Design
+                  </button>
+                </span>
               </div>
             </div>
 
@@ -1575,7 +1599,10 @@ export default function ArchitectureWorkspace({
 
                   {selectedMapping?.costEstimate && (
                     <div>
-                      <h5 className="text-xs font-bold text-ink-muted uppercase tracking-wider">Estimated Cost</h5>
+                      <h5 className="flex items-center gap-1.5 text-xs font-bold text-ink-muted uppercase tracking-wider">
+                        Estimated Cost
+                        <InfoTooltip text="Monthly range for just this one component, on the currently-selected provider. It's a band, not a quote — actual billing depends on real usage; see the assumptions line for what the estimate is based on." />
+                      </h5>
                       <div className="mt-2 rounded-2xl border border-success/25 bg-success-soft/40 p-3.5">
                         <div className="text-sm font-extrabold text-success">
                           ${selectedMapping.costEstimate.min} - ${selectedMapping.costEstimate.max}/mo
@@ -1591,13 +1618,16 @@ export default function ArchitectureWorkspace({
                       of explanation mode, since swapping/tuning config is an editing action. */}
                   {lldData && (explanationMode === "technical" || isEditing) && (
                     <div className="border-t border-line/80 pt-4">
-                      <button
-                        onClick={() => setIsLldExpanded(!isLldExpanded)}
-                        className="flex w-full items-center justify-between py-2 text-xs font-bold text-ink-muted uppercase tracking-wider hover:text-ink transition"
-                      >
-                        <span>⚙️ Technical Details (LLD)</span>
-                        <span>{isLldExpanded ? "▲" : "▼"}</span>
-                      </button>
+                      <div className="flex w-full items-center justify-between py-2">
+                        <button
+                          onClick={() => setIsLldExpanded(!isLldExpanded)}
+                          className="flex flex-1 items-center gap-1.5 text-xs font-bold text-ink-muted uppercase tracking-wider hover:text-ink transition"
+                        >
+                          <span>⚙️ Technical Details (LLD)</span>
+                          <span>{isLldExpanded ? "▲" : "▼"}</span>
+                        </button>
+                        <InfoTooltip text="Low-Level Design: the actual config values (instance size, replica count, retention, etc.) behind this component's cloud service — the level of detail an engineer would need to actually provision it, with a reason for each value." />
+                      </div>
 
                       {isLldExpanded && (
                         <div className="mt-3 space-y-4 max-h-[300px] overflow-y-auto pr-1">
@@ -1655,7 +1685,10 @@ export default function ArchitectureWorkspace({
 
                   {selectedMapping?.alternatives && selectedMapping.alternatives.length > 0 && (explanationMode === "technical" || isEditing) && (
                     <div>
-                      <h5 className="text-xs font-bold text-ink-muted uppercase tracking-wider">Alternatives Considered</h5>
+                      <h5 className="flex items-center gap-1.5 text-xs font-bold text-ink-muted uppercase tracking-wider">
+                        Alternatives Considered
+                        <InfoTooltip text="Other real services that could fill this same role, and why the rule engine picked the current one over them. While editing, you can switch to one of these instead." />
+                      </h5>
 
                       {isEditing && (
                         <input
@@ -1733,6 +1766,7 @@ export default function ArchitectureWorkspace({
                     <span className="rounded-full bg-ink px-3 py-1 text-xs font-extrabold text-white uppercase tracking-wider">
                       {recommendation.recommendedProvider}
                     </span>
+                    <InfoTooltip text="Not just 'cheapest' — the architect weighs cost, your team's experience level, compliance needs, and long-term flexibility together. Read the rationale below for the specific reasons for this project." />
                   </div>
                   <h4 className="text-lg font-black text-ink mt-3">Architect&apos;s Overall Selection Rationale</h4>
                   <p className="text-sm text-ink-muted leading-relaxed mt-2 max-w-4xl">
