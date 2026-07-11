@@ -14,7 +14,12 @@ from app.services.architecture_diff import calculate_total_cost, compute_archite
 from app.services.cloud_mapping import get_cloud_mapping
 from app.services.industry_rules import run_industry_rules
 from app.services.lld_rules import run_lld_rules_engine
-from app.services.llm import generate_flow_story, propose_component_changes, validate_and_generate_architecture
+from app.services.llm import (
+    generate_flow_story,
+    generate_user_journey,
+    propose_component_changes,
+    validate_and_generate_architecture,
+)
 from app.services.rules_engine import run_rules_engine
 from app.services.validation import validate_architecture_layout
 
@@ -74,6 +79,53 @@ async def list_architectures(project_id: uuid.UUID, all: str | None = None, db: 
     return {"architecture": serialize_architecture(record)}
 
 
+async def _latest_functional(db: AsyncSession, project_id: uuid.UUID) -> list:
+    reqs = (
+        await db.execute(
+            select(Requirement)
+            .where(Requirement.project_id == project_id)
+            .order_by(Requirement.version.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return reqs.functional if reqs else []
+
+
+def _provider_components(components: list[dict], provider: str) -> list[dict]:
+    # Synthesize from the reasoning + service names already computed for this provider -- no new
+    # architectural decisions are made here, just narrated.
+    return [
+        {
+            "id": c["id"],
+            "name": c["name"],
+            "type": c["type"],
+            "reasoning": c.get("reasoning", ""),
+            "serviceName": ((c.get("cloudMappings") or {}).get(provider) or {}).get("serviceName", c["name"]),
+        }
+        for c in components
+    ]
+
+
+async def _get_or_generate_flow_story(db: AsyncSession, record: Architecture, project_id: uuid.UUID, provider: str) -> str:
+    # Cached per provider on this specific architecture version -- switching the provider tab
+    # back and forth never re-triggers generation once each provider has been viewed once.
+    if record.flow_story.get(provider):
+        return record.flow_story[provider]
+
+    functional = await _latest_functional(db, project_id)
+    provider_components = _provider_components(record.hld.get("components", []), provider)
+    connections = record.hld.get("connections", [])
+
+    story = await generate_flow_story(provider, provider_components, connections, functional, settings.openrouter_api_key)
+
+    # Cache-only UPDATE on an otherwise-immutable versioned row -- see Architecture.flow_story's
+    # docstring in models.py. SQLAlchemy won't detect a plain in-place dict mutation on a JSONB
+    # column as a change, so reassign the whole dict rather than record.flow_story[provider] = ...
+    record.flow_story = {**record.flow_story, provider: story}
+    await db.commit()
+    return story
+
+
 @router.post("/projects/{project_id}/architectures/{architecture_id}/flow-story")
 async def get_flow_story(
     project_id: uuid.UUID, architecture_id: uuid.UUID, provider: str, db: AsyncSession = Depends(get_db)
@@ -89,46 +141,46 @@ async def get_flow_story(
     if not record:
         raise HTTPException(status_code=404, detail="Architecture version not found")
 
-    # Cached per provider on this specific architecture version -- switching the provider tab
-    # back and forth never re-triggers generation once each provider has been viewed once.
-    if record.flow_story.get(provider):
-        return {"story": record.flow_story[provider]}
+    story = await _get_or_generate_flow_story(db, record, project_id, provider)
+    return {"story": story}
 
-    reqs = (
+
+@router.post("/projects/{project_id}/architectures/{architecture_id}/journey")
+async def get_user_journey(
+    project_id: uuid.UUID, architecture_id: uuid.UUID, provider: str, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """The "User Journey Architecture" view -- restructures the (already-generated-or-generated-
+    here-first) flow story into discrete end-user-facing steps. Deliberately downstream of
+    flow-story, never an independent regeneration of request flow."""
+    if provider not in VALID_FLOW_STORY_PROVIDERS:
+        raise HTTPException(status_code=400, detail="Invalid provider specified")
+
+    record = (
         await db.execute(
-            select(Requirement)
-            .where(Requirement.project_id == project_id)
-            .order_by(Requirement.version.desc())
-            .limit(1)
+            select(Architecture).where(Architecture.id == architecture_id, Architecture.project_id == project_id)
         )
     ).scalar_one_or_none()
-    functional = reqs.functional if reqs else []
+    if not record:
+        raise HTTPException(status_code=404, detail="Architecture version not found")
 
-    components = record.hld.get("components", [])
+    if record.journey_steps.get(provider):
+        return {"journeySteps": record.journey_steps[provider]}
+
+    flow_story = await _get_or_generate_flow_story(db, record, project_id, provider)
+    functional = await _latest_functional(db, project_id)
+    provider_components = _provider_components(record.hld.get("components", []), provider)
     connections = record.hld.get("connections", [])
 
-    # Synthesize from the reasoning + service names already computed for this provider -- no new
-    # architectural decisions are made here, just narrated.
-    provider_components = [
-        {
-            "id": c["id"],
-            "name": c["name"],
-            "type": c["type"],
-            "reasoning": c.get("reasoning", ""),
-            "serviceName": ((c.get("cloudMappings") or {}).get(provider) or {}).get("serviceName", c["name"]),
-        }
-        for c in components
-    ]
+    steps = await generate_user_journey(
+        provider, flow_story, provider_components, connections, functional, settings.openrouter_api_key
+    )
 
-    story = await generate_flow_story(provider, provider_components, connections, functional, settings.openrouter_api_key)
-
-    # Cache-only UPDATE on an otherwise-immutable versioned row -- see Architecture.flow_story's
-    # docstring in models.py. SQLAlchemy won't detect a plain in-place dict mutation on a JSONB
-    # column as a change, so reassign the whole dict rather than record.flow_story[provider] = ...
-    record.flow_story = {**record.flow_story, provider: story}
+    # Same cache-only UPDATE pattern as flow_story -- reassign the whole dict, JSONB in-place
+    # mutation isn't detected by SQLAlchemy's change tracking.
+    record.journey_steps = {**record.journey_steps, provider: steps}
     await db.commit()
 
-    return {"story": story}
+    return {"journeySteps": steps}
 
 
 @router.post("/projects/{project_id}/architectures/{architecture_id}/propose-changes")

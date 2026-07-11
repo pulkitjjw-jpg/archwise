@@ -109,6 +109,13 @@ class Architecture(Base):
     # that already takes ~30-45s. Same "derived cache, not content" reasoning as
     # Requirement.conversation_summary applies to updating this after insert.
     flow_story: Mapped[dict[str, str]] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    # Keyed by provider, each value a list of {userAction, systemResponse, componentIds} step
+    # objects -- the "User Journey Architecture" view's step-by-step breakdown. Synthesized FROM
+    # flow_story[provider] (never generated independently of it -- see get_user_journey in
+    # architectures.py), so it's downstream of and lazily cached the same way flow_story is.
+    journey_steps: Mapped[dict[str, list[dict[str, Any]]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
     )

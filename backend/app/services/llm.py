@@ -370,6 +370,56 @@ Do not include markdown code block formatting (like ```json) in your response, r
     return result["story"]
 
 
+async def generate_user_journey(
+    provider: str, flow_story: str, components: list[dict], connections: list[dict], functional: list[str], api_key: str
+) -> list[dict]:
+    """Generates the "User Journey Architecture" view's step-by-step breakdown for one provider --
+    restructures the ALREADY-GENERATED flow_story narrative (never re-derives request flow from
+    scratch) into discrete end-user-facing steps, each naming which real components are touched.
+    This is deliberately downstream of generate_flow_story: the caller must ensure flow_story is
+    already generated/cached for this provider before calling this. Called lazily per provider
+    and cached by the caller on the architecture row's journey_steps[provider] key."""
+    system_instruction = """
+You are a senior solutions architect preparing the "user journey" section of a design review -- the part that walks a non-technical stakeholder through what an actual END USER does, step by step, and which backend components each step touches. This is NOT a repeat of the technical flow narrative; it's a restructuring of it into discrete, user-centric steps.
+
+You are given: the already-written technical flow story (a prose walkthrough of request/data flow for this provider), the component list (each with its real cloud service name and reasoning), the connections between components, and the product's functional requirements.
+
+Trace 1-2 of the core end-to-end user journeys implied by the functional requirements (e.g. for a booking app: "opens app -> browses available slots -> selects a slot -> confirms booking -> receives confirmation"). For EACH step:
+- "userAction": what the end user actually does or experiences, in plain language, from their point of view (e.g. "Selects an available time slot and taps 'Book'") -- never a technical/system-level description.
+- "systemResponse": what happens behind the scenes for that specific step, in plain language, grounded in the flow story and component reasoning you were given.
+- "componentIds": the array of component "id" values (from the given component list) actually involved in this step. Must be real ids from the list, never invented.
+
+Rules:
+- In "systemResponse", ALWAYS use the actual cloud service name given in the component list (e.g. "Amazon ECS Fargate + ALB", "Amazon ElastiCache (Redis OSS)") -- never a generic paraphrase like "the API service" or "the cache" on its own. This matches the flow story you were given, which already does this; do not regress to generic terms when restructuring it into steps.
+- Ground every step in the flow story and component data given -- do not invent behavior not present in the data.
+- Order steps in the sequence a real user would experience them.
+- If there are genuinely 2 distinct core journeys (e.g. a primary booking flow and a separate compliance/audit-triggered flow), include both, but do not pad with a second journey if there's only one real end-to-end path.
+- Keep each step's text concise (1-2 sentences each for userAction and systemResponse).
+
+You MUST respond with a raw JSON object matching this TypeScript structure:
+{
+  "journeySteps": [
+    { "userAction": string, "systemResponse": string, "componentIds": string[] }
+  ]
+}
+Do not include markdown code block formatting (like ```json) in your response, return only the raw JSON.
+"""
+
+    input_context = {
+        "provider": provider,
+        "flowStory": flow_story,
+        "components": components,
+        "connections": connections,
+        "functionalRequirements": functional,
+    }
+    messages_for_api = [
+        {"role": "system", "content": system_instruction},
+        {"role": "user", "content": json.dumps(input_context)},
+    ]
+    result = await _call_llm_with_retry(api_key, messages_for_api, "User journey generation")
+    return result.get("journeySteps") or []
+
+
 KNOWN_COMPONENT_TYPES = (
     "cdn",
     "compute",

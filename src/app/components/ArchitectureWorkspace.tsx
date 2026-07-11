@@ -354,6 +354,12 @@ type ConnectionData = {
   protocol: string;
 };
 
+type JourneyStep = {
+  userAction: string;
+  systemResponse: string;
+  componentIds: string[];
+};
+
 type ArchitectureData = {
   id: string;
   version: string;
@@ -362,6 +368,7 @@ type ArchitectureData = {
     connections: ConnectionData[];
   };
   flowStory?: Record<string, string>;
+  journeySteps?: Record<string, JourneyStep[]>;
   reasoning: {
     decisions: any[];
     assumptions: string[];
@@ -413,7 +420,7 @@ export default function ArchitectureWorkspace({
   const [generationStageIndex, setGenerationStageIndex] = useState(0);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [activeProvider, setActiveProvider] = useState<CloudProviderKey>("aws");
-  const [viewMode, setViewMode] = useState<"diagram" | "comparison">("diagram");
+  const [viewMode, setViewMode] = useState<"diagram" | "comparison" | "journey">("diagram");
   const [isLldExpanded, setIsLldExpanded] = useState(false);
   // Collapsed by default -- learning depth is available on demand, not imposed on expert users
   // who already know what a message queue is.
@@ -1063,6 +1070,51 @@ export default function ArchitectureWorkspace({
     };
   }, [architecture, activeProvider]);
 
+  // User Journey Architecture -- restructures the flow story (above) into discrete end-user
+  // steps, per provider. Fetched lazily only when this tab is actually opened (unlike flow
+  // story, which is always visible under the diagram) to avoid an extra LLM call most sessions
+  // never need; cached the same way once fetched.
+  const [journeyCache, setJourneyCache] = useState<Record<string, JourneyStep[]>>({});
+  const [journeyLoading, setJourneyLoading] = useState(false);
+  const journeyKey = architecture ? `${architecture.id}:${activeProvider}` : null;
+  const currentJourney = journeyKey ? journeyCache[journeyKey] : undefined;
+
+  useEffect(() => {
+    if (viewMode !== "journey" || !architecture) return;
+    const key = `${architecture.id}:${activeProvider}`;
+    if (journeyCache[key]) return;
+
+    const embedded = architecture.journeySteps?.[activeProvider];
+    if (embedded) {
+      setJourneyCache((prev) => ({ ...prev, [key]: embedded }));
+      return;
+    }
+
+    let cancelled = false;
+    setJourneyLoading(true);
+    fetch(`/api/projects/${projectId}/architectures/${architecture.id}/journey?provider=${activeProvider}`, {
+      method: "POST",
+    })
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error("Failed to load user journey"))))
+      .then((data) => {
+        if (cancelled) return;
+        setJourneyCache((prev) => ({ ...prev, [key]: data.journeySteps }));
+      })
+      .catch((err) => console.error("Failed to load user journey:", err))
+      .finally(() => {
+        if (!cancelled) setJourneyLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [viewMode, architecture, activeProvider]);
+
+  const handleJourneyComponentClick = (componentId: string) => {
+    setViewMode("diagram");
+    setSelectedNodeId(componentId);
+  };
+
   // Chat-based Enhancement Proposals -- triggered when a growth-trigger chat conversation
   // concludes (see ChatArea's "growthTriggerCompleted" event). Scoped to whichever provider is
   // currently active; re-fetches automatically if the user switches provider while a proposal
@@ -1464,6 +1516,14 @@ export default function ArchitectureWorkspace({
               }`}
             >
               Compare Clouds
+            </button>
+            <button
+              onClick={() => setViewMode("journey")}
+              className={`px-3 py-1.5 text-xs font-bold rounded-lg transition ${
+                viewMode === "journey" ? "bg-white text-ink shadow-sm" : "text-ink-muted hover:text-ink"
+              }`}
+            >
+              🧭 User Journey
             </button>
           </div>
           {onToggleFocusMode && (
@@ -2672,7 +2732,7 @@ export default function ArchitectureWorkspace({
               )}
             </div>
           </div>
-        ) : (
+        ) : viewMode === "comparison" ? (
           /* Compare Clouds View Mode (Table/Grid) */
           <div className="h-full overflow-y-auto p-6 space-y-6">
             {/* Recommended Cloud Choice Banner */}
@@ -2886,6 +2946,75 @@ export default function ArchitectureWorkspace({
                 <Icon icon="mdi:gesture-swipe-horizontal" width={13} height={13} />
                 Scroll horizontally to compare all 5 providers, including Kubernetes and Private Cloud
               </div>
+            </div>
+          </div>
+        ) : (
+          /* User Journey Architecture View -- end-user-centric, step-by-step, distinct from the
+             infra-centric topology diagram but linkable to it (clicking a step's component chip
+             jumps back to Topology View with that component selected). Synthesized from the
+             Flow Story (Workstream G) rather than an independent narrative. */
+          <div className="h-full overflow-y-auto p-6">
+            <div className="mx-auto max-w-3xl">
+              <div className="flex items-center gap-2">
+                <h4 className="text-lg font-black text-ink">User Journey Architecture</h4>
+                <span className="rounded-full bg-ink px-2 py-0.5 text-[10px] font-extrabold text-white uppercase tracking-wider">
+                  {PROVIDER_LABELS[activeProvider]}
+                </span>
+                <InfoTooltip text="A step-by-step walkthrough from the end user's perspective -- what they do, what happens behind the scenes, and which real components are involved at each step. Synthesized from the Architecture Flow Story for this provider, restructured into discrete steps. Click a component chip to jump to it in Topology View." />
+              </div>
+              <p className="mt-1.5 text-xs text-ink-muted leading-relaxed">
+                How a real user moves through this product end-to-end, mapped to the actual infrastructure behind each step -- the way a solutions architect would walk through it in a design review.
+              </p>
+
+              {journeyLoading ? (
+                <div className="mt-8 flex items-center justify-center gap-2 text-xs text-ink-muted">
+                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+                  Synthesizing the user journey for {PROVIDER_LABELS[activeProvider]}...
+                </div>
+              ) : !currentJourney || currentJourney.length === 0 ? (
+                <div className="mt-8 text-center text-xs text-ink-muted">
+                  No journey could be generated yet for this provider.
+                </div>
+              ) : (
+                <ol className="mt-6 space-y-0">
+                  {currentJourney.map((step, idx) => (
+                    <li key={idx} className="relative pl-10 pb-8 last:pb-0">
+                      {idx < currentJourney.length - 1 && (
+                        <span className="absolute left-[15px] top-8 bottom-0 w-0.5 bg-line" />
+                      )}
+                      <span className="absolute left-0 top-0 flex h-8 w-8 items-center justify-center rounded-full bg-ink text-xs font-extrabold text-white">
+                        {idx + 1}
+                      </span>
+                      <div className="rounded-2xl border border-line bg-white p-4 shadow-sm">
+                        <div className="flex items-start gap-1.5">
+                          <span className="mt-0.5 flex-none text-sm">🙋</span>
+                          <p className="text-sm font-bold text-ink leading-snug">{step.userAction}</p>
+                        </div>
+                        <div className="mt-2 flex items-start gap-1.5">
+                          <span className="mt-0.5 flex-none text-sm">⚙️</span>
+                          <p className="text-xs text-ink-muted leading-relaxed">{step.systemResponse}</p>
+                        </div>
+                        {step.componentIds.length > 0 && (
+                          <div className="mt-3 flex flex-wrap items-center gap-1.5">
+                            <span className="text-[9px] font-bold uppercase tracking-wide text-ink-faint">
+                              Components touched:
+                            </span>
+                            {step.componentIds.map((cid) => (
+                              <button
+                                key={cid}
+                                onClick={() => handleJourneyComponentClick(cid)}
+                                className="rounded-full border border-accent/30 bg-accent-soft px-2 py-0.5 text-[10px] font-semibold text-accent-ink transition hover:border-accent hover:bg-accent/15"
+                              >
+                                {nodeNameById(cid)}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              )}
             </div>
           </div>
         )}
