@@ -430,6 +430,9 @@ export default function ArchitectureWorkspace({
   const [explanationMode, setExplanationMode] = useState<"simple" | "technical">("simple");
   const [error, setError] = useState("");
   const [versionList, setVersionList] = useState<ArchitectureData[]>([]);
+  // Evolution History -- collapsed by default, a supplementary deep-dive next to the always-
+  // visible Flow Story, not a replacement for it.
+  const [isEvolutionHistoryExpanded, setIsEvolutionHistoryExpanded] = useState(false);
 
   const [isEditing, setIsEditing] = useState(false);
   const [draftHld, setDraftHld] = useState<{ components: ComponentData[]; connections: ConnectionData[] } | null>(null);
@@ -1014,6 +1017,32 @@ export default function ArchitectureWorkspace({
   // and who sends requests to it, using the component names a non-architect would recognize
   // rather than raw ids.
   const nodeNameById = (id: string) => diagramComponents.find((c) => c.id === id)?.name || id;
+
+  // Evolution History -- entirely derived from versionList (already fetched in full for the
+  // version dropdown) and each version's already-computed reasoning.diff, never a new fetch or
+  // LLM call. versionList arrives newest-first (matches the dropdown); this reverses it to
+  // chronological order so "Initial" is first and each later entry is the delta from the one
+  // right before it, exactly as already stored per version at generation/save time.
+  type EvolutionPhase = {
+    version: string;
+    createdAt: string;
+    isInitial: boolean;
+    componentCount: number;
+    added: NonNullable<ArchitectureData["reasoning"]["diff"]>["added"];
+    removed: NonNullable<ArchitectureData["reasoning"]["diff"]>["removed"];
+    modified: NonNullable<ArchitectureData["reasoning"]["diff"]>["modified"];
+  };
+  const evolutionPhases: EvolutionPhase[] = [...versionList].reverse().map((v) => ({
+    version: v.version,
+    createdAt: v.createdAt,
+    isInitial: !v.reasoning.diff,
+    componentCount: v.hld.components.length,
+    added: v.reasoning.diff?.added || [],
+    removed: v.reasoning.diff?.removed || [],
+    modified: v.reasoning.diff?.modified || [],
+  }));
+  const initialPhaseComponents = versionList.length > 0 ? [...versionList].reverse()[0].hld.components : [];
+
   const outgoingConnections = selectedNode
     ? diagramConnections.filter((c) => c.from === selectedNode.id)
     : [];
@@ -2364,6 +2393,101 @@ export default function ArchitectureWorkspace({
                     <p className="mt-3 text-xs text-ink-faint italic">Flow story unavailable.</p>
                   )}
                 </div>
+
+                {/* Evolution History -- supplementary deep-dive, collapsed by default, entirely
+                    derived from versionList + each version's already-stored reasoning.diff (see
+                    evolutionPhases above). Never a replacement for the always-visible Flow Story
+                    above it. */}
+                {evolutionPhases.length > 0 && (
+                  <div className="mt-4 rounded-3xl border border-line bg-white shadow-sm">
+                    {/* A <div role="button"> rather than a real <button> -- InfoTooltip renders
+                        its own <button> for the "i" icon, and nesting a <button> inside a
+                        <button> is invalid HTML that React (correctly) flags as a hydration
+                        error. */}
+                    <div
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setIsEvolutionHistoryExpanded((v) => !v)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          setIsEvolutionHistoryExpanded((v) => !v);
+                        }
+                      }}
+                      className="flex w-full cursor-pointer items-center justify-between gap-2 p-5 text-left"
+                    >
+                      <span className="flex items-center gap-2 text-xs font-extrabold uppercase tracking-wider text-ink">
+                        <span>🕰️</span> Evolution History
+                        <span className="rounded-full bg-line px-2 py-0.5 text-[9px] font-bold text-ink-muted">
+                          {evolutionPhases.length} version{evolutionPhases.length === 1 ? "" : "s"}
+                        </span>
+                        <InfoTooltip text="A phase-by-phase breakdown of how this architecture got to its current state -- what was built initially and what changed at each later version, and why. Derived from the same version history and diffs already computed and stored for the version dropdown, not a new summary." />
+                      </span>
+                      <span className="text-xs font-bold text-ink-muted">{isEvolutionHistoryExpanded ? "▲ Collapse" : "▼ Expand"}</span>
+                    </div>
+
+                    {isEvolutionHistoryExpanded && (
+                      <div className="space-y-4 border-t border-line px-5 pb-5 pt-4">
+                        {evolutionPhases.map((phase, idx) => (
+                          <div key={phase.version} className="relative pl-6">
+                            {idx < evolutionPhases.length - 1 && (
+                              <span className="absolute left-[7px] top-6 bottom-[-16px] w-0.5 bg-line" />
+                            )}
+                            <span className="absolute left-0 top-1 h-3.5 w-3.5 rounded-full border-2 border-accent bg-white" />
+                            <div className="flex flex-wrap items-baseline gap-2">
+                              <h5 className="text-sm font-bold text-ink">
+                                {phase.isInitial ? "Initial" : `Enhancement ${idx}`} (v{phase.version})
+                              </h5>
+                              <span className="text-[10px] font-semibold text-ink-faint">
+                                {new Date(phase.createdAt).toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" })}
+                              </span>
+                            </div>
+
+                            {phase.isInitial ? (
+                              <p className="mt-1 text-xs text-ink-muted leading-relaxed">
+                                Built {phase.componentCount} component{phase.componentCount === 1 ? "" : "s"}:{" "}
+                                {initialPhaseComponents.map((c, i) => (
+                                  <span key={c.id}>
+                                    {i > 0 && ", "}
+                                    <span className="font-semibold text-ink">{c.name}</span>
+                                  </span>
+                                ))}
+                                .
+                              </p>
+                            ) : (
+                              <div className="mt-1.5 space-y-1.5 text-xs text-ink-muted">
+                                {phase.added.length === 0 && phase.removed.length === 0 && phase.modified.length === 0 && (
+                                  <p className="italic">No structural changes recorded for this version.</p>
+                                )}
+                                {phase.added.map((c) => (
+                                  <p key={`add-${c.id}`} className="leading-relaxed">
+                                    <span className="font-bold text-success">+ Added {c.name}:</span> {c.reasoning}
+                                  </p>
+                                ))}
+                                {phase.modified.map((c) => (
+                                  <div key={`mod-${c.id}`} className="leading-relaxed">
+                                    <span className="font-bold text-accent-ink">✎ Modified {c.name}:</span>{" "}
+                                    {c.changes.map((ch, i) => (
+                                      <span key={i}>
+                                        {i > 0 && "; "}
+                                        {ch.parameter} {ch.oldVal} → {ch.newVal} ({ch.reasoning})
+                                      </span>
+                                    ))}
+                                  </div>
+                                ))}
+                                {phase.removed.map((c) => (
+                                  <p key={`rem-${c.id}`} className="leading-relaxed">
+                                    <span className="font-bold text-danger">− Removed {c.name}</span>
+                                  </p>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {/* Manual Editing Controls Toolbar */}
                 {isEditing && draftHld && (
