@@ -1,1 +1,0 @@
-DROP TABLE "planning_artifacts" CASCADE;

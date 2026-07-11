@@ -1,0 +1,94 @@
+import uuid
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import ForeignKey, Integer, Text, text
+from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.db import Base
+
+# Mirrors drizzle/0003_vengeful_zaran.sql's server_default exactly (verified against the live
+# migration SQL, not the CLAUDE.md audit's assumption that this default was applied app-side).
+INDUSTRY_CONTEXT_DEFAULT = text(
+    """'{"industry":"none","rationale":"","complianceAnswers":[],"flags":{}}'::jsonb"""
+)
+
+
+class Project(Base):
+    __tablename__ = "projects"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    owner: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
+    )
+    current_version: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'0.1.0'"))
+
+    conversations: Mapped[list["Conversation"]] = relationship(back_populates="project", passive_deletes=True)
+    requirements: Mapped[list["Requirement"]] = relationship(back_populates="project", passive_deletes=True)
+    architectures: Mapped[list["Architecture"]] = relationship(back_populates="project", passive_deletes=True)
+
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    stage: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+    project: Mapped["Project"] = relationship(back_populates="conversations")
+
+
+class Requirement(Base):
+    __tablename__ = "requirements"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    functional: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    non_functional: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    industry_context: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=INDUSTRY_CONTEXT_DEFAULT
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+    project: Mapped["Project"] = relationship(back_populates="requirements")
+
+
+class Architecture(Base):
+    __tablename__ = "architectures"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    hld: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    reasoning: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    cloud_provider: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'aws'"))
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+    project: Mapped["Project"] = relationship(back_populates="architectures")

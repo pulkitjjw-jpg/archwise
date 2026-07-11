@@ -1,0 +1,1283 @@
+"""Terraform code generator -- ported from src/lib/terraform-generator.ts.
+
+Builds a map of filename -> file content for the selected provider: multiple `.tf` files plus
+a README with compliance (fintech/healthtech) and manual-provisioning (private cloud) sections.
+This is a line-for-line port -- every branch, string literal (including markdown formatting and
+whitespace in the multi-line templates), and the exact `files[...]` insertion order the original
+TS produces are preserved intentionally (Python dicts preserve insertion order the same way JS
+objects do), since golden-snapshot diffing against the live TS implementation is the acceptance
+bar for this port.
+
+Components/connections/industry_context are plain dict/list[dict], never strict Pydantic
+models -- same deliberate choice as the rest of this LLD/HLD-adjacent code (see llm.py's
+docstring); dict KEYS stay in their original camelCase (e.g. "serviceName", "cloudMappings")
+since these are the actual API response shapes, not Python-internal structures.
+"""
+
+import re
+
+
+def _parse_int(value, default: str) -> int:
+    """Mirrors JavaScript's `parseInt(value || default, 10)`: parses a leading integer and
+    ignores any trailing non-numeric suffix (e.g. "100GB GP3" -> 100, "30 Days" -> 30,
+    "900s (15 Mins)" -> 900). `value` is treated as falsy (and `default` used instead) for
+    None/""/0-length strings, matching the TS `||` fallback."""
+    raw = value if value else default
+    match = re.match(r"\s*[+-]?\d+", str(raw))
+    return int(match.group()) if match else 0
+
+
+def _get_lld(c: dict, provider: str) -> dict:
+    mapping = (c.get("cloudMappings") or {}).get(provider)
+    return (mapping or {}).get("lld") or {"config": {}, "reasoning": {}}
+
+
+def _get_service_name(c: dict, provider: str) -> str:
+    mapping = (c.get("cloudMappings") or {}).get(provider)
+    return (mapping or {}).get("serviceName") or c.get("name")
+
+
+def _build_comments(lld: dict, keys: list[str]) -> str:
+    config = lld.get("config") or {}
+    reasoning = lld.get("reasoning") or {}
+    comments = ""
+    for k in keys:
+        if config.get(k) or reasoning.get(k):
+            comments += f"# LLD config [{k} = {config.get(k) or 'default'}]: {reasoning.get(k) or 'Applied rule engine configuration.'}\n"
+    return comments
+
+
+def _build_compliance_section(industry_context: dict | None, components: list[dict]) -> str:
+    if not industry_context or industry_context.get("industry") == "none":
+        return ""
+
+    compliance_components = [
+        c for c in components if c.get("type") in ("tokenization", "audit-log", "phi-vault", "deidentification")
+    ]
+    component_lines = "\n".join(
+        f"*   **{c.get('name')}** (`{c.get('type')}`): {c.get('reasoning') or c.get('description') or 'Compliance component.'}"
+        for c in compliance_components
+    )
+
+    rationale = industry_context.get("rationale")
+    flags = industry_context.get("flags") or {}
+    rationale_suffix = f" ({rationale})" if rationale else ""
+
+    if industry_context.get("industry") == "fintech":
+        components_block = (
+            component_lines
+            or "*   No dedicated compliance components were added — verify this is expected for your payment flow."
+        )
+        card_data_line = (
+            "*   Provisions a dedicated tokenization layer so raw card data (PAN) never touches application compute or the primary database, shrinking your PCI-DSS scope."
+            if flags.get("handlesCardDataDirectly")
+            else "*   Card data is handled via a third-party processor — this Terraform does not provision cardholder-data storage, but the systems that call the processor are still in scope."
+        )
+        return f"""
+---
+
+> [!IMPORTANT]
+> ## Compliance: PCI-DSS
+
+This project was flagged as **fintech** during discovery{rationale_suffix}. The following compliance-driven infrastructure was added on top of the baseline architecture:
+
+{components_block}
+
+**What this Terraform does for you:**
+*   Provisions an immutable, write-once audit log store for all cardholder-data-adjacent activity (PCI-DSS Requirement 10).
+*   Enforces TLS 1.2+ on data stores in the transaction path (PCI-DSS Requirement 4).
+{card_data_line}
+
+**What you are still responsible for:**
+*   Achieving PCI-DSS certification requires a third-party Qualified Security Assessor (QSA) audit or a completed Self-Assessment Questionnaire (SAQ) — this Terraform is a starting point, not a certification.
+*   Network segmentation, firewall rule review, and penetration testing are not automated by this configuration.
+*   Key rotation policies, incident response procedures, and employee access reviews must be established operationally.
+"""
+
+    # healthtech
+    components_block = (
+        component_lines or "*   No dedicated compliance components were added — verify this is expected if PHI is involved."
+    )
+    phi_line = (
+        "*   Provisions a dedicated, encrypted PHI Data Vault isolated from general application data, with mandatory access logging."
+        if flags.get("storesPHI")
+        else "*   PHI storage was not confirmed during discovery — if patient-identifiable data is added later, re-run generation with that confirmed so a dedicated PHI vault is provisioned."
+    )
+    data_residency = flags.get("dataResidency")
+    residency_line = (
+        f"*   Data residency was specified as **{data_residency}** — verify every provisioned region and any managed service's underlying data location honors this before deployment."
+        if data_residency and data_residency != "not_specified"
+        else ""
+    )
+    return f"""
+---
+
+> [!IMPORTANT]
+> ## Compliance: HIPAA
+
+This project was flagged as **healthtech** during discovery{rationale_suffix}. The following compliance-driven infrastructure was added on top of the baseline architecture:
+
+{components_block}
+
+**What this Terraform does for you:**
+*   Provisions an immutable, write-once audit log store recording all access to systems containing PHI (HIPAA Security Rule, 45 CFR 164.312(b)).
+*   Enforces TLS 1.2+ on data stores handling regulated data (encryption in transit).
+{phi_line}
+{residency_line}
+
+**What you are still responsible for:**
+*   **A signed Business Associate Agreement (BAA) with your cloud provider is required before any real PHI touches this infrastructure.** This Terraform does not and cannot establish that agreement — it is a legal contract between you and the provider.
+*   Achieving full HIPAA compliance requires a documented risk assessment, workforce training, and breach notification procedures — this Terraform addresses infrastructure controls only, not administrative or physical safeguards.
+*   Verify every managed service used here is on your cloud provider's list of HIPAA-eligible services before deploying real patient data.
+"""
+
+
+def _build_manual_provisioning_section(provider: str, components: list[dict]) -> str:
+    if provider != "private":
+        return ""
+
+    def _row(c: dict) -> str:
+        mapping = (c.get("cloudMappings") or {}).get("private") or {}
+        lld = mapping.get("lld") or {"config": {}, "reasoning": {}}
+        config = lld.get("config") or {}
+        flagged_key = next(
+            (k for k in config.keys() if "flag" in k.lower() or "mode" in k.lower() or "recommended" in k.lower()),
+            None,
+        )
+        flag_note = config.get(flagged_key) if flagged_key else "—"
+        service_name = mapping.get("serviceName") or c.get("name")
+        return f"| {c.get('name')} | {service_name} | {flag_note} |"
+
+    rows = "\n".join(_row(c) for c in components)
+
+    return f"""
+---
+
+> [!IMPORTANT]
+> ## What Needs Manual Provisioning
+
+Nothing in this Terraform actually provisions private-cloud infrastructure — there is no
+generic Terraform provider for "your data center." Every `null_resource` in `compute.tf` is a
+documented placeholder. Being honest about what this tool can and can't automate for you:
+
+**Cannot be automated by this tool at all:**
+*   Physical or virtual machine provisioning (pick a real provider in `main.tf`: vSphere, OpenStack, or manage bare-metal outside Terraform entirely).
+*   Network segmentation / VLAN configuration on your physical switches.
+*   Storage array allocation (SAN/NAS) and its own RAID/replication setup.
+*   Hardware procurement lead time for anything requiring new physical capacity.
+
+**Explicitly flagged per component (no managed-service equivalent exists on-premises):**
+
+| Component | Chosen Approach | Manual Ops Flag |
+|---|---|---|
+{rows}
+
+**What you're responsible for that a public cloud would otherwise absorb:**
+*   Failover/HA orchestration (no managed multi-AZ equivalent — you configure and test the failover runbook yourself).
+*   Patching and version upgrades for every self-managed service (RabbitMQ, PostgreSQL, Redis, etc.).
+*   Backup scheduling and restore testing — nothing here schedules or verifies a single backup.
+*   Physical security and hardware lifecycle management for whatever data center this deploys into.
+"""
+
+
+def generate_terraform_code(
+    provider: str,
+    project_name: str,
+    components: list[dict],
+    connections: list[dict],
+    industry_context: dict | None = None,
+) -> dict[str, str]:
+    files: dict[str, str] = {}
+    safe_name = re.sub(r"[^a-z0-9]", "-", project_name.lower())
+
+    if provider == "aws":
+        # ----------------------------------------------------
+        # AWS TERRAFORM GENERATOR
+        # ----------------------------------------------------
+
+        files["variables.tf"] = f"""# Terraform Variables for {project_name}
+
+variable "environment" {{
+  type        = string
+  default     = "dev"
+  description = "Target deployment environment (e.g. dev, staging, prod)"
+}}
+
+variable "aws_region" {{
+  type        = string
+  default     = "us-east-1"
+  description = "Primary AWS deployment region"
+}}
+
+variable "project_name" {{
+  type        = string
+  default     = "{safe_name}"
+  description = "Unique project identifier prefix"
+}}
+"""
+
+        files["networking.tf"] = """# AWS Networking and VPC Resources
+
+# Rationale: VPC subnets private/public division isolates database and compute nodes from the public web.
+resource "aws_vpc" "main" {
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+
+  tags = {
+    Name        = "${var.project_name}-${var.environment}-vpc"
+    Environment = var.environment
+  }
+}
+
+resource "aws_subnet" "public_1" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.1.0/24"
+  availability_zone = "${var.aws_region}a"
+
+  tags = {
+    Name = "${var.project_name}-${var.environment}-subnet-public-1"
+  }
+}
+
+resource "aws_subnet" "private_app_1" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.10.0/24"
+  availability_zone = "${var.aws_region}a"
+
+  tags = {
+    Name = "${var.project_name}-${var.environment}-subnet-private-app-1"
+  }
+}
+
+resource "aws_subnet" "private_db_1" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.20.0/24"
+  availability_zone = "${var.aws_region}a"
+
+  tags = {
+    Name = "${var.project_name}-${var.environment}-subnet-private-db-1"
+  }
+}
+
+resource "aws_internet_gateway" "igw" {
+  vpc_id = aws_vpc.main.id
+
+  tags = {
+    Name = "${var.project_name}-${var.environment}-igw"
+  }
+}
+
+# NAT Gateway for Compute instances in private app subnets
+resource "aws_eip" "nat" {
+  domain = "vpc"
+}
+
+resource "aws_nat_gateway" "nat" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.public_1.id
+
+  tags = {
+    Name = "${var.project_name}-${var.environment}-nat"
+  }
+}
+
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.igw.id
+  }
+}
+
+resource "aws_route_table_association" "public_1" {
+  subnet_id      = aws_subnet.public_1.id
+  route_table_id = aws_route_table.public.id
+}
+"""
+
+        main_tf = f"""# Main Provider Configuration for {project_name}
+
+provider "aws" {{
+  region = var.aws_region
+}}
+"""
+
+        compute_tf = "# AWS Compute Resources\n\n"
+        database_tf = "# AWS Database & Caching Resources\n\n"
+        storage_tf = "# AWS Object Storage Resources\n\n"
+        outputs_tf = f"# Terraform Outputs for {project_name}\n\n"
+
+        for c in components:
+            lld = _get_lld(c, "aws")
+            svc = _get_service_name(c, "aws")
+            config = lld.get("config") or {}
+            c_id = c.get("id")
+
+            if c.get("type") == "cdn":
+                storage_tf += _build_comments(lld, ["priceClass", "ipv6Enabled", "originShield"])
+                ipv6_enabled = config.get("ipv6Enabled") or "true"
+                price_class = config.get("priceClass") or "PriceClass_100"
+                storage_tf += f"""resource "aws_cloudfront_distribution" "cdn" {{
+  enabled             = true
+  is_ipv6_enabled     = {ipv6_enabled}
+  price_class         = "{price_class}"
+
+  origin {{
+    domain_name = "example-origin.s3.amazonaws.com"
+    origin_id   = "S3Origin"
+  }}
+
+  default_cache_behavior {{
+    allowed_methods  = ["GET", "HEAD", "OPTIONS"]
+    cached_methods   = ["GET", "HEAD"]
+    target_origin_id = "S3Origin"
+
+    forwarded_values {{
+      query_string = false
+      cookies {{
+        forward = "none"
+      }}
+    }}
+
+    viewer_protocol_policy = "redirect-to-https"
+    min_ttl                = 0
+    default_ttl            = 3600
+    max_ttl                = 86400
+  }}
+
+  restrictions {{
+    geo_restriction {{
+      restriction_type = "none"
+    }}
+  }}
+
+  viewer_certificate {{
+    cloudfront_default_certificate = true
+  }}
+
+  tags = {{
+    Name        = "${{var.project_name}}-cdn"
+    Environment = var.environment
+  }}
+}}
+
+"""
+                outputs_tf += """output "cdn_domain_name" {
+  value       = aws_cloudfront_distribution.cdn.domain_name
+  description = "The CloudFront CDN domain distribution URL."
+}
+
+"""
+            elif c.get("type") == "compute":
+                has_lambda = "Lambda" in svc
+
+                if has_lambda:
+                    compute_tf += _build_comments(lld, ["memory", "timeout", "concurrency"])
+                    memory = _parse_int(config.get("memory"), "512")
+                    timeout = _parse_int(config.get("timeout"), "30")
+                    compute_tf += f"""resource "aws_lambda_function" "{c_id}" {{
+  filename      = "function.zip"
+  function_name = "${{var.project_name}}-{c_id}"
+  role          = aws_iam_role.lambda_exec.arn
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  memory_size   = {memory}
+  timeout       = {timeout}
+
+  vpc_config {{
+    subnet_ids         = [aws_subnet.private_app_1.id]
+    security_group_ids = [aws_security_group.app_sg.id]
+  }}
+
+  tags = {{
+    Name        = "${{var.project_name}}-{c_id}"
+    Environment = var.environment
+  }}
+}}
+
+"""
+                else:
+                    # ECS Fargate
+                    compute_tf += _build_comments(lld, ["instanceSize", "minInstances", "maxInstances", "scalingPolicy"])
+                    desired_count = _parse_int(config.get("minInstances"), "1")
+                    compute_tf += f"""resource "aws_ecs_cluster" "{c_id}_cluster" {{
+  name = "${{var.project_name}}-{c_id}-cluster"
+}}
+
+resource "aws_ecs_task_definition" "{c_id}_task" {{
+  family                   = "${{var.project_name}}-{c_id}-task"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = "256"
+  memory                   = "512"
+
+  container_definitions = jsonencode([{{
+    name      = "{c_id}-app"
+    image     = "nginx:alpine"
+    essential = true
+    portMappings = [{{
+      containerPort = 80
+      hostPort      = 80
+    }}]
+  }}])
+}}
+
+resource "aws_ecs_service" "{c_id}_service" {{
+  name            = "${{var.project_name}}-{c_id}-service"
+  cluster         = aws_ecs_cluster.{c_id}_cluster.id
+  task_definition = aws_ecs_task_definition.{c_id}_task.arn
+  desired_count   = {desired_count}
+  launch_type     = "FARGATE"
+
+  network_configuration {{
+    subnets         = [aws_subnet.private_app_1.id]
+    security_groups = [aws_security_group.app_sg.id]
+  }}
+}}
+
+"""
+            elif c.get("type") == "database":
+                is_rds = "RDS" in svc or "Aurora" in svc
+
+                if is_rds:
+                    database_tf += _build_comments(lld, ["instanceClass", "storageSize", "multiAZ", "backupRetention"])
+                    instance_class = config.get("instanceClass") or "db.t4g.micro"
+                    storage_size = _parse_int(config.get("storageSize"), "20")
+                    multi_az = "true" if config.get("multiAZ") == "true" else "false"
+                    backup_retention = _parse_int(config.get("backupRetention"), "7")
+                    database_tf += f"""resource "aws_db_subnet_group" "db_subnets" {{
+  name       = "${{var.project_name}}-db-subnet-group"
+  subnet_ids = [aws_subnet.private_db_1.id, aws_subnet.private_app_1.id] # Multi-AZ Subnets
+}}
+
+resource "aws_db_instance" "postgres" {{
+  identifier             = "${{var.project_name}}-postgres"
+  engine                 = "postgres"
+  engine_version         = "15.4"
+  instance_class         = "{instance_class}"
+  allocated_storage      = {storage_size}
+  db_subnet_group_name   = aws_db_subnet_group.db_subnets.name
+  vpc_security_group_ids = [aws_security_group.db_sg.id]
+  multi_az               = {multi_az}
+  backup_retention_period = {backup_retention}
+  skip_final_snapshot    = true
+  username               = "dbadmin"
+  password               = "ManagedSecretPassword123!"
+}}
+
+"""
+                    outputs_tf += """output "db_endpoint" {
+  value       = aws_db_instance.postgres.endpoint
+  description = "The database endpoint URL."
+}
+
+"""
+                else:
+                    # DynamoDB
+                    database_tf += _build_comments(lld, ["readCapacityUnits", "writeCapacityUnits", "globalTables"])
+                    database_tf += """resource "aws_dynamodb_table" "nosql" {
+  name         = "${var.project_name}-dynamodb"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "id"
+
+  attribute {
+    name = "id"
+    type = "S"
+  }
+
+  tags = {
+    Name        = "${var.project_name}-nosql"
+    Environment = var.environment
+  }
+}
+
+"""
+            elif c.get("type") == "storage":
+                storage_tf += _build_comments(lld, ["lifecycleRule", "versioningEnabled"])
+                versioning_status = "Enabled" if config.get("versioningEnabled") == "true" else "Disabled"
+                storage_tf += f"""resource "aws_s3_bucket" "blobs" {{
+  bucket = "${{var.project_name}}-storage-bucket-unique"
+
+  tags = {{
+    Name        = "${{var.project_name}}-blobs"
+    Environment = var.environment
+  }}
+}}
+
+resource "aws_s3_bucket_versioning" "blobs" {{
+  bucket = aws_s3_bucket.blobs.id
+  versioning_configuration {{
+    status = "{versioning_status}"
+  }}
+}}
+
+"""
+                outputs_tf += """output "s3_bucket_name" {
+  value       = aws_s3_bucket.blobs.id
+  description = "The unique S3 bucket name."
+}
+
+"""
+            elif c.get("type") == "queue":
+                database_tf += _build_comments(lld, ["queueType", "visibilityTimeoutSec", "retentionDays"])
+                queue_type = config.get("queueType") or ""
+                is_fifo = "FIFO" in queue_type
+                fifo_suffix = ".fifo" if is_fifo else ""
+                fifo_queue = "true" if is_fifo else "false"
+                visibility_timeout = _parse_int(config.get("visibilityTimeoutSec"), "900")
+                database_tf += f"""resource "aws_sqs_queue" "jobs" {{
+  name                       = "${{var.project_name}}-queue${{var.environment}}{fifo_suffix}"
+  fifo_queue                 = {fifo_queue}
+  visibility_timeout_seconds = {visibility_timeout}
+  message_retention_seconds  = 345600 # 4 days
+}}
+
+"""
+            elif c.get("type") == "cache":
+                database_tf += _build_comments(lld, ["nodeType", "clusteringEnabled"])
+                node_type = config.get("nodeType") or "cache.t4g.micro"
+                database_tf += f"""resource "aws_elasticache_cluster" "redis" {{
+  cluster_id           = "${{var.project_name}}-redis"
+  engine               = "redis"
+  node_type            = "{node_type}"
+  num_cache_nodes      = 1
+  parameter_group_name = "default.redis7"
+  port                 = 6379
+  subnet_group_name    = aws_db_subnet_group.db_subnets.name
+}}
+
+"""
+            elif c.get("type") == "auth":
+                database_tf += _build_comments(lld, ["mfaRequired"])
+                mfa_configuration = "ON" if config.get("mfaRequired") == "true" else "OFF"
+                database_tf += f"""resource "aws_cognito_user_pool" "pool" {{
+  name = "${{var.project_name}}-user-pool"
+
+  password_policy {{
+    minimum_length = 8
+    require_lowercase = true
+    require_numbers = true
+    require_symbols = true
+    require_uppercase = true
+  }}
+
+  mfa_configuration = "{mfa_configuration}"
+}}
+
+"""
+
+        # Add Security groups and IAM placeholders in compute.tf
+        compute_tf += """# Security Groups and IAM Roles for Compute Nodes
+
+resource "aws_security_group" "app_sg" {
+  name        = "${var.project_name}-${var.environment}-app-sg"
+  description = "Allows inbound traffic to application servers"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_security_group" "db_sg" {
+  name   = "${var.project_name}-${var.environment}-db-sg"
+  vpc_id = aws_vpc.main.id
+
+  ingress {
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_security_group.app_sg.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_iam_role" "lambda_exec" {
+  name = "${var.project_name}-lambda-exec-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "lambda.amazonaws.com"
+      }
+    }]
+  })
+}
+
+# Rationale: IAM permissions bound to compute role, granting read/write strictly to storage buckets.
+resource "aws_iam_role_policy_attachment" "lambda_vpc_access" {
+  role       = aws_iam_role.lambda_exec.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+}
+"""
+
+        files["main.tf"] = main_tf
+        files["compute.tf"] = compute_tf
+        files["database.tf"] = database_tf
+        files["storage.tf"] = storage_tf
+        files["outputs.tf"] = outputs_tf
+
+    elif provider == "azure":
+        # ----------------------------------------------------
+        # AZURE TERRAFORM GENERATOR
+        # ----------------------------------------------------
+
+        files["variables.tf"] = f"""# Azure Variables for {project_name}
+
+variable "environment" {{
+  type    = string
+  default = "dev"
+}}
+
+variable "location" {{
+  type    = string
+  default = "East US"
+}}
+
+variable "project_name" {{
+  type    = string
+  default = "{safe_name}"
+}}
+"""
+
+        files["networking.tf"] = """# Azure Virtual Network Resources
+
+resource "azurerm_resource_group" "rg" {
+  name     = "${var.project_name}-${var.environment}-rg"
+  location = var.location
+}
+
+# Rationale: Subnets split ensures database nodes are isolated from front-facing container app APIs.
+resource "azurerm_virtual_network" "vnet" {
+  name                = "${var.project_name}-vnet"
+  address_space       = ["10.0.0.0/16"]
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+}
+
+resource "azurerm_subnet" "app_subnet" {
+  name                 = "app-subnet"
+  resource_group_name  = azurerm_resource_group.rg.name
+  virtual_network_name = azurerm_virtual_network.vnet.name
+  address_prefixes     = ["10.0.1.0/24"]
+}
+
+resource "azurerm_subnet" "db_subnet" {
+  name                 = "db-subnet"
+  resource_group_name  = azurerm_resource_group.rg.name
+  virtual_network_name = azurerm_virtual_network.vnet.name
+  address_prefixes     = ["10.0.2.0/24"]
+}
+"""
+
+        main_tf = f"""# Main Provider Configuration for {project_name}
+
+terraform {{
+  required_providers {{
+    azurerm = {{
+      source  = "hashicorp/azurerm"
+      version = "~> 3.0"
+    }}
+  }}
+}}
+
+provider "azurerm" {{
+  features {{}}
+}}
+"""
+
+        compute_tf = "# Azure Compute Resources\n\n"
+        database_tf = "# Azure Database Resources\n\n"
+        storage_tf = "# Azure Storage & CDN Resources\n\n"
+        outputs_tf = f"# Azure Outputs for {project_name}\n\n"
+
+        for c in components:
+            lld = _get_lld(c, "azure")
+            svc = _get_service_name(c, "azure")
+            config = lld.get("config") or {}
+            c_id = c.get("id")
+
+            if c.get("type") == "cdn":
+                storage_tf += _build_comments(lld, ["priceClass"])
+                storage_tf += """resource "azurerm_frontdoor_profile" "cdn" {
+  name                = "${var.project_name}-frontdoor"
+  resource_group_name = azurerm_resource_group.rg.name
+  sku_name            = "Standard_AzureFrontDoor"
+}
+
+"""
+            elif c.get("type") == "compute":
+                has_functions = "Functions" in svc
+
+                if has_functions:
+                    compute_tf += _build_comments(lld, ["memory", "timeout", "concurrency"])
+                    compute_tf += f"""resource "azurerm_service_plan" "func_plan" {{
+  name                = "${{var.project_name}}-functions-plan"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
+  os_type             = "Linux"
+  sku_name            = "Y1" # Consumption Serverless
+}}
+
+resource "azurerm_linux_function_app" "{c_id}" {{
+  name                = "${{var.project_name}}-{c_id}-app"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
+  service_plan_id     = azurerm_service_plan.func_plan.id
+  storage_account_name       = azurerm_storage_account.storage.name
+  storage_account_access_key = azurerm_storage_account.storage.primary_access_key
+
+  site_config {{
+    application_stack {{
+      node_version = "18"
+    }}
+  }}
+}}
+
+"""
+                else:
+                    # Container Apps
+                    compute_tf += _build_comments(lld, ["instanceSize", "minInstances", "maxInstances"])
+                    min_replicas = _parse_int(config.get("minInstances"), "1")
+                    max_replicas = _parse_int(config.get("maxInstances"), "3")
+                    compute_tf += f"""resource "azurerm_container_app_environment" "env" {{
+  name                = "${{var.project_name}}-containerapp-env"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
+}}
+
+resource "azurerm_container_app" "{c_id}" {{
+  name                         = "${{var.project_name}}-{c_id}"
+  container_app_environment_id = azurerm_container_app_environment.env.id
+  resource_group_name          = azurerm_resource_group.rg.name
+  revision_mode                = "Single"
+
+  template {{
+    container {{
+      name   = "web"
+      image  = "nginx:alpine"
+      cpu    = 0.25
+      memory = "0.5Gi"
+    }}
+    min_replicas = {min_replicas}
+    max_replicas = {max_replicas}
+  }}
+}}
+
+"""
+            elif c.get("type") == "database":
+                is_pg = "PostgreSQL" in svc
+
+                if is_pg:
+                    database_tf += _build_comments(lld, ["instanceClass", "storageSize", "backupRetention", "multiAZ"])
+                    instance_class = config.get("instanceClass") or "MO_Standard_E2ds_v4"
+                    storage_mb = _parse_int(config.get("storageSize"), "32") * 1024
+                    backup_retention = _parse_int(config.get("backupRetention"), "7")
+                    database_tf += f"""resource "azurerm_postgresql_flexible_server" "db" {{
+  name                = "${{var.project_name}}-pg-db"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
+  version             = "14"
+  administrator_login          = "psqladmin"
+  administrator_password       = "ManagedSecretPassword123!"
+  sku_name                     = "{instance_class}"
+  storage_mb                   = {storage_mb}
+  backup_retention_days        = {backup_retention}
+}}
+
+"""
+                    outputs_tf += """output "db_fqdn" {
+  value       = azurerm_postgresql_flexible_server.db.fqdn
+  description = "The fully qualified database endpoint."
+}
+
+"""
+                else:
+                    # Cosmos DB NoSQL
+                    database_tf += _build_comments(lld, ["readCapacityUnits"])
+                    database_tf += """resource "azurerm_cosmosdb_account" "cosmos" {
+  name                = "${var.project_name}-cosmos"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  offer_type          = "Standard"
+  kind                = "GlobalDocumentDB"
+
+  consistency_policy {
+    consistency_level = "Session"
+  }
+
+  geo_location {
+    location          = azurerm_resource_group.rg.location
+    failover_priority = 0
+  }
+}
+
+"""
+            elif c.get("type") == "storage" or "Storage" in svc:
+                storage_tf += _build_comments(lld, ["lifecycleRule", "versioningEnabled"])
+                storage_tf += """resource "azurerm_storage_account" "storage" {
+  name                     = "${var.project_name}storeunique"
+  resource_group_name      = azurerm_resource_group.rg.name
+  location                 = azurerm_resource_group.rg.location
+  account_tier             = "Standard"
+  account_replication_type = "LRS"
+}
+
+resource "azurerm_storage_container" "blobs" {
+  name                  = "media"
+  storage_account_name  = azurerm_storage_account.storage.name
+  container_access_type = "private"
+}
+
+"""
+            elif c.get("type") == "queue":
+                database_tf += _build_comments(lld, ["queueType", "visibilityTimeoutSec"])
+                database_tf += """resource "azurerm_servicebus_namespace" "sb" {
+  name                = "${var.project_name}-sb"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  sku                 = "Standard"
+}
+
+resource "azurerm_servicebus_queue" "jobs" {
+  name         = "task-queue"
+  namespace_id = azurerm_servicebus_namespace.sb.id
+}
+
+"""
+            elif c.get("type") == "cache":
+                database_tf += _build_comments(lld, ["nodeType"])
+                database_tf += """resource "azurerm_redis_cache" "redis" {
+  name                = "${var.project_name}-redis"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  capacity            = 0
+  family              = "C"
+  sku_name            = "Basic"
+}
+
+"""
+
+        files["main.tf"] = main_tf
+        files["compute.tf"] = compute_tf
+        files["database.tf"] = database_tf
+        files["storage.tf"] = storage_tf
+        files["outputs.tf"] = outputs_tf
+
+    elif provider == "gcp":
+        # ----------------------------------------------------
+        # GCP TERRAFORM GENERATOR
+        # ----------------------------------------------------
+
+        files["variables.tf"] = f"""# Google Cloud Variables for {project_name}
+
+variable "environment" {{
+  type    = string
+  default = "dev"
+}}
+
+variable "gcp_project" {{
+  type        = string
+  default     = "{safe_name}"
+  description = "Google Cloud Project ID"
+}}
+
+variable "gcp_region" {{
+  type    = string
+  default = "us-central1"
+}}
+"""
+
+        files["networking.tf"] = """# Google VPC Networking Resources
+
+# Rationale: VPC networks separate internal application routing from entryload balancers.
+resource "google_compute_network" "vpc" {
+  name                    = "${var.gcp_project}-${var.environment}-vpc"
+  auto_create_subnetworks = false
+}
+
+resource "google_compute_subnetwork" "subnet" {
+  name          = "subnet-us-central"
+  ip_cidr_range = "10.0.1.0/24"
+  region        = var.gcp_region
+  network       = google_compute_network.vpc.id
+}
+"""
+
+        main_tf = f"""# Main Provider Configuration for {project_name}
+
+provider "google" {{
+  project = var.gcp_project
+  region  = var.gcp_region
+}}
+"""
+
+        compute_tf = "# Google Cloud Compute Resources\n\n"
+        database_tf = "# Google Cloud Database Resources\n\n"
+        storage_tf = "# Google Cloud Storage & CDN Resources\n\n"
+        outputs_tf = f"# Google Cloud Outputs for {project_name}\n\n"
+
+        for c in components:
+            lld = _get_lld(c, "gcp")
+            svc = _get_service_name(c, "gcp")
+            config = lld.get("config") or {}
+            c_id = c.get("id")
+
+            if c.get("type") == "cdn":
+                storage_tf += """resource "google_compute_backend_bucket" "cdn" {
+  name        = "${var.gcp_project}-cdn"
+  bucket_name = google_storage_bucket.storage.name
+  enable_cdn  = true
+}
+
+"""
+            elif c.get("type") == "compute":
+                has_functions = "Functions" in svc
+
+                if has_functions:
+                    compute_tf += _build_comments(lld, ["memory", "timeout", "concurrency"])
+                    memory = _parse_int(config.get("memory"), "512")
+                    timeout = _parse_int(config.get("timeout"), "30")
+                    compute_tf += f"""resource "google_cloudfunctions_function" "{c_id}" {{
+  name        = "${{var.gcp_project}}-{c_id}"
+  description = "Google Cloud Function endpoint for {c_id}"
+  runtime     = "nodejs20"
+
+  available_memory_mb   = {memory}
+  timeout               = {timeout}
+  entry_point           = "handler"
+  trigger_http          = true
+}}
+
+"""
+                else:
+                    # Cloud Run
+                    compute_tf += _build_comments(lld, ["instanceSize", "minInstances", "maxInstances"])
+                    min_scale = config.get("minInstances") or "1"
+                    max_scale = config.get("maxInstances") or "3"
+                    compute_tf += f"""resource "google_cloud_run_service" "{c_id}" {{
+  name     = "${{var.gcp_project}}-{c_id}"
+  location = var.gcp_region
+
+  template {{
+    spec {{
+      containers {{
+        image = "gcr.io/cloudrun/hello"
+        resources {{
+          limits = {{
+            memory = "512Mi"
+            cpu    = "1000m"
+          }}
+        }}
+      }}
+    }}
+    metadata {{
+      annotations = {{
+        "autoscaling.knative.dev/minScale" = "{min_scale}"
+        "autoscaling.knative.dev/maxScale" = "{max_scale}"
+      }}
+    }}
+  }}
+}}
+
+"""
+            elif c.get("type") == "database":
+                is_pg = "PostgreSQL" in svc
+
+                if is_pg:
+                    database_tf += _build_comments(lld, ["instanceClass", "storageSize", "backupRetention", "multiAZ"])
+                    instance_class = config.get("instanceClass") or "db-f1-micro"
+                    disk_size = _parse_int(config.get("storageSize"), "20")
+                    availability_type = "REGIONAL" if config.get("multiAZ") == "true" else "ZONAL"
+                    database_tf += f"""resource "google_sql_database_instance" "db" {{
+  name             = "${{var.gcp_project}}-postgres-db"
+  region           = var.gcp_region
+  database_version = "POSTGRES_15"
+
+  settings {{
+    tier = "{instance_class}"
+    disk_size = {disk_size}
+    disk_type = "PD_SSD"
+    availability_type = "{availability_type}"
+
+    backup_configuration {{
+      enabled    = true
+      start_time = "02:00"
+    }}
+  }}
+}}
+
+"""
+                    outputs_tf += """output "db_ip" {
+  value       = google_sql_database_instance.db.public_ip_address
+  description = "The database instance public IP."
+}
+
+"""
+                else:
+                    # Firestore NoSQL
+                    database_tf += _build_comments(lld, ["readCapacityUnits"])
+                    database_tf += """resource "google_firestore_database" "nosql" {
+  name        = "(default)"
+  project     = var.gcp_project
+  type        = "FIRESTORE_NATIVE"
+  location_id = "us-east1"
+}
+
+"""
+            elif c.get("type") == "storage" or "Storage" in svc:
+                storage_tf += _build_comments(lld, ["lifecycleRule", "versioningEnabled"])
+                versioning_enabled = "true" if config.get("versioningEnabled") == "true" else "false"
+                storage_tf += f"""resource "google_storage_bucket" "storage" {{
+  name          = "${{var.gcp_project}}-bucket-storage-unique"
+  location      = var.gcp_region
+  force_destroy = true
+
+  versioning {{
+    enabled = {versioning_enabled}
+  }}
+}}
+
+"""
+            elif c.get("type") == "queue":
+                database_tf += _build_comments(lld, ["queueType"])
+                database_tf += """resource "google_pubsub_topic" "pubsub" {
+  name = "${var.gcp_project}-jobs-topic"
+}
+
+resource "google_pubsub_subscription" "jobs_sub" {
+  name  = "task-queue-sub"
+  topic = google_pubsub_topic.pubsub.name
+}
+
+"""
+            elif c.get("type") == "cache":
+                database_tf += _build_comments(lld, ["nodeType"])
+                database_tf += """resource "google_redis_instance" "redis" {
+  name           = "${var.gcp_project}-cache"
+  tier           = "BASIC"
+  memory_size_gb = 1
+  region         = var.gcp_region
+}
+
+"""
+
+        files["main.tf"] = main_tf
+        files["compute.tf"] = compute_tf
+        files["database.tf"] = database_tf
+        files["storage.tf"] = storage_tf
+        files["outputs.tf"] = outputs_tf
+
+    elif provider == "private":
+        # ----------------------------------------------------
+        # PRIVATE CLOUD / ON-PREMISES TERRAFORM GENERATOR
+        # ----------------------------------------------------
+        # No single Terraform provider covers "private cloud" -- VMware, OpenStack, and bare-metal
+        # all need different providers with environment-specific credentials this tool can't know.
+        # Rather than guess, this generates null_resource placeholders that document exactly what
+        # needs manual provisioning per component, plus commented-out real provider blocks for the
+        # two most common private-cloud Terraform providers so you have a starting point either way.
+
+        files["variables.tf"] = f"""# Private Cloud Variables for {project_name}
+
+variable "environment" {{
+  type    = string
+  default = "dev"
+}}
+
+variable "project_name" {{
+  type    = string
+  default = "{safe_name}"
+}}
+
+# Fill in once you've picked a private cloud provider (see main.tf for options).
+variable "datacenter_name" {{
+  type        = string
+  default     = ""
+  description = "vSphere datacenter / OpenStack region / physical site identifier."
+}}
+"""
+
+        files["main.tf"] = (
+            f"# Provider Configuration for {project_name} — PRIVATE CLOUD\n"
+            "#\n"
+            "# Uncomment and configure ONE of the following depending on your actual private cloud platform.\n"
+            "# This tool cannot auto-detect or provision credentials for on-premises infrastructure.\n"
+            "\n"
+            "# --- Option A: VMware vSphere ---\n"
+            "# terraform {\n"
+            "#   required_providers {\n"
+            "#     vsphere = {\n"
+            '#       source  = "hashicorp/vsphere"\n'
+            '#       version = "~> 2.0"\n'
+            "#     }\n"
+            "#   }\n"
+            "# }\n"
+            '# provider "vsphere" {\n'
+            "#   user           = var.vsphere_user\n"
+            "#   password       = var.vsphere_password\n"
+            "#   vsphere_server = var.vsphere_server\n"
+            "# }\n"
+            "\n"
+            "# --- Option B: OpenStack ---\n"
+            "# terraform {\n"
+            "#   required_providers {\n"
+            "#     openstack = {\n"
+            '#       source  = "terraform-provider-openstack/openstack"\n'
+            '#       version = "~> 1.53"\n'
+            "#     }\n"
+            "#   }\n"
+            "# }\n"
+            '# provider "openstack" {\n'
+            '#   cloud = "my-openstack-cloud"\n'
+            "# }\n"
+            "\n"
+            "# --- Option C: Bare-metal (no provider — infrastructure provisioned outside Terraform) ---\n"
+            "# If deploying to bare metal without a virtualization layer, most of what's below is\n"
+            "# configuration management (Ansible/Puppet/manual) rather than Terraform's job.\n"
+        )
+
+        manual_provisioning_tf = (
+            f"# Private Cloud Resource Placeholders for {project_name}\n"
+            "#\n"
+            "# These null_resource blocks are NOT real infrastructure — Terraform has no generic way to\n"
+            "# provision a VM on an arbitrary private cloud. Each one documents exactly what a human (or a\n"
+            "# platform-specific Terraform provider, once you pick one above) needs to provision manually.\n"
+            "\n"
+        )
+
+        for c in components:
+            lld = _get_lld(c, "private")
+            svc = _get_service_name(c, "private")
+            config = lld.get("config") or {}
+            reasoning = lld.get("reasoning") or {}
+            c_id = c.get("id")
+            key_lines = "\n".join(
+                f"# {k}: {config[k]}" + (f" — {reasoning[k]}" if reasoning.get(k) else "") for k in config.keys()
+            )
+            manual_provisioning_tf += (
+                f"# ---- {c.get('name')} → {svc} ----\n"
+                f"{key_lines}\n"
+                f'resource "null_resource" "{c_id}_manual_provisioning" {{\n'
+                "  triggers = {\n"
+                f'    component   = "{c_id}"\n'
+                f'    service     = "{svc.replace(chr(34), chr(39))}"\n'
+                '    provisioned = "false" # flip once this component has actually been provisioned by hand\n'
+                "  }\n"
+                "}\n"
+                "\n"
+            )
+
+        files["compute.tf"] = manual_provisioning_tf
+        files["outputs.tf"] = (
+            "# No computed outputs — private cloud resources above are manual placeholders,\n"
+            "# not real Terraform-managed infrastructure. Update this once real resources exist.\n"
+        )
+
+    # README.MD (Consistent across providers)
+    compliance_section = _build_compliance_section(industry_context, components)
+    manual_section = _build_manual_provisioning_section(provider, components)
+
+    files["README.md"] = f"""# Terraform Configurations for {project_name}
+
+This Terraform configuration script was automatically synthesized by the **AI Cloud Architecture Generator** based on your project requirements and low-level designs.
+
+## File Structure
+*   `main.tf`: Provider registrations and base authentication parameters.
+*   `networking.tf`: Private subnets, VPC network definitions, and firewall wrappers.
+*   `compute.tf`: API servers, application workers, and execution limits.
+*   `database.tf`: Database persistence layers and caching clusters.
+*   `storage.tf`: Object storage buckets and asset delivery CDNs.
+*   `variables.tf`: Parameter definitions (regions, environments, naming prefixes).
+*   `outputs.tf`: Primary outputs (endpoints, database hosts, resource names).
+
+---
+
+> [!WARNING]
+> ## Deployment Security Disclaimer
+> This configuration represents a starting point. It has been derived automatically based on design rules and client brainstorming.
+> You MUST review instance profiles, security group configurations, IAM roles, and pricing implications before running `terraform apply` in any real staging or production environments.
+{compliance_section}
+{manual_section}
+---
+
+## State Management Configuration
+To maintain shared and remote state files, configure a backend configuration block inside `main.tf`. 
+
+### Remote State Backend Templates
+
+#### AWS S3 Backend:
+```hcl
+terraform {{
+  backend "s3" {{
+    bucket         = "your-terraform-state-bucket"
+    key            = "states/terraform.tfstate"
+    region         = "us-east-1"
+    dynamodb_table = "terraform-lock"
+  }}
+}}
+```
+
+#### Azure Blob Backend:
+```hcl
+terraform {{
+  backend "azurerm" {{
+    resource_group_name  = "state-resource-group"
+    storage_account_name = "statestorageaccount"
+    container_name       = "tfstate"
+    key                  = "terraform.tfstate"
+  }}
+}}
+```
+
+#### GCP Cloud Storage Backend:
+```hcl
+terraform {{
+  backend "gcs" {{
+    bucket  = "your-terraform-state-bucket"
+    prefix  = "terraform/state"
+  }}
+}}
+```
+
+---
+
+## Deployment Steps
+1. Install the Terraform CLI on your workstation.
+2. Authenticate CLI access with credentials (e.g. `aws configure`, `az login`, or `gcloud auth`).
+3. Run initialization:
+   ```bash
+   terraform init
+   ```
+4. Preview the changes:
+   ```bash
+   terraform plan
+   ```
+5. Apply changes:
+   ```bash
+   terraform apply
+   ```
+"""
+
+    return files

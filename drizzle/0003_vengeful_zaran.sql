@@ -1,1 +1,0 @@
-ALTER TABLE "requirements" ADD COLUMN "industry_context" jsonb DEFAULT '{"industry":"none","rationale":"","complianceAnswers":[],"flags":{}}'::jsonb NOT NULL;

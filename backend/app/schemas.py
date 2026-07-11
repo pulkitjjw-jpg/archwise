@@ -1,0 +1,82 @@
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class ProjectCreateRequest(BaseModel):
+    name: str
+    ideaText: str
+
+
+class ConversationCreateRequest(BaseModel):
+    role: str
+    message: str
+    stage: str
+
+
+class RequirementsPutRequest(BaseModel):
+    functional: Any
+    nonFunctional: dict[str, Any]
+
+
+# Strict validation for the manual architecture editor's request body -- a deliberate
+# improvement over the pre-split app's ad-hoc `if (!components || !connections)` check, per the
+# migration plan. Kept intentionally shallow: lld.config/lld.reasoning stay untyped
+# Dict[str, str] rather than per-component-type schemas (that's a scope-creep trap with no
+# payoff -- see cloud_mapping.py/lld_rules.py's own arbitrary string-keyed config shape).
+class CostEstimate(BaseModel):
+    min: float
+    max: float
+    assumptions: str = ""
+
+
+class ProviderAlternative(BaseModel):
+    serviceName: str
+    reason: str = ""
+    costEstimate: CostEstimate | None = None
+
+
+class LldSpec(BaseModel):
+    config: dict[str, str] = Field(default_factory=dict)
+    reasoning: dict[str, str] = Field(default_factory=dict)
+
+
+class ProviderMapping(BaseModel):
+    serviceName: str
+    alternatives: list[ProviderAlternative] = Field(default_factory=list)
+    costEstimate: CostEstimate | None = None
+    lld: LldSpec | None = None
+    swapReasoning: str | None = None
+
+
+class CloudMappings(BaseModel):
+    aws: ProviderMapping | None = None
+    azure: ProviderMapping | None = None
+    gcp: ProviderMapping | None = None
+    kubernetes: ProviderMapping | None = None
+    private: ProviderMapping | None = None
+
+
+class Component(BaseModel):
+    id: str
+    name: str
+    type: str
+    description: str = ""
+    reasoning: str = ""
+    service: str | None = None
+    rulesFired: list[str] | None = None
+    metadata: dict[str, Any] | None = None
+    cloudMappings: CloudMappings | None = None
+
+
+class Connection(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    from_: str = Field(alias="from")
+    to: str
+    protocol: str | None = None
+
+
+class ManualArchitectureRequest(BaseModel):
+    components: list[Component]
+    connections: list[Connection]

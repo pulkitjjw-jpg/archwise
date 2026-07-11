@@ -1,4 +1,16 @@
-import { IndustryContext } from "@/db/schema";
+// Locally-defined mirror of the backend's IndustryContext shape (see backend/app/models.py) --
+// this file stays in the frontend purely for instant client-side LLD preview in
+// ArchitectureWorkspace.tsx, so it can no longer import types from the retired Drizzle schema.
+export type IndustryContext = {
+  industry: "fintech" | "healthtech" | "none";
+  rationale: string;
+  complianceAnswers: Array<{ question: string; answer: string }>;
+  flags: {
+    handlesCardDataDirectly?: boolean;
+    storesPHI?: boolean;
+    dataResidency?: string;
+  };
+};
 
 export type LldConfig = {
   config: Record<string, string>;
