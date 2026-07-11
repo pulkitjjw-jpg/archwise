@@ -48,6 +48,202 @@ const TYPE_LABELS: Record<string, string> = {
   deidentification: "De-identification",
 };
 
+type SubChoiceOption = {
+  value: string;
+  label: string;
+  recommended: boolean;
+  reasoning: string;
+};
+
+type SubChoiceDef = {
+  key: string;
+  label: string;
+  currentSummaryKeys: string[];
+};
+
+// One level more granular than the existing whole-service swap ("Switch to this" under
+// Alternatives Considered): these are internal variants WITHIN the already-chosen service
+// (e.g. which engine Amazon RDS runs, not RDS-vs-DynamoDB). Deliberately scoped to the 4
+// component types with a genuinely meaningful, real internal sub-choice -- not every type gets
+// one. Gated on the presence of an LLD config key that only exists on the relevant branch of
+// lld_rules.py (e.g. "instanceClass" only appears for relational databases), so a component
+// that wouldn't actually offer this choice (a NoSQL database, a serverless function) doesn't
+// show a nonsensical option list.
+function getSubChoiceDef(nodeType: string, provider: CloudProviderKey, lldConfig: Record<string, string> | undefined): SubChoiceDef | null {
+  const config = lldConfig || {};
+
+  if (nodeType === "database" && config.instanceClass) {
+    return { key: "engine", label: "Database Engine", currentSummaryKeys: ["engine", "instanceClass", "multiAZ"] };
+  }
+  if (nodeType === "compute" && (provider === "aws" || provider === "azure" || provider === "gcp") && config.instanceSize) {
+    return { key: "containerPlatform", label: "Container Platform", currentSummaryKeys: ["containerPlatform", "instanceSize", "minInstances", "maxInstances"] };
+  }
+  if (nodeType === "queue" && config.queueType) {
+    return { key: "queueType", label: "Queue Type", currentSummaryKeys: ["queueType", "visibilityTimeoutSec"] };
+  }
+  if (nodeType === "storage") {
+    return { key: "storageClass", label: "Storage Class / Tier", currentSummaryKeys: ["storageClass", "lifecycleRule"] };
+  }
+  return null;
+}
+
+function getSubChoiceOptions(
+  def: SubChoiceDef,
+  provider: CloudProviderKey,
+  lldConfig: Record<string, string> | undefined,
+  requirements: any
+): SubChoiceOption[] {
+  const config = lldConfig || {};
+  const compliance = (requirements?.nonFunctional?.compliance || "").toLowerCase();
+  const teamMaturity = (requirements?.nonFunctional?.teamMaturity || "").toLowerCase();
+  const isComplianceSensitive =
+    compliance.includes("pci") || compliance.includes("hipaa") || compliance.includes("gdpr") || compliance.includes("soc2");
+
+  if (def.key === "engine") {
+    return [
+      {
+        value: "PostgreSQL 15",
+        label: "PostgreSQL 15",
+        recommended: !isComplianceSensitive,
+        reasoning:
+          "Strong ACID guarantees, rich indexing/JSON support, and no per-core licensing concerns -- the safest general-purpose default for transactional data like this.",
+      },
+      {
+        value: "MySQL 8",
+        label: "MySQL 8",
+        recommended: false,
+        reasoning:
+          "Extremely wide tooling/hosting familiarity and a simpler default replication model, at the cost of a slightly less feature-rich SQL surface than PostgreSQL.",
+      },
+      {
+        value: "MariaDB 10.11",
+        label: "MariaDB 10.11",
+        recommended: isComplianceSensitive,
+        reasoning: isComplianceSensitive
+          ? "A fully open-source MySQL fork with no Oracle affiliation -- often preferred once compliance/licensing review is in scope, with the same operational shape as MySQL."
+          : "A fully open-source MySQL fork, functionally close to MySQL but without any Oracle-affiliated licensing ambiguity.",
+      },
+    ];
+  }
+
+  if (def.key === "containerPlatform") {
+    const teamKnowsK8s =
+      teamMaturity.includes("kubernetes") ||
+      teamMaturity.includes("eks") ||
+      teamMaturity.includes("aks") ||
+      teamMaturity.includes("gke") ||
+      teamMaturity.includes("experienced");
+    const platformsByProvider: Partial<Record<CloudProviderKey, SubChoiceOption[]>> = {
+      aws: [
+        {
+          value: "Amazon ECS Fargate",
+          label: "Amazon ECS Fargate",
+          recommended: !teamKnowsK8s,
+          reasoning: "Fully managed container orchestration with no cluster to operate -- the lowest ops-overhead path to running containers on AWS.",
+        },
+        {
+          value: "Amazon EKS",
+          label: "Amazon EKS (Managed Kubernetes)",
+          recommended: teamKnowsK8s,
+          reasoning: "Full Kubernetes API access and portability, at the cost of owning cluster upgrades/add-ons -- worth it once the team already has Kubernetes experience.",
+        },
+        {
+          value: "AWS App Runner",
+          label: "AWS App Runner",
+          recommended: false,
+          reasoning: "The simplest possible path from a container image to a running HTTPS service, but with the least infrastructure control of the three.",
+        },
+      ],
+      azure: [
+        {
+          value: "Azure Container Apps",
+          label: "Azure Container Apps",
+          recommended: !teamKnowsK8s,
+          reasoning: "Serverless containers with built-in scale-to-zero and Dapr integration -- minimal ops overhead for most API workloads.",
+        },
+        {
+          value: "Azure Kubernetes Service (AKS)",
+          label: "Azure Kubernetes Service (AKS)",
+          recommended: teamKnowsK8s,
+          reasoning: "Full managed Kubernetes -- the right call once the team already operates Kubernetes elsewhere.",
+        },
+        {
+          value: "Azure App Service (Containers)",
+          label: "Azure App Service (Containers)",
+          recommended: false,
+          reasoning: "The most mature/battle-tested option for a single container-per-app model, with less flexibility for multi-container workloads.",
+        },
+      ],
+      gcp: [
+        {
+          value: "Google Cloud Run",
+          label: "Google Cloud Run",
+          recommended: !teamKnowsK8s,
+          reasoning: "Fully managed, scale-to-zero container platform -- the lowest ops-overhead path on GCP for most API workloads.",
+        },
+        {
+          value: "Google Kubernetes Engine (GKE)",
+          label: "Google Kubernetes Engine (GKE)",
+          recommended: teamKnowsK8s,
+          reasoning: "Full managed Kubernetes with Autopilot available -- makes sense once the team already operates Kubernetes elsewhere.",
+        },
+        {
+          value: "Compute Engine (Managed Instance Group)",
+          label: "Compute Engine (Managed Instance Group)",
+          recommended: false,
+          reasoning: "VM-level control for workloads with unusual requirements a container platform can't accommodate, at the cost of managing the VM image/OS yourself.",
+        },
+      ],
+    };
+    return platformsByProvider[provider] || [];
+  }
+
+  if (def.key === "queueType") {
+    const isCurrentlyFifo = (config.queueType || "").startsWith("FIFO");
+    return [
+      {
+        value: "Standard",
+        label: "Standard (at-least-once, best-effort order)",
+        recommended: !isCurrentlyFifo,
+        reasoning: "Higher throughput and simpler scaling -- the right default unless message order or exactly-once processing genuinely matters.",
+      },
+      {
+        value: "FIFO (Strict Ordering)",
+        label: "FIFO (strict ordering, exactly-once)",
+        recommended: isCurrentlyFifo,
+        reasoning:
+          "Guarantees messages are processed in the exact order they were sent and exactly once -- required whenever out-of-order or duplicate processing would corrupt state (e.g. sequential financial transactions).",
+      },
+    ];
+  }
+
+  if (def.key === "storageClass") {
+    const current = config.storageClass || "Standard (Hot)";
+    return [
+      {
+        value: "Standard (Hot)",
+        label: "Standard (Hot)",
+        recommended: current === "Standard (Hot)",
+        reasoning: "Optimized for frequently-accessed data with no retrieval latency or fee -- the right default for anything actively read/written.",
+      },
+      {
+        value: "Infrequent Access (Cool)",
+        label: "Infrequent Access (Cool)",
+        recommended: current === "Infrequent Access (Cool)",
+        reasoning: "Lower per-GB storage cost in exchange for a small retrieval fee -- fits data accessed roughly monthly or less, like older exports or backups.",
+      },
+      {
+        value: "Archive (Cold)",
+        label: "Archive (Cold)",
+        recommended: current === "Archive (Cold)",
+        reasoning: "The lowest storage cost available, but retrieval can take minutes to hours -- appropriate only for compliance/regulatory retention data you rarely if ever need to read back.",
+      },
+    ];
+  }
+
+  return [];
+}
+
 const DIAGRAM_NODE_WIDTH = 208;
 const DIAGRAM_NODE_HEIGHT = 68;
 
@@ -1086,6 +1282,43 @@ export default function ArchitectureWorkspace({
   };
 
   const lldData = getLldData();
+
+  // Sub-choice suggestions -- one level more granular than the whole-service swap above (e.g.
+  // which engine Amazon RDS runs, not RDS-vs-DynamoDB). Only defined for component types with a
+  // genuinely meaningful internal variant; null for everything else.
+  const subChoiceDef = selectedNode ? getSubChoiceDef(selectedNode.type, activeProvider, lldData?.config) : null;
+  const subChoiceOptions = subChoiceDef ? getSubChoiceOptions(subChoiceDef, activeProvider, lldData?.config, requirements) : [];
+
+  // Updates both the LLD config value and its reasoning in a single setDraftHld call.
+  // handleUpdateLldConfig/handleUpdateLldReasoning each independently close over `draftHld`, so
+  // calling them back-to-back here would have the second call's setDraftHld silently overwrite
+  // the first (both read the same pre-update `draftHld` since React hasn't re-rendered between
+  // the two synchronous calls) -- the config change would be lost, only the reasoning would
+  // stick. Doing both fields in one pass avoids that.
+  const handleSelectSubChoice = (subChoiceKey: string, option: SubChoiceOption) => {
+    if (!draftHld || !selectedNode) return;
+    const updatedComponents = draftHld.components.map((c) => {
+      if (c.id !== selectedNode.id) return c;
+      const mapping = c.cloudMappings?.[activeProvider];
+      if (!mapping) return c;
+      const currentLld = mapping.lld || { config: {}, reasoning: {} };
+      return {
+        ...c,
+        metadata: { ...c.metadata, overrideSource: "user" as const },
+        cloudMappings: {
+          ...c.cloudMappings,
+          [activeProvider]: {
+            ...mapping,
+            lld: {
+              config: { ...currentLld.config, [subChoiceKey]: option.value },
+              reasoning: { ...currentLld.reasoning, [subChoiceKey]: option.reasoning },
+            },
+          },
+        },
+      } as ComponentData;
+    });
+    setDraftHld({ components: updatedComponents, connections: draftHld.connections });
+  };
 
   if (!architecture) {
     return (
@@ -2202,6 +2435,74 @@ export default function ArchitectureWorkspace({
                         <div className="text-[11px] text-success font-medium leading-normal mt-1 italic">
                           Assumptions: {selectedMapping.costEstimate.assumptions}
                         </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Sub-choice suggestions -- one level more granular than the whole-service
+                      swap under "Alternatives Considered" below: variants WITHIN the
+                      already-chosen service (e.g. which engine Amazon RDS runs), not a
+                      different service entirely. Shown in the same modes as the whole-service
+                      swap section. */}
+                  {subChoiceDef && subChoiceOptions.length > 0 && (explanationMode === "technical" || isEditing) && (
+                    <div className="border-t border-line/80 pt-4">
+                      <h5 className="flex items-center gap-1.5 text-xs font-bold text-ink-muted uppercase tracking-wider">
+                        {subChoiceDef.label}
+                        <InfoTooltip text="A more granular choice within the service already selected above -- e.g. which database engine Amazon RDS runs. Switching here updates the low-level config, not which top-level cloud service is used." />
+                      </h5>
+
+                      {/* Current internal configuration state, shown before the alternatives so
+                          it's clear what's already selected, not just a flat option list. */}
+                      <div className="mt-2 rounded-2xl border border-line bg-white p-3 text-[11px] text-ink-muted">
+                        <span className="font-bold text-ink">Currently configured: </span>
+                        {subChoiceDef.currentSummaryKeys
+                          .filter((k) => lldData?.config?.[k])
+                          .map((k, i) => (
+                            <span key={k}>
+                              {i > 0 && " · "}
+                              <span className="font-semibold text-ink">{k}:</span> {lldData!.config[k]}
+                            </span>
+                          ))}
+                      </div>
+
+                      <div className="mt-2 space-y-2">
+                        {subChoiceOptions.map((opt) => {
+                          const isCurrent = lldData?.config?.[subChoiceDef.key] === opt.value;
+                          return (
+                            <div
+                              key={opt.value}
+                              className={`rounded-2xl border p-3.5 text-xs leading-normal ${
+                                isCurrent ? "border-accent/40 bg-accent-soft/40" : "border-line bg-white text-ink"
+                              }`}
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="font-bold text-ink">
+                                  {opt.label}
+                                  {isCurrent && (
+                                    <span className="ml-1.5 rounded-full bg-accent px-1.5 py-0.5 text-[8px] font-extrabold uppercase tracking-wide text-white">
+                                      Current
+                                    </span>
+                                  )}
+                                  {!isCurrent && opt.recommended && (
+                                    <span className="ml-1.5 rounded-full bg-success-soft px-1.5 py-0.5 text-[8px] font-extrabold uppercase tracking-wide text-success">
+                                      Recommended
+                                    </span>
+                                  )}
+                                </div>
+                                {isEditing && !isCurrent && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleSelectSubChoice(subChoiceDef.key, opt)}
+                                    className="shrink-0 rounded-lg bg-accent hover:bg-accent-ink text-white px-2 py-1 text-[9px] font-extrabold uppercase tracking-wide transition shadow-sm"
+                                  >
+                                    Select
+                                  </button>
+                                )}
+                              </div>
+                              <div className="text-ink-muted mt-1 font-medium leading-relaxed">{opt.reasoning}</div>
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                   )}
