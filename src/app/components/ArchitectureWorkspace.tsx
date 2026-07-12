@@ -17,6 +17,7 @@ import {
   getStepColor,
   type JourneyVerification,
 } from "@/lib/journey-verification";
+import { computeHealthScore, type HealthScore } from "@/lib/health-score";
 import {
   computeDiagramLayoutAsync,
   buildRoundedPath,
@@ -1761,6 +1762,30 @@ export default function ArchitectureWorkspace({
   );
   const highSeverityCount = currentSecurityFindings.filter((f) => f.severity === "high").length;
 
+  // Architecture Health Score (Workstream T3) -- deterministic, rule-based, computed client-side
+  // from data already loaded (never another LLM call). Security dimension deliberately reuses
+  // currentSecurityFindings above rather than re-running its own audit, per the spec's "share the
+  // same checks" requirement.
+  const healthScore: HealthScore | null = architecture
+    ? computeHealthScore(
+        architecture.hld.components,
+        architecture.hld.connections,
+        requirements?.nonFunctional?.budget,
+        currentSecurityFindings,
+        activeProvider,
+        totalMinCost,
+        totalMaxCost
+      )
+    : null;
+  const [expandedHealthDimension, setExpandedHealthDimension] = useState<keyof Omit<HealthScore, "overall"> | null>(null);
+  const HEALTH_DIMENSION_LABELS: Record<keyof Omit<HealthScore, "overall">, string> = {
+    costEfficiency: "Cost Efficiency",
+    scalability: "Scalability",
+    security: "Security",
+    vendorLockIn: "Vendor Lock-in",
+  };
+  const healthScoreColor = (score: number) => (score >= 75 ? "success" : score >= 50 ? "warning" : "danger");
+
   const getProviderCostDeltaString = (prov: CloudProviderKey) => {
     // costDelta is only ever computed for aws/azure/gcp (see architectures/route.ts) — cloud
     // spend deltas don't map cleanly onto Kubernetes/private cloud's hardware-amortized costs.
@@ -2630,6 +2655,78 @@ export default function ArchitectureWorkspace({
                     </span>
                   </div>
                 </div>
+
+                {/* Architecture Health Score (Workstream T3) -- a report-card badge, deliberately
+                    placed right under the cost line so it's one of the first things visible, not
+                    buried below the fold. Deterministic, not another LLM guess -- see
+                    src/lib/health-score.ts. Each dimension expands in place to show WHY it scored
+                    the way it did, reusing the same reasoning-trace pattern the rest of the app
+                    already uses for decisions/risks. */}
+                {healthScore && (
+                  <div className="mt-4 rounded-2xl border border-line bg-white p-4 shadow-sm">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="flex items-center gap-3">
+                        <div
+                          className={`flex h-14 w-14 flex-none items-center justify-center rounded-2xl border-2 text-lg font-black ${
+                            healthScoreColor(healthScore.overall) === "success"
+                              ? "border-success/30 bg-success-soft text-success"
+                              : healthScoreColor(healthScore.overall) === "warning"
+                                ? "border-warning/30 bg-warning-soft text-warning"
+                                : "border-danger/30 bg-danger-soft text-danger"
+                          }`}
+                        >
+                          {healthScore.overall}
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-xs font-extrabold uppercase tracking-wider text-ink">Architecture Health Score</span>
+                            <InfoTooltip text="A deterministic, rule-based grade (0-100) across four dimensions -- cost efficiency, scalability readiness, security posture, and vendor lock-in risk. Not an LLM guess: every point is computed from this design's actual configuration. Click a dimension below to see exactly why it scored the way it did." />
+                          </div>
+                          <p className="text-[11px] text-ink-muted">out of 100, for {PROVIDER_LABELS[activeProvider]}</p>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {(Object.keys(HEALTH_DIMENSION_LABELS) as (keyof Omit<HealthScore, "overall">)[]).map((dim) => {
+                          const d = healthScore[dim];
+                          const color = healthScoreColor(d.score);
+                          const isExpanded = expandedHealthDimension === dim;
+                          return (
+                            <button
+                              key={dim}
+                              onClick={() => setExpandedHealthDimension(isExpanded ? null : dim)}
+                              className={`flex flex-col items-start rounded-xl border px-3 py-1.5 text-left transition ${
+                                isExpanded ? "border-accent ring-2 ring-accent-soft" : "border-line-strong hover:border-ink-faint"
+                              }`}
+                            >
+                              <span className="text-[9px] font-bold uppercase tracking-wide text-ink-faint">
+                                {HEALTH_DIMENSION_LABELS[dim]}
+                              </span>
+                              <span
+                                className={`text-sm font-extrabold ${
+                                  color === "success" ? "text-success" : color === "warning" ? "text-warning" : "text-danger"
+                                }`}
+                              >
+                                {d.score}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    {expandedHealthDimension && (
+                      <div className="mt-3 rounded-xl border border-line bg-paper/60 p-3 text-xs">
+                        <span className="font-bold text-ink">
+                          Why {HEALTH_DIMENSION_LABELS[expandedHealthDimension]} scored {healthScore[expandedHealthDimension].score}:
+                        </span>
+                        <ul className="mt-1.5 list-disc space-y-1 pl-4 text-ink-muted">
+                          {healthScore[expandedHealthDimension].reasoning.map((r, i) => (
+                            <li key={i}>{r}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {/* Team Maturity / Deployment Target Advisory */}
                 {providerMaturityWarning && (
