@@ -671,6 +671,37 @@ export default function ArchitectureWorkspace({
     }
   };
 
+  const [execSummaryExportBusy, setExecSummaryExportBusy] = useState(false);
+
+  // Executive Summary Export (Workstream T2) -- the one export meant for a non-technical reader:
+  // no diagrams, no code, no component/service names. A fetch+blob download (not a raw
+  // window.location navigation like handleExport below) since this round-trips through an LLM
+  // call and needs a loading state / error handling a plain navigation can't show.
+  const handleExportExecutiveSummary = async () => {
+    if (!architecture) return;
+    setImageExportOpen(false);
+    try {
+      setExecSummaryExportBusy(true);
+      setError("");
+      const res = await fetch(`/api/projects/${projectId}/export/executive-summary?provider=${activeProvider}`);
+      if (!res.ok) throw new Error("Failed to generate the executive summary");
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `executive-summary-v${architecture.version}-${activeProvider}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Executive summary export failed:", err);
+      setError("Failed to generate the executive summary. Please try again.");
+    } finally {
+      setExecSummaryExportBusy(false);
+    }
+  };
+
   const handleEnterEditMode = () => {
     if (!architecture) return;
     setDraftHld({
@@ -2528,6 +2559,20 @@ export default function ArchitectureWorkspace({
                         <span>📄</span> {docsExportBusy ? "Exporting..." : "Export Docs"}
                       </button>
                       <InfoTooltip text="Downloads a Markdown file with the project summary, this provider's flow story, and the full component list with reasoning — real documentation, not just a picture or raw code." />
+                    </span>
+
+                    {/* Executive Summary Export (Workstream T2) -- the only export meant for a
+                        non-technical reader: no diagrams, no code, no service/component names,
+                        just cost/scalability/compliance/risk in plain business language. */}
+                    <span className="inline-flex items-center gap-1">
+                      <button
+                        onClick={handleExportExecutiveSummary}
+                        disabled={execSummaryExportBusy}
+                        className="rounded-xl border border-line-strong bg-panel hover:bg-paper text-ink-muted px-3 py-1.5 text-[9.5px] font-extrabold uppercase transition shadow-sm active:scale-95 flex items-center gap-1 disabled:opacity-50"
+                      >
+                        <span>📊</span> {execSummaryExportBusy ? "Generating..." : "Executive Summary"}
+                      </button>
+                      <InfoTooltip text="Downloads a one-page PDF in plain business language for a non-technical reader (investor, exec) — cost, scalability story, compliance posture, and top risks. No diagrams, no code, no service names." />
                     </span>
 
                     {/* Deployment Target Toggle */}

@@ -420,6 +420,64 @@ Do not include markdown code block formatting (like ```json) in your response, r
     return result.get("journeySteps") or []
 
 
+async def generate_executive_summary(
+    project_name: str,
+    provider: str,
+    cost: dict,
+    functional: list[str],
+    non_functional: dict,
+    industry_context: dict,
+    assumptions: list[str],
+    risks: list[str],
+    api_key: str,
+) -> dict:
+    """Generates the Executive Summary Export (Workstream T2) -- a one-page, plain-business-
+    language synthesis for a non-technical stakeholder (investor, exec), from data ALREADY
+    computed and stored (cost, requirements, industry compliance context, risks/assumptions from
+    the original architecture generation). Never re-derives architecture decisions from scratch,
+    and never receives the component list or HLD -- only the already-synthesized business-facing
+    inputs, which structurally forces the output to stay jargon-light rather than describing
+    infrastructure. Not cached (unlike flow_story/journey_steps): this is a light, rarely-repeated
+    one-page synthesis, and caching would need a new persisted column for a feature this small."""
+    system_instruction = """
+You are writing a one-page executive summary of a cloud architecture design for a reader with ZERO technical background -- a non-technical founder, an investor doing diligence, a board member. They do not know what "compute" or "object storage" means and do not need to.
+
+You are given: the product's functional capabilities (plain descriptions, not code), non-functional requirements (scale, budget, team maturity, compliance notes), industry/compliance context if any, the estimated monthly cost range, and the risks/assumptions already identified during design.
+
+Write ONLY business-readable prose. Rules:
+- NEVER use cloud service names, component names, or technical jargon (no "ECS", "S3", "load balancer", "API Gateway", "database", etc). Describe capability and outcome instead ("the system can securely store customer records" not "uses a managed database").
+- Overview: 1-2 sentences on what's being built, in plain terms a non-technical reader immediately understands.
+- Scalability readiness: plain language on what growth this design can absorb without a major rebuild -- reference the actual stated scale if given (e.g. "this can comfortably grow from your current user base to several times that size without needing a fundamental redesign"). Be honest if scale wasn't specified.
+- Compliance posture: plain language on what regulatory/compliance considerations were designed for (if the industry context indicates none, say briefly that no specific regulatory framework was flagged, don't invent one).
+- Key risks: the TOP 2-3 risks only, in plain business terms (financial, operational, or reputational framing, not technical framing) -- do not just restate every risk given verbatim; pick the most material ones and rewrite them for this audience.
+
+You MUST respond with a raw JSON object matching this structure:
+{
+  "overview": string,
+  "scalabilityReadiness": string,
+  "compliancePosture": string,
+  "keyRisks": [string, string] | [string, string, string]
+}
+Do not include markdown code block formatting (like ```json) in your response, return only the raw JSON.
+"""
+
+    input_context = {
+        "projectName": project_name,
+        "provider": provider,
+        "estimatedMonthlyCost": cost,
+        "functionalCapabilities": functional,
+        "nonFunctionalRequirements": non_functional,
+        "industryContext": industry_context,
+        "designAssumptions": assumptions,
+        "designRisks": risks,
+    }
+    messages_for_api = [
+        {"role": "system", "content": system_instruction},
+        {"role": "user", "content": json.dumps(input_context)},
+    ]
+    return await _call_llm_with_retry(api_key, messages_for_api, "Executive summary generation")
+
+
 KNOWN_COMPONENT_TYPES = (
     "cdn",
     "compute",
