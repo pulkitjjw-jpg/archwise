@@ -18,6 +18,7 @@ import {
   type JourneyVerification,
 } from "@/lib/journey-verification";
 import { computeHealthScore, type HealthScore } from "@/lib/health-score";
+import { FIELD_EXPLANATIONS } from "@/lib/field-explanations";
 import {
   computeDiagramLayoutAsync,
   buildRoundedPath,
@@ -1461,13 +1462,6 @@ export default function ArchitectureWorkspace({
     compliance: "Security & Compliance",
   };
   type WhatIfIndustry = "none" | "fintech" | "healthtech";
-  type WhatIfSnapshot = {
-    functional: string;
-    nfr: WhatIfNFR;
-    industry: WhatIfIndustry;
-    handlesCardData: boolean;
-    storesPHI: boolean;
-  };
   type WhatIfPreviewData = {
     components: ComponentData[];
     connections: ConnectionData[];
@@ -1481,6 +1475,13 @@ export default function ArchitectureWorkspace({
     } | null;
     securityFindings: Record<string, SecurityFinding[]>;
   };
+
+  // Workstream V -- AI-suggested HYPOTHETICAL variations per field, replacing the earlier
+  // pre-fill-with-current-value approach: fields start empty, and these chips (fetched from
+  // /whatif-suggestions) are the primary way to fill them, same chip pattern RequirementsPanel
+  // already uses for its own (differently-framed) suggestions.
+  type WhatIfSuggestion = { value: string; why: string };
+  type WhatIfSuggestions = Partial<Record<keyof WhatIfNFR | "functional" | "industry", WhatIfSuggestion[]>>;
 
   // Shareable Read-Only Review Links (Workstream T7) -- lets the creator generate an unguessable
   // no-login link (and manage/revoke existing ones) for this project. The link itself is served
@@ -1542,41 +1543,54 @@ export default function ArchitectureWorkspace({
   };
 
   const [whatIfMode, setWhatIfMode] = useState(false);
+  // Additional capabilities to explore adding, one per line -- appended to the current functional
+  // list at submit time, never replaces it (see resolveWhatIfFunctional below).
   const [whatIfFunctional, setWhatIfFunctional] = useState("");
+  // Starts BLANK, not pre-filled with the current value -- per explicit feedback, the primary
+  // experience should be picking an AI-suggested hypothetical, not editing what's already true.
+  // A blank field falls back to the real current value at submit time (resolveWhatIfNFR below),
+  // so leaving something untouched still means "keep this as it really is", not "unspecified".
   const [whatIfNFR, setWhatIfNFR] = useState<WhatIfNFR>(BLANK_NFR);
   const [whatIfIndustry, setWhatIfIndustry] = useState<WhatIfIndustry>("none");
   const [whatIfHandlesCardData, setWhatIfHandlesCardData] = useState(false);
   const [whatIfStoresPHI, setWhatIfStoresPHI] = useState(false);
   const [whatIfAdditionalContext, setWhatIfAdditionalContext] = useState("");
   const [whatIfProvider, setWhatIfProvider] = useState<CloudProviderKey>(activeProvider);
-  const [whatIfOriginal, setWhatIfOriginal] = useState<WhatIfSnapshot | null>(null);
+  // Industry is a fixed-choice toggle, not free text -- there's no meaningful "blank" state for
+  // it, so it starts at the CURRENT selection and "changed" just means picking a different one.
+  const [whatIfCurrentIndustry, setWhatIfCurrentIndustry] = useState<WhatIfIndustry>("none");
   const [whatIfPreview, setWhatIfPreview] = useState<WhatIfPreviewData | null>(null);
   const [whatIfLoading, setWhatIfLoading] = useState(false);
   const [whatIfApplying, setWhatIfApplying] = useState(false);
   const [whatIfError, setWhatIfError] = useState("");
+  const [whatIfSuggestions, setWhatIfSuggestions] = useState<WhatIfSuggestions>({});
+  const [whatIfSuggestionsLoading, setWhatIfSuggestionsLoading] = useState(false);
+  const whatIfResultsRef = useRef<HTMLDivElement>(null);
 
-  // Pre-populates every field from the project's CURRENT saved requirements (the same data the
-  // Requirements tab shows) and snapshots those starting values so edits can be visually marked
-  // as "changed" against them.
+  const loadWhatIfSuggestions = () => {
+    setWhatIfSuggestionsLoading(true);
+    setWhatIfSuggestions({});
+    fetch(`/api/projects/${projectId}/architectures/whatif-suggestions`, { method: "POST" })
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error("Failed to load suggestions"))))
+      .then((data) => setWhatIfSuggestions(data.suggestions || {}))
+      .catch((err) => console.error("Failed to load what-if suggestions:", err))
+      .finally(() => setWhatIfSuggestionsLoading(false));
+  };
+
   const openWhatIf = () => {
-    const nfr: WhatIfNFR = { ...BLANK_NFR, ...(requirements?.nonFunctional || {}) };
-    const functionalStr = (requirements?.functional || []).join("\n");
-    const industry: WhatIfIndustry = requirements?.industryContext?.industry || "none";
-    const flags = requirements?.industryContext?.flags || {};
-    const handlesCardData = !!flags.handlesCardDataDirectly;
-    const storesPHI = !!flags.storesPHI;
-
-    setWhatIfFunctional(functionalStr);
-    setWhatIfNFR(nfr);
-    setWhatIfIndustry(industry);
-    setWhatIfHandlesCardData(handlesCardData);
-    setWhatIfStoresPHI(storesPHI);
+    setWhatIfFunctional("");
+    setWhatIfNFR(BLANK_NFR);
+    const currentIndustry: WhatIfIndustry = requirements?.industryContext?.industry || "none";
+    setWhatIfIndustry(currentIndustry);
+    setWhatIfCurrentIndustry(currentIndustry);
+    setWhatIfHandlesCardData(!!requirements?.industryContext?.flags?.handlesCardDataDirectly);
+    setWhatIfStoresPHI(!!requirements?.industryContext?.flags?.storesPHI);
     setWhatIfAdditionalContext("");
     setWhatIfProvider(activeProvider);
-    setWhatIfOriginal({ functional: functionalStr, nfr, industry, handlesCardData, storesPHI });
     setWhatIfPreview(null);
     setWhatIfError("");
     setWhatIfMode(true);
+    loadWhatIfSuggestions();
   };
 
   const closeWhatIf = () => {
@@ -1585,13 +1599,41 @@ export default function ArchitectureWorkspace({
     setWhatIfError("");
   };
 
-  const isNFRFieldChanged = (field: keyof WhatIfNFR) => !!whatIfOriginal && whatIfNFR[field] !== whatIfOriginal.nfr[field];
-  const isFunctionalChanged = !!whatIfOriginal && whatIfFunctional !== whatIfOriginal.functional;
-  const isIndustryChanged =
-    !!whatIfOriginal &&
-    (whatIfIndustry !== whatIfOriginal.industry ||
-      whatIfHandlesCardData !== whatIfOriginal.handlesCardData ||
-      whatIfStoresPHI !== whatIfOriginal.storesPHI);
+  const isNFRFieldChanged = (field: keyof WhatIfNFR) => whatIfNFR[field].trim() !== "";
+  const isFunctionalChanged = whatIfFunctional.trim() !== "";
+  const isIndustryChanged = whatIfIndustry !== whatIfCurrentIndustry;
+  const hasAnyWhatIfChange =
+    isFunctionalChanged ||
+    isIndustryChanged ||
+    whatIfAdditionalContext.trim() !== "" ||
+    (Object.keys(BLANK_NFR) as (keyof WhatIfNFR)[]).some(isNFRFieldChanged);
+
+  const applyWhatIfNFRSuggestion = (field: keyof WhatIfNFR, value: string) => {
+    setWhatIfNFR((prev) => ({ ...prev, [field]: value }));
+  };
+  const applyWhatIfFunctionalSuggestion = (value: string) => {
+    setWhatIfFunctional((prev) => (prev.trim() ? `${prev.replace(/\n+$/, "")}\n${value}` : value));
+  };
+
+  // Blank fields fall back to the project's real current value -- exploring one change should
+  // never silently discard everything the user left untouched.
+  const resolveWhatIfNFR = (): WhatIfNFR => {
+    const current = (requirements?.nonFunctional || {}) as Partial<WhatIfNFR>;
+    const resolved = {} as WhatIfNFR;
+    (Object.keys(BLANK_NFR) as (keyof WhatIfNFR)[]).forEach((field) => {
+      resolved[field] = whatIfNFR[field].trim() || current[field] || "not_specified";
+    });
+    return resolved;
+  };
+
+  const resolveWhatIfFunctional = (): string[] => {
+    const current = requirements?.functional || [];
+    const additional = whatIfFunctional
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return [...current, ...additional];
+  };
 
   const buildWhatIfIndustryContext = () => ({
     industry: whatIfIndustry,
@@ -1603,22 +1645,30 @@ export default function ArchitectureWorkspace({
     },
   });
 
+  // Auto-scroll to the results panel once a simulation completes, rather than leaving the user to
+  // notice/scroll for it themselves -- the panel is well below the fold on a normal viewport.
+  useEffect(() => {
+    if (whatIfPreview && whatIfResultsRef.current) {
+      whatIfResultsRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [whatIfPreview]);
+
   const runWhatIfSimulation = async () => {
     if (!architecture) return;
+    if (!hasAnyWhatIfChange) {
+      setWhatIfError("Pick at least one suggestion (or type your own value) before running a simulation.");
+      return;
+    }
     setWhatIfError("");
     setWhatIfLoading(true);
     setWhatIfPreview(null);
     try {
-      const functionalList = whatIfFunctional
-        .split("\n")
-        .map((s) => s.trim())
-        .filter(Boolean);
       const res = await fetch(`/api/projects/${projectId}/architectures/whatif-preview`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          functional: functionalList,
-          nonFunctional: whatIfNFR,
+          functional: resolveWhatIfFunctional(),
+          nonFunctional: resolveWhatIfNFR(),
           industryContext: buildWhatIfIndustryContext(),
           additionalContext: whatIfAdditionalContext,
         }),
@@ -1661,10 +1711,7 @@ export default function ArchitectureWorkspace({
       setWhatIfApplying(true);
       setWhatIfError("");
 
-      const functionalList = whatIfFunctional
-        .split("\n")
-        .map((s) => s.trim())
-        .filter(Boolean);
+      const functionalList = resolveWhatIfFunctional();
       // A confirmed freeform scenario note becomes a real, permanent functional requirement --
       // the preview already folds it into the same functional-requirements channel, so making it
       // "real" means persisting it there too rather than silently dropping it.
@@ -1677,7 +1724,7 @@ export default function ArchitectureWorkspace({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           functional: functionalList,
-          nonFunctional: whatIfNFR,
+          nonFunctional: resolveWhatIfNFR(),
           industryContext: buildWhatIfIndustryContext(),
         }),
       });
@@ -2631,167 +2678,265 @@ export default function ArchitectureWorkspace({
         </div>
       )}
 
-      {/* What-If Simulator panel (Workstream T1) -- explicitly NOT the same block/state as Chat-
-          Based Enhancement Proposals above. Pre-filled from the project's real saved requirements
-          so every field the actual generation pipeline considers is editable here, not just
-          scale/budget -- a "changed" ring marks anything edited away from its saved value.
-          Nothing here is ever auto-applied -- only "Make this real" below can turn it into an
-          actual saved version. */}
+      {/* What-If Simulator panel (Workstream T1, reworked per Workstream V feedback) --
+          explicitly NOT the same block/state as Chat-Based Enhancement Proposals above. Every
+          field starts EMPTY: AI-suggested hypothetical chips (fetched fresh on open) are the
+          primary way to fill them in, not the project's current value -- a "current: ..." caption
+          shows what's real today for context, without pre-filling the input itself. Nothing here
+          is ever auto-applied -- only "Make this real" below can turn it into an actual saved
+          version. */}
       {whatIfMode && viewMode === "diagram" && architecture && (
-        <div className="mx-6 mt-4 rounded-2xl border-2 border-dashed border-accent/40 bg-accent-soft/25 p-4">
-          <div className="flex items-start justify-between gap-2">
-            <span className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-accent-ink">
-              <span>🔮</span> What-If Simulator
-              <InfoTooltip text="Pre-filled with your project's current saved requirements. Edit any field to explore a hypothetical -- running a simulation re-runs the exact same rules-engine + LLM pipeline real architecture generation uses, just against these values, without saving anything." />
+        <div className="mx-6 mt-4 rounded-2xl border border-accent/25 bg-white shadow-sm">
+          <div className="flex items-center justify-between gap-2 border-b border-accent/15 bg-accent-soft/40 px-4 py-3 rounded-t-2xl">
+            <span className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-accent-ink">
+              <Icon icon="mdi:flask-outline" width={15} height={15} />
+              What-If Simulator
+              <InfoTooltip text="A sandbox for exploring a hypothetical. Pick a suggested variation (or type your own) for whichever fields you want to change -- anything left blank stays at its real current value. Running a simulation re-runs the exact same rules-engine + LLM pipeline real architecture generation uses, without saving anything." />
             </span>
             <button onClick={closeWhatIf} className="text-xs font-bold text-ink-muted transition hover:text-ink">
               Close
             </button>
           </div>
 
-          <p className="mt-2 text-[10.5px] text-ink-muted">
-            Every field below starts at your project&apos;s current saved value.{" "}
-            <span className="font-bold text-accent-ink">Edited fields are ringed in purple.</span>
-          </p>
+          <div className="space-y-6 px-4 py-4">
+            <p className="text-[11px] text-ink-muted leading-relaxed">
+              Pick a suggested variation below, or type your own. Anything you leave blank keeps its real current
+              value -- only what you actually fill in gets explored.
+              {whatIfSuggestionsLoading && (
+                <span className="ml-1.5 inline-flex items-center gap-1 text-accent-ink">
+                  <span className="h-2.5 w-2.5 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+                  Generating tailored suggestions...
+                </span>
+              )}
+            </p>
 
-          {/* Functional requirements */}
-          <div className="mt-3">
-            <label
-              className={`flex items-center gap-1 text-[9px] font-bold uppercase tracking-wide ${
-                isFunctionalChanged ? "text-accent-ink" : "text-ink-faint"
-              }`}
-            >
-              Functional Capabilities (one per line)
-              {isFunctionalChanged && <Icon icon="mdi:pencil-circle" width={11} height={11} />}
-            </label>
-            <textarea
-              value={whatIfFunctional}
-              onChange={(e) => setWhatIfFunctional(e.target.value)}
-              rows={3}
-              className={`mt-1.5 w-full rounded-lg border bg-white px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-accent/30 ${
-                isFunctionalChanged ? "border-accent ring-1 ring-accent/40" : "border-line"
-              }`}
-            />
-          </div>
+            {/* Functional capabilities -- additional/new ones to explore, appended to the real
+                current list at submit time rather than replacing it. */}
+            <div>
+              <label className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-ink">
+                Capabilities to Explore Adding
+                <InfoTooltip text={FIELD_EXPLANATIONS.functional} />
+                {isFunctionalChanged && (
+                  <span className="rounded-full bg-accent-soft px-1.5 py-0.5 text-[8px] font-extrabold uppercase text-accent-ink">
+                    Exploring
+                  </span>
+                )}
+              </label>
+              <textarea
+                value={whatIfFunctional}
+                onChange={(e) => setWhatIfFunctional(e.target.value)}
+                placeholder="One per line -- e.g. real-time collaboration"
+                rows={2}
+                className={`mt-1.5 w-full rounded-xl border bg-white px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-accent/30 ${
+                  isFunctionalChanged ? "border-accent ring-1 ring-accent/30" : "border-line"
+                }`}
+              />
+              {(whatIfSuggestions.functional?.length ?? 0) > 0 && (
+                <div className="mt-1.5 flex flex-wrap gap-1">
+                  {whatIfSuggestions.functional!.map((s, idx) => (
+                    <span
+                      key={idx}
+                      className="inline-flex max-w-full items-center gap-1 rounded-full border border-accent/25 bg-accent-soft py-0.5 pl-2 pr-1.5 transition hover:border-accent hover:bg-accent/15"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => applyWhatIfFunctionalSuggestion(s.value)}
+                        title={s.value}
+                        className="max-w-[260px] truncate text-[10px] font-medium text-accent-ink"
+                      >
+                        + {s.value}
+                      </button>
+                      {s.why && <InfoTooltip text={`Why suggested: ${s.why}`} />}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
 
-          {/* All 7 non-functional fields -- same set/labels as the Requirements tab */}
-          <div className="mt-3 grid gap-3 sm:grid-cols-2">
-            {(Object.keys(NFR_FIELD_LABELS) as (keyof WhatIfNFR)[]).map((field) => {
-              const changed = isNFRFieldChanged(field);
-              return (
-                <div key={field}>
-                  <label
-                    className={`flex items-center gap-1 text-[9px] font-bold uppercase tracking-wide ${
-                      changed ? "text-accent-ink" : "text-ink-faint"
+            {/* All 7 non-functional fields -- same set/labels as the Requirements tab */}
+            <div className="grid gap-4 sm:grid-cols-2">
+              {(Object.keys(NFR_FIELD_LABELS) as (keyof WhatIfNFR)[]).map((field) => {
+                const changed = isNFRFieldChanged(field);
+                const currentValue = requirements?.nonFunctional?.[field];
+                const suggestions = whatIfSuggestions[field] || [];
+                return (
+                  <div key={field}>
+                    <label className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-ink">
+                      {NFR_FIELD_LABELS[field]}
+                      {FIELD_EXPLANATIONS[field] && <InfoTooltip text={FIELD_EXPLANATIONS[field]} />}
+                      {changed && (
+                        <span className="rounded-full bg-accent-soft px-1.5 py-0.5 text-[8px] font-extrabold uppercase text-accent-ink">
+                          Exploring
+                        </span>
+                      )}
+                    </label>
+                    {currentValue && currentValue.toLowerCase() !== "not_specified" && (
+                      <p className="mt-1 truncate text-[10px] text-ink-faint" title={currentValue}>
+                        Current: {currentValue}
+                      </p>
+                    )}
+                    <input
+                      type="text"
+                      value={whatIfNFR[field]}
+                      onChange={(e) => setWhatIfNFR((prev) => ({ ...prev, [field]: e.target.value }))}
+                      placeholder="Leave blank to keep the current value"
+                      className={`mt-1.5 w-full rounded-xl border bg-white px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-accent/30 ${
+                        changed ? "border-accent ring-1 ring-accent/30" : "border-line"
+                      }`}
+                    />
+                    {suggestions.length > 0 && (
+                      <div className="mt-1.5 flex flex-wrap gap-1">
+                        {suggestions.map((s, idx) => (
+                          <span
+                            key={idx}
+                            className="inline-flex max-w-full items-center gap-1 rounded-full border border-accent/25 bg-accent-soft py-0.5 pl-2 pr-1.5 transition hover:border-accent hover:bg-accent/15"
+                          >
+                            <button
+                              type="button"
+                              onClick={() => applyWhatIfNFRSuggestion(field, s.value)}
+                              title={s.value}
+                              className="max-w-[200px] truncate text-[10px] font-medium text-accent-ink"
+                            >
+                              {s.value}
+                            </button>
+                            {s.why && <InfoTooltip text={`Why suggested: ${s.why}`} />}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Industry / compliance context */}
+            <div className={`rounded-xl border p-3.5 ${isIndustryChanged ? "border-accent ring-1 ring-accent/30" : "border-line"}`}>
+              <label className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-ink">
+                Industry / Compliance Regime
+                <InfoTooltip text={FIELD_EXPLANATIONS.industry} />
+                {isIndustryChanged && (
+                  <span className="rounded-full bg-accent-soft px-1.5 py-0.5 text-[8px] font-extrabold uppercase text-accent-ink">
+                    Exploring
+                  </span>
+                )}
+              </label>
+              <p className="mt-1 text-[10px] text-ink-faint">
+                Current: {whatIfCurrentIndustry === "none" ? "General (no regulated industry)" : whatIfCurrentIndustry === "fintech" ? "Fintech" : "Healthtech"}
+              </p>
+              <div className="mt-2 flex w-max bg-paper/80 p-0.5 rounded-lg border border-line shadow-sm">
+                {(["none", "fintech", "healthtech"] as const).map((ind) => (
+                  <button
+                    key={ind}
+                    onClick={() => setWhatIfIndustry(ind)}
+                    className={`px-2.5 py-1.5 text-[9px] font-extrabold uppercase rounded transition ${
+                      whatIfIndustry === ind ? "bg-ink text-white shadow-sm" : "text-ink-muted hover:text-ink"
                     }`}
                   >
-                    {NFR_FIELD_LABELS[field]}
-                    {changed && <Icon icon="mdi:pencil-circle" width={11} height={11} />}
-                  </label>
-                  <input
-                    type="text"
-                    value={whatIfNFR[field]}
-                    onChange={(e) => setWhatIfNFR((prev) => ({ ...prev, [field]: e.target.value }))}
-                    className={`mt-1.5 w-full rounded-lg border bg-white px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-accent/30 ${
-                      changed ? "border-accent ring-1 ring-accent/40" : "border-line"
-                    }`}
-                  />
+                    {ind === "none" ? "General" : ind === "fintech" ? "Fintech" : "Healthtech"}
+                  </button>
+                ))}
+              </div>
+              {whatIfSuggestions.industry && whatIfSuggestions.industry.length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {whatIfSuggestions.industry.map((s, idx) => (
+                    <span
+                      key={idx}
+                      className="inline-flex items-center gap-1 rounded-full border border-accent/25 bg-accent-soft py-0.5 pl-2 pr-1.5 transition hover:border-accent hover:bg-accent/15"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => setWhatIfIndustry(s.value as WhatIfIndustry)}
+                        className="text-[10px] font-medium text-accent-ink"
+                      >
+                        {s.value === "none" ? "General" : s.value === "fintech" ? "Fintech" : "Healthtech"}
+                      </button>
+                      {s.why && <InfoTooltip text={`Why suggested: ${s.why}`} />}
+                    </span>
+                  ))}
                 </div>
-              );
-            })}
-          </div>
-
-          {/* Industry / compliance context */}
-          <div className={`mt-3 rounded-xl border p-3 ${isIndustryChanged ? "border-accent ring-1 ring-accent/40" : "border-line"}`}>
-            <label
-              className={`flex items-center gap-1 text-[9px] font-bold uppercase tracking-wide ${
-                isIndustryChanged ? "text-accent-ink" : "text-ink-faint"
-              }`}
-            >
-              Industry / Compliance Regime
-              {isIndustryChanged && <Icon icon="mdi:pencil-circle" width={11} height={11} />}
-            </label>
-            <div className="mt-1.5 flex w-max bg-paper/80 p-0.5 rounded-lg border border-line shadow-sm">
-              {(["none", "fintech", "healthtech"] as const).map((ind) => (
-                <button
-                  key={ind}
-                  onClick={() => setWhatIfIndustry(ind)}
-                  className={`px-2.5 py-1 text-[9px] font-extrabold uppercase rounded transition ${
-                    whatIfIndustry === ind ? "bg-ink text-white shadow-sm" : "text-ink-muted hover:text-ink"
-                  }`}
-                >
-                  {ind === "none" ? "General" : ind === "fintech" ? "Fintech" : "Healthtech"}
-                </button>
-              ))}
+              )}
+              {whatIfIndustry === "fintech" && (
+                <label className="mt-3 flex items-center gap-1.5 text-[11px] font-semibold text-ink-muted">
+                  <input
+                    type="checkbox"
+                    checked={whatIfHandlesCardData}
+                    onChange={(e) => setWhatIfHandlesCardData(e.target.checked)}
+                    className="h-3.5 w-3.5 accent-accent"
+                  />
+                  Handles cardholder data directly (drives PCI-DSS components like tokenization)
+                </label>
+              )}
+              {whatIfIndustry === "healthtech" && (
+                <label className="mt-3 flex items-center gap-1.5 text-[11px] font-semibold text-ink-muted">
+                  <input
+                    type="checkbox"
+                    checked={whatIfStoresPHI}
+                    onChange={(e) => setWhatIfStoresPHI(e.target.checked)}
+                    className="h-3.5 w-3.5 accent-accent"
+                  />
+                  Stores PHI (drives HIPAA components like a dedicated PHI vault)
+                </label>
+              )}
             </div>
-            {whatIfIndustry === "fintech" && (
-              <label className="mt-2 flex items-center gap-1.5 text-[11px] font-semibold text-ink-muted">
-                <input
-                  type="checkbox"
-                  checked={whatIfHandlesCardData}
-                  onChange={(e) => setWhatIfHandlesCardData(e.target.checked)}
-                  className="h-3.5 w-3.5 accent-accent"
-                />
-                Handles cardholder data directly (drives PCI-DSS components like tokenization)
-              </label>
-            )}
-            {whatIfIndustry === "healthtech" && (
-              <label className="mt-2 flex items-center gap-1.5 text-[11px] font-semibold text-ink-muted">
-                <input
-                  type="checkbox"
-                  checked={whatIfStoresPHI}
-                  onChange={(e) => setWhatIfStoresPHI(e.target.checked)}
-                  className="h-3.5 w-3.5 accent-accent"
-                />
-                Stores PHI (drives HIPAA components like a dedicated PHI vault)
-              </label>
-            )}
-          </div>
 
-          <div className="mt-3">
-            <label className="text-[9px] font-bold uppercase tracking-wide text-ink-faint">Preview for provider</label>
-            <div className="mt-1.5 flex w-max bg-paper/80 p-0.5 rounded-lg border border-line shadow-sm">
-              {(["aws", "azure", "gcp", "kubernetes", "private"] as const).map((p) => (
-                <button
-                  key={p}
-                  onClick={() => setWhatIfProvider(p)}
-                  className={`px-2 py-1 text-[9px] font-extrabold uppercase rounded transition ${
-                    whatIfProvider === p ? "bg-ink text-white shadow-sm" : "text-ink-muted hover:text-ink"
-                  }`}
-                >
-                  {PROVIDER_LABELS[p]}
-                </button>
-              ))}
+            <div>
+              <label className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-ink">
+                Preview for Provider
+                <InfoTooltip text="Which cloud provider's service names, LLD config, and cost figures the preview below uses. Switching this doesn't change any of the fields above -- it only changes which provider's real pricing/services the simulation is shown against." />
+              </label>
+              <div className="mt-1.5 flex w-max bg-paper/80 p-0.5 rounded-lg border border-line shadow-sm">
+                {(["aws", "azure", "gcp", "kubernetes", "private"] as const).map((p) => (
+                  <button
+                    key={p}
+                    onClick={() => setWhatIfProvider(p)}
+                    className={`px-2.5 py-1.5 text-[9px] font-extrabold uppercase rounded transition ${
+                      whatIfProvider === p ? "bg-ink text-white shadow-sm" : "text-ink-muted hover:text-ink"
+                    }`}
+                  >
+                    {PROVIDER_LABELS[p]}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Freeform note -- works ALONGSIDE the structured fields above, for anything that
+                doesn't map cleanly to one of them (e.g. "add multi-region failover"). Visually
+                separated from the structured fields by a divider, per the "clear grouping"
+                feedback. */}
+            <div className="border-t border-line pt-5">
+              <label className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-ink">
+                Anything Else? (freeform, optional)
+                <InfoTooltip text="For a hypothetical that doesn't map to one of the structured fields above -- e.g. 'what if we add multi-region failover?'. Folded into the same functional-requirements channel the rules engine and LLM already read from." />
+              </label>
+              <textarea
+                value={whatIfAdditionalContext}
+                onChange={(e) => setWhatIfAdditionalContext(e.target.value)}
+                placeholder="e.g. what if we add multi-region failover?"
+                rows={2}
+                className="mt-1.5 w-full rounded-xl border border-line bg-white px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-accent/30"
+              />
+            </div>
+
+            {whatIfError && <p className="text-xs font-semibold text-danger">{whatIfError}</p>}
+
+            <div>
+              <button
+                onClick={runWhatIfSimulation}
+                disabled={whatIfLoading}
+                className="rounded-xl bg-accent px-4 py-2 text-xs font-bold uppercase text-white shadow-sm transition hover:opacity-90 active:scale-95 disabled:opacity-50"
+              >
+                {whatIfLoading ? "Simulating (running the full generation pipeline)..." : "Run Simulation"}
+              </button>
+              {whatIfLoading && (
+                <p className="mt-1.5 text-[10.5px] text-ink-faint">
+                  This runs the real generation pipeline, so it can take 30-60 seconds. Results will appear below.
+                </p>
+              )}
             </div>
           </div>
-
-          {/* Freeform note -- works ALONGSIDE the structured fields above, for anything that
-              doesn't map cleanly to one of them (e.g. "add multi-region failover"). */}
-          <div className="mt-3">
-            <label className="text-[9px] font-bold uppercase tracking-wide text-ink-faint">
-              Anything else? (optional freeform note)
-            </label>
-            <textarea
-              value={whatIfAdditionalContext}
-              onChange={(e) => setWhatIfAdditionalContext(e.target.value)}
-              placeholder="e.g. what if we add multi-region failover?"
-              rows={2}
-              className="mt-1.5 w-full rounded-lg border border-line bg-white px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-accent/30"
-            />
-          </div>
-
-          {whatIfError && <p className="mt-2 text-xs font-semibold text-danger">{whatIfError}</p>}
-
-          <button
-            onClick={runWhatIfSimulation}
-            disabled={whatIfLoading}
-            className="mt-3 rounded-xl bg-accent px-3 py-1.5 text-xs font-bold uppercase text-white shadow-sm transition hover:opacity-90 active:scale-95 disabled:opacity-50"
-          >
-            {whatIfLoading ? "Simulating (running the full generation pipeline)..." : "Run Simulation"}
-          </button>
 
           {whatIfPreview && (
-            <div className="mt-4 border-t border-accent/25 pt-3">
+            <div ref={whatIfResultsRef} className="border-t border-line px-4 py-4 space-y-3 scroll-mt-4">
               <span className="inline-flex items-center gap-1 rounded-full bg-ink px-2.5 py-1 text-[9px] font-extrabold uppercase tracking-wide text-white">
                 <Icon icon="mdi:eye-outline" width={11} height={11} />
                 Preview only — not saved

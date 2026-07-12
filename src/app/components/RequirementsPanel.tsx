@@ -2,27 +2,7 @@
 
 import { useEffect, useState } from "react";
 import InfoTooltip from "./InfoTooltip";
-
-// Plain-language explanations of what each field actually means -- static, since the meaning of
-// "Read/Write Pattern" doesn't change per project (only the suggested values do, which come from
-// the LLM). Written for someone with zero architecture background.
-const FIELD_EXPLANATIONS: Record<string, string> = {
-  expectedScale:
-    "How many people will use this and how often. Bigger numbers mean the system needs to handle more simultaneous requests without slowing down.",
-  readWritePattern:
-    "Whether your app mostly saves new data (writes) or mostly looks up existing data (reads). This changes what kind of database setup works best.",
-  dataNature:
-    "What kind of information you're storing — structured records like accounts, or files like photos and PDFs. This affects which storage technology fits.",
-  latencySensitivity:
-    "How fast responses need to feel to users. A live chat needs near-instant responses; a monthly report can take longer.",
-  budget: "Your rough monthly spending ceiling for cloud infrastructure — steers us toward cheaper or more premium services.",
-  teamMaturity:
-    "How much cloud/ops experience your team has. Less experience steers us toward simpler, more managed services that need less babysitting.",
-  compliance:
-    "Any legal or industry rules your data has to follow (e.g. healthcare or payment regulations). This can require extra security components.",
-  functional:
-    "The concrete features your product needs. Each one may translate into specific infrastructure — e.g. \"SMS reminders\" needs a messaging integration.",
-};
+import { FIELD_EXPLANATIONS } from "@/lib/field-explanations";
 
 type RequirementsData = {
   functional: string[];

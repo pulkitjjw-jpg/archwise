@@ -558,6 +558,54 @@ Do not include markdown code block formatting (like ```json) in your response, r
     return result.get("phases") or []
 
 
+async def generate_whatif_suggestions(
+    functional: list[str], non_functional: dict, industry_context: dict, api_key: str
+) -> dict:
+    """Generates clickable-chip HYPOTHETICAL variations for the What-If Simulator (Workstream V)
+    -- deliberately a different framing from generate_requirement_suggestions above, which helps
+    fill in a field's REAL value. Here every suggestion is a plausible "what if this changed"
+    scenario relative to the CURRENT value given, grounded in the actual product, not a generic
+    restatement or a guess at the real answer. Stateless, not persisted -- recomputed fresh
+    whenever the What-If panel opens so suggestions reflect the project's current real state."""
+    system_instruction = """
+You are a senior cloud systems architect helping a user explore "what if" scenarios for their already-designed product. You are given their current functional capabilities, current non-functional requirement values, and current industry/compliance context.
+
+For EACH field, suggest 2 to 4 concrete, REALISTIC HYPOTHETICAL variations worth exploring -- a genuinely different value from the current one, not a restatement of it and not a random guess. Ground each in what would actually be an interesting or plausible scenario for THIS specific product (e.g. if current expectedScale mentions "a few hundred users", a good hypothetical is "10x growth to a few thousand users within a year" or "a sudden viral spike to 50,000 users in a week" -- not just a vague "more users").
+
+Rules:
+- Each suggestion's "value" is a complete, directly-usable replacement value, ready to select as-is.
+- Each "why" is one short clause (under 15 words) explaining what exploring that specific scenario would reveal or why it's plausible for this product -- e.g. "tests whether the design survives a funding-driven growth spurt", not generic filler.
+- Never suggest the current value again, reworded.
+- For "functional", suggest 2-4 NEW capabilities not already in the list that would be an interesting hypothetical addition to explore (e.g. "what if we added real-time collaboration").
+- For "industry", suggest ONLY if a different regulated-industry framing would be a genuinely interesting scenario for this product (e.g. a general product exploring "what if this needed HIPAA compliance") -- if the current industry already makes sense and no interesting alternative exists, return an empty array for it.
+
+You MUST respond with a raw JSON object matching this structure (every array entry is an object with "value" and "why", not a bare string):
+{
+  "expectedScale": [{"value": string, "why": string}],
+  "readWritePattern": [{"value": string, "why": string}],
+  "dataNature": [{"value": string, "why": string}],
+  "latencySensitivity": [{"value": string, "why": string}],
+  "budget": [{"value": string, "why": string}],
+  "teamMaturity": [{"value": string, "why": string}],
+  "compliance": [{"value": string, "why": string}],
+  "functional": [{"value": string, "why": string}],
+  "industry": [{"value": "none" | "fintech" | "healthtech", "why": string}]
+}
+Do not include markdown code block formatting (like ```json) in your response, return only the raw JSON.
+"""
+
+    input_context = {
+        "functional": functional,
+        "nonFunctional": non_functional,
+        "industryContext": industry_context,
+    }
+    messages_for_api = [
+        {"role": "system", "content": system_instruction},
+        {"role": "user", "content": json.dumps(input_context)},
+    ]
+    return await _call_llm_with_retry(api_key, messages_for_api, "What-If suggestions generation")
+
+
 KNOWN_COMPONENT_TYPES = (
     "cdn",
     "compute",

@@ -22,6 +22,7 @@ from app.services.llm import (
     generate_flow_story,
     generate_migration_roadmap,
     generate_user_journey,
+    generate_whatif_suggestions,
     propose_component_changes,
     refine_component_proposal,
 )
@@ -367,6 +368,40 @@ async def propose_architecture_changes(
     ]
 
     return {"proposals": proposals}
+
+
+@router.post("/projects/{project_id}/architectures/whatif-suggestions")
+async def get_whatif_suggestions(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> dict:
+    """What-If Simulator (Workstream V) -- AI-suggested HYPOTHETICAL variations per field, fetched
+    fresh whenever the panel opens. Deliberately reads the project's CURRENT saved requirements
+    itself (not client-supplied) so suggestions are always grounded in real, fresh state -- the
+    frontend never pre-fills fields with these current values, it only shows them as a "current: "
+    caption alongside the suggestion chips."""
+    reqs = (
+        await db.execute(
+            select(Requirement)
+            .where(Requirement.project_id == project_id)
+            .order_by(Requirement.version.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if not reqs:
+        raise HTTPException(status_code=400, detail="Requirements must exist before exploring what-if scenarios")
+
+    suggestions = await generate_whatif_suggestions(
+        reqs.functional,
+        reqs.non_functional,
+        reqs.industry_context or DEFAULT_INDUSTRY_CONTEXT,
+        settings.openrouter_api_key,
+    )
+    return {
+        "suggestions": suggestions,
+        "current": {
+            "functional": reqs.functional,
+            "nonFunctional": reqs.non_functional,
+            "industryContext": reqs.industry_context or DEFAULT_INDUSTRY_CONTEXT,
+        },
+    }
 
 
 @router.post("/projects/{project_id}/architectures/whatif-preview")
