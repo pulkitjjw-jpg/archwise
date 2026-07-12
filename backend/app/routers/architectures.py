@@ -21,6 +21,7 @@ from app.services.llm import (
     refine_component_proposal,
     validate_and_generate_architecture,
 )
+from app.services.path_verification import verify_journey_path
 from app.services.rules_engine import run_rules_engine
 from app.services.validation import validate_architecture_layout
 
@@ -229,13 +230,15 @@ async def get_user_journey(
     if not record:
         raise HTTPException(status_code=404, detail="Architecture version not found")
 
+    provider_components = _provider_components(record.hld.get("components", []), provider)
+    connections = record.hld.get("connections", [])
+
     if record.journey_steps.get(provider):
-        return {"journeySteps": record.journey_steps[provider]}
+        steps = record.journey_steps[provider]
+        return {"journeySteps": steps, "verification": verify_journey_path(steps, provider_components, connections)}
 
     flow_story = await _get_or_generate_flow_story(db, record, project_id, provider)
     functional = await _latest_functional(db, project_id)
-    provider_components = _provider_components(record.hld.get("components", []), provider)
-    connections = record.hld.get("connections", [])
 
     steps = await generate_user_journey(
         provider, flow_story, provider_components, connections, functional, settings.openrouter_api_key
@@ -246,7 +249,9 @@ async def get_user_journey(
     record.journey_steps = {**record.journey_steps, provider: steps}
     await db.commit()
 
-    return {"journeySteps": steps}
+    # Verification is recomputed fresh every fetch, not cached alongside the steps -- it's cheap
+    # (pure in-memory graph check) and a stale "verified" verdict would defeat the point.
+    return {"journeySteps": steps, "verification": verify_journey_path(steps, provider_components, connections)}
 
 
 @router.patch("/projects/{project_id}/architectures/{architecture_id}/layout")

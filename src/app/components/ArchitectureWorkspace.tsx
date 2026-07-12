@@ -10,6 +10,7 @@ import { resolveServiceIcon } from "@/lib/service-icons";
 import { getLearnContent, getPlainDescription } from "@/lib/component-descriptions";
 import { exportDiagramAsPng, exportDiagramAsSvg, type PngExportEdge, type PngExportNode } from "@/lib/diagram-export";
 import { buildFlowDocumentationMarkdown, downloadMarkdown, type FlowDocComponent } from "@/lib/flow-documentation-export";
+import { verifyJourneyPath, buildStepEdgeColors, getStepColor, type JourneyVerification } from "@/lib/journey-verification";
 import {
   computeDiagramLayoutAsync,
   buildRoundedPath,
@@ -1210,22 +1211,34 @@ export default function ArchitectureWorkspace({
   }, [architecture, activeProvider]);
 
   // User Journey Architecture -- restructures the flow story (above) into discrete end-user
-  // steps, per provider. Fetched lazily only when this tab is actually opened (unlike flow
-  // story, which is always visible under the diagram) to avoid an extra LLM call most sessions
-  // never need; cached the same way once fetched.
+  // steps, per provider. Fetched lazily only when this tab is opened OR the Topology View's
+  // "Flow Steps" color overlay is switched on (unlike flow story, which is always visible under
+  // the diagram) to avoid an extra LLM call most sessions never need; cached the same way once
+  // fetched.
   const [journeyCache, setJourneyCache] = useState<Record<string, JourneyStep[]>>({});
+  const [journeyVerificationCache, setJourneyVerificationCache] = useState<Record<string, JourneyVerification>>({});
   const [journeyLoading, setJourneyLoading] = useState(false);
+  const [showFlowSteps, setShowFlowSteps] = useState(false);
   const journeyKey = architecture ? `${architecture.id}:${activeProvider}` : null;
   const currentJourney = journeyKey ? journeyCache[journeyKey] : undefined;
+  const currentJourneyVerification = journeyKey ? journeyVerificationCache[journeyKey] : undefined;
 
   useEffect(() => {
-    if (viewMode !== "journey" || !architecture) return;
+    if ((viewMode !== "journey" && !showFlowSteps) || !architecture) return;
     const key = `${architecture.id}:${activeProvider}`;
     if (journeyCache[key]) return;
 
+    // Verification is recomputed here client-side (mirroring backend/app/services/
+    // path_verification.py) rather than trusted from the fetch response alone, so the "Verified"
+    // badge is correct even on the embedded-cache path below, which never hits the endpoint that
+    // computes it server-side.
     const embedded = architecture.journeySteps?.[activeProvider];
     if (embedded) {
       setJourneyCache((prev) => ({ ...prev, [key]: embedded }));
+      setJourneyVerificationCache((prev) => ({
+        ...prev,
+        [key]: verifyJourneyPath(embedded, diagramComponents, diagramConnections),
+      }));
       return;
     }
 
@@ -1238,6 +1251,10 @@ export default function ArchitectureWorkspace({
       .then((data) => {
         if (cancelled) return;
         setJourneyCache((prev) => ({ ...prev, [key]: data.journeySteps }));
+        setJourneyVerificationCache((prev) => ({
+          ...prev,
+          [key]: data.verification || verifyJourneyPath(data.journeySteps, diagramComponents, diagramConnections),
+        }));
       })
       .catch((err) => console.error("Failed to load user journey:", err))
       .finally(() => {
@@ -1247,7 +1264,14 @@ export default function ArchitectureWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [viewMode, architecture, activeProvider]);
+  }, [viewMode, showFlowSteps, architecture, activeProvider]);
+
+  // Multi-colored flow paths (Workstream S) -- an overlay ONLY: recolors the stroke of edges
+  // ELK already routed, never recomputes their geometry. Each journey step gets a fixed color;
+  // an edge wholly within one step, or bridging step i to step i+1, is colored accordingly.
+  // Not memoized -- cheap pure function over a handful of connections, consistent with
+  // diagramComponents/diagramConnections above, which are also plain recomputed consts.
+  const stepEdgeColors = showFlowSteps && currentJourney ? buildStepEdgeColors(currentJourney, diagramConnections) : {};
 
   const handleJourneyComponentClick = (componentId: string) => {
     setViewMode("diagram");
@@ -2297,13 +2321,61 @@ export default function ArchitectureWorkspace({
                         {/* Legend for the arrows -- placed directly on the canvas rather than
                             only in the header tooltip above, since the header can scroll out of
                             view while a large diagram is still on screen. */}
-                        <div className="absolute left-3 top-3 z-10 flex items-center gap-1.5 rounded-lg border border-line-strong bg-panel px-2 py-1.5 shadow-sm">
-                          <svg width="20" height="10" viewBox="0 0 20 10" className="flex-none">
-                            <path d="M1 5 H16" stroke="#5B4FE8" strokeWidth={1.5} strokeDasharray="3 3" />
-                            <path d="M14 2 L18 5 L14 8 Z" fill="#5B4FE8" />
-                          </svg>
-                          <span className="text-[9px] font-bold uppercase tracking-wide text-ink-muted">Flow direction</span>
-                          <InfoTooltip text="The arrowhead points from the component that makes the call to the component that receives it — e.g. compute → database means the app queries the database, not the other way around." />
+                        <div className="absolute left-3 top-3 z-10 flex flex-col items-start gap-1.5">
+                          <div className="flex items-center gap-1.5 rounded-lg border border-line-strong bg-panel px-2 py-1.5 shadow-sm">
+                            <svg width="20" height="10" viewBox="0 0 20 10" className="flex-none">
+                              <path d="M1 5 H16" stroke="#5B4FE8" strokeWidth={1.5} strokeDasharray="3 3" />
+                              <path d="M14 2 L18 5 L14 8 Z" fill="#5B4FE8" />
+                            </svg>
+                            <span className="text-[9px] font-bold uppercase tracking-wide text-ink-muted">Flow direction</span>
+                            <InfoTooltip text="The arrowhead points from the component that makes the call to the component that receives it — e.g. compute → database means the app queries the database, not the other way around." />
+                          </div>
+                          {/* Multi-colored flow paths (Workstream S) -- a pure stroke-color
+                              overlay on the SAME ELK/elbow edge geometry, keyed to the numbered
+                              User Journey steps. Off by default so the default topology look is
+                              unchanged unless explicitly requested. */}
+                          <button
+                            onClick={() => setShowFlowSteps((v) => !v)}
+                            className={`flex items-center gap-1.5 rounded-lg border px-2 py-1.5 shadow-sm transition ${
+                              showFlowSteps
+                                ? "border-accent bg-accent text-white"
+                                : "border-line-strong bg-panel text-ink-muted hover:text-ink"
+                            }`}
+                          >
+                            <Icon icon="mdi:palette-outline" width={13} height={13} />
+                            <span className="text-[9px] font-bold uppercase tracking-wide">Flow steps</span>
+                          </button>
+                          {showFlowSteps && currentJourney && currentJourney.length > 0 && (
+                            <div className="flex flex-col gap-1 rounded-lg border border-line-strong bg-panel px-2 py-1.5 shadow-sm">
+                              {currentJourney.map((step, idx) => (
+                                <div key={idx} className="flex items-center gap-1.5">
+                                  <span
+                                    className="h-2 w-2 flex-none rounded-full"
+                                    style={{ backgroundColor: getStepColor(idx) }}
+                                  />
+                                  <span className="max-w-[160px] truncate text-[9px] font-semibold text-ink-muted">
+                                    {idx + 1}. {step.userAction}
+                                  </span>
+                                </div>
+                              ))}
+                              {currentJourneyVerification && (
+                                <div
+                                  className={`mt-0.5 flex items-center gap-1 border-t border-line pt-1 text-[9px] font-bold uppercase tracking-wide ${
+                                    currentJourneyVerification.verified ? "text-success" : "text-warning"
+                                  }`}
+                                >
+                                  <Icon
+                                    icon={currentJourneyVerification.verified ? "mdi:check-decagram" : "mdi:alert-circle-outline"}
+                                    width={11}
+                                    height={11}
+                                  />
+                                  {currentJourneyVerification.verified
+                                    ? "Verified"
+                                    : `${currentJourneyVerification.issues.length} issue(s)`}
+                                </div>
+                              )}
+                            </div>
+                          )}
                         </div>
                         <div className="absolute right-3 top-3 z-10 flex gap-1.5">
                           <button
@@ -2388,13 +2460,24 @@ export default function ArchitectureWorkspace({
                                 : diagramLayout.edgePoints[`${conn.from}->${conn.to}`];
                               if (!points || points.length < 2) return null;
                               const d = buildRoundedPath(points);
+                              // Flow-step color is a stroke override only -- `d` above came from
+                              // the exact same ELK/elbow geometry every other edge uses, never a
+                              // different, simpler line for colored edges.
+                              const stepColor = stepEdgeColors[`${conn.from}->${conn.to}`];
                               return (
                                 <g key={idx}>
-                                  <path d={d} fill="none" className="stroke-accent/25" strokeWidth={2.5} />
                                   <path
                                     d={d}
                                     fill="none"
-                                    className="stroke-accent/70"
+                                    className={stepColor ? undefined : "stroke-accent/25"}
+                                    style={stepColor ? { stroke: stepColor, opacity: 0.3 } : undefined}
+                                    strokeWidth={stepColor ? 4 : 2.5}
+                                  />
+                                  <path
+                                    d={d}
+                                    fill="none"
+                                    className={stepColor ? undefined : "stroke-accent/70"}
+                                    style={stepColor ? { stroke: stepColor } : undefined}
                                     strokeWidth={1.5}
                                     strokeDasharray="5, 9"
                                     markerEnd="url(#flow-arrow)"
@@ -3495,6 +3578,27 @@ export default function ArchitectureWorkspace({
                 <div className="flex items-center gap-2">
                   <h4 className="text-lg font-black text-ink">User Journey Architecture</h4>
                   <InfoTooltip text="A step-by-step walkthrough from the end user's perspective -- what they do, what happens behind the scenes, and which real components are involved at each step. Synthesized from the Architecture Flow Story for this provider, restructured into discrete steps. Click a component chip to jump to it in Topology View." />
+                  {currentJourneyVerification && (
+                    <span
+                      className={`flex items-center gap-1 rounded-full border px-2 py-0.5 text-[9.5px] font-extrabold uppercase tracking-wide ${
+                        currentJourneyVerification.verified
+                          ? "border-success/25 bg-success-soft text-success"
+                          : "border-warning/25 bg-warning-soft text-warning"
+                      }`}
+                      title={
+                        currentJourneyVerification.verified
+                          ? "Every step's components exist and consecutive steps are linked by a real connection in this architecture."
+                          : currentJourneyVerification.issues.join(" ")
+                      }
+                    >
+                      <Icon
+                        icon={currentJourneyVerification.verified ? "mdi:check-decagram" : "mdi:alert-circle-outline"}
+                        width={12}
+                        height={12}
+                      />
+                      {currentJourneyVerification.verified ? "Verified" : "Unverified"}
+                    </span>
+                  )}
                 </div>
                 {/* Provider toggle, mirroring the one in Topology View -- the journey text and
                     component names genuinely differ per provider, so switching shouldn't
@@ -3517,6 +3621,22 @@ export default function ArchitectureWorkspace({
                 How a real user moves through this product end-to-end, mapped to the actual infrastructure behind each step -- the way a solutions architect would walk through it in a design review.
               </p>
 
+              {currentJourneyVerification && !currentJourneyVerification.verified && (
+                <div className="mt-4 flex items-start gap-2.5 rounded-2xl border border-warning/25 bg-warning-soft/60 p-3.5 text-xs text-warning shadow-sm">
+                  <Icon icon="mdi:alert-circle-outline" width={16} height={16} className="mt-0.5 flex-none" />
+                  <div className="leading-relaxed">
+                    <span className="font-extrabold uppercase text-[9px] tracking-wider text-warning block">
+                      This journey doesn&apos;t fully match the architecture
+                    </span>
+                    <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                      {currentJourneyVerification.issues.map((issue, i) => (
+                        <li key={i}>{issue}</li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              )}
+
               {journeyLoading ? (
                 <div className="mt-8 flex items-center justify-center gap-2 text-xs text-ink-muted">
                   <span className="h-4 w-4 animate-spin rounded-full border-2 border-accent border-t-transparent" />
@@ -3533,7 +3653,11 @@ export default function ArchitectureWorkspace({
                       {idx < currentJourney.length - 1 && (
                         <span className="absolute left-[15px] top-8 bottom-0 w-0.5 bg-line" />
                       )}
-                      <span className="absolute left-0 top-0 flex h-8 w-8 items-center justify-center rounded-full bg-ink text-xs font-extrabold text-white">
+                      <span
+                        className="absolute left-0 top-0 flex h-8 w-8 items-center justify-center rounded-full text-xs font-extrabold text-white"
+                        style={{ backgroundColor: getStepColor(idx) }}
+                        title="Matches this step's color in the Topology View when 'Flow steps' is on"
+                      >
                         {idx + 1}
                       </span>
                       <div className="rounded-2xl border border-line bg-white p-4 shadow-sm">
