@@ -21,13 +21,46 @@ type LayoutConnection = { from: string; to: string };
 
 const elk = new ELK();
 
+// Orthogonal elbow (horizontal-vertical-horizontal) between two node BOUNDARIES, not centers --
+// used for edges touching a manually-dragged node, where ELK's own bend points no longer apply
+// (see computeDiagramLayoutAsync). Exiting/entering from the boundary rather than cutting through
+// the middle of both boxes matches how ELK's own edge sections already behave, so a dragged
+// node's edges still read as visually consistent with the rest of the diagram.
+function buildElbowPoints(
+  from: { x: number; y: number; width: number; height: number },
+  to: { x: number; y: number; width: number; height: number }
+): { x: number; y: number }[] {
+  const goingRight = to.x >= from.x;
+  const startX = goingRight ? from.x + from.width / 2 : from.x - from.width / 2;
+  const endX = goingRight ? to.x - to.width / 2 : to.x + to.width / 2;
+  const startY = from.y;
+  const endY = to.y;
+
+  if (Math.abs(startY - endY) < 1) {
+    // Already on the same row -- a single straight segment is already clean, no elbow needed.
+    return [
+      { x: startX, y: startY },
+      { x: endX, y: endY },
+    ];
+  }
+
+  const midX = (startX + endX) / 2;
+  return [
+    { x: startX, y: startY },
+    { x: midX, y: startY },
+    { x: midX, y: endY },
+    { x: endX, y: endY },
+  ];
+}
+
 // Manually-dragged positions (Workstream Q item 3) are applied as a POST-PROCESSING step, not
-// fed into ELK itself -- ELK's layered algorithm doesn't cleanly support "fix these nodes,
-// auto-place the rest" without materially more complex constraint setup, and the practical
-// effect is the same either way: the user's dragged position wins. Any edge touching an
-// overridden node gets a simple straight line between the (possibly moved) node centers instead
-// of ELK's original bend points, since those bend points were computed for ELK's own pre-override
-// positions and would no longer visually connect to the moved node.
+// fed into ELK itself. Tried ELK's own "interactive" layout mode (feeding the dragged position
+// back in as a hint) first -- empirically it only weakly influences crossing-minimization/
+// ranking, not a hard position constraint, so a node dragged far from its natural rank gets
+// pulled back near where ELK would have placed it anyway, defeating manual repositioning
+// entirely. So dragged positions are a real, exact override applied after ELK's own layout, and
+// only the EDGES touching an overridden node get special-cased (see buildElbowPoints above) --
+// everything else still comes straight from ELK's own orthogonal routing, untouched.
 export async function computeDiagramLayoutAsync(
   components: LayoutComponent[],
   connections: LayoutConnection[],
@@ -89,11 +122,21 @@ export async function computeDiagramLayoutAsync(
     const touchesOverride = layoutOverrides[conn.from] || layoutOverrides[conn.to];
 
     if (touchesOverride) {
-      // Bypass ELK's stale bend points entirely -- straight line between the actual current
-      // (possibly-dragged) node centers.
+      // A dragged node's edges can't reuse ELK's stale bend points (computed for its
+      // pre-drag position) -- but a raw straight line between node CENTERS was the actual
+      // regression reported live: on a dense graph, that diagonal cuts straight through
+      // unrelated nodes and reads as broken. Tried feeding the dragged position back into ELK
+      // as an "interactive" layout hint first (org.eclipse.elk.interactive); empirically ELK
+      // only treats it as a weak suggestion for crossing-minimization/ranking, not a hard
+      // constraint -- a node dragged far from its natural rank got silently pulled back near
+      // where ELK would have placed it anyway, which would defeat the entire point of manual
+      // repositioning. So instead: an orthogonal elbow (horizontal-vertical-horizontal) between
+      // the nodes' actual BOUNDARIES, not centers -- same edge-exits-from-the-box convention
+      // ELK's own sections already use, so it reads as consistent with every other edge in the
+      // diagram even though this specific one isn't collision-checked against every other node.
       const from = nodes[conn.from];
       const to = nodes[conn.to];
-      if (from && to) edgePoints[key] = [{ x: from.x, y: from.y }, { x: to.x, y: to.y }];
+      if (from && to) edgePoints[key] = buildElbowPoints(from, to);
       return;
     }
 
