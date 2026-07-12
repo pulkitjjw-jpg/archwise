@@ -1,8 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ARCHITECTURE_TEMPLATES } from "@/lib/architecture-templates";
+
+// Workstream U -- a plain markdown-image reference (![alt](path)) is the clearest, most reliable
+// signal that an uploaded text file points at an embedded diagram this app can't actually read.
+// Deliberately narrow (doesn't try to guess from prose like "see the diagram below") so the
+// warning only fires when there's a real, unprocessed image reference to disclose.
+const MARKDOWN_IMAGE_RE = /!\[[^\]]*\]\([^)]+\)/;
 
 export default function IntakeForm() {
   const router = useRouter();
@@ -29,6 +35,54 @@ export default function IntakeForm() {
   // a target architecture exists, a phased Migration Roadmap becomes available.
   const [hasExistingSystem, setHasExistingSystem] = useState(false);
   const [existingSystemText, setExistingSystemText] = useState("");
+
+  // Workstream U -- uploading a text/markdown doc is an alternative (or supplement) to typing the
+  // existing-system description by hand. Read entirely client-side (FileReader), then fed into
+  // the SAME existingSystemText field manual typing already uses -- no new backend endpoint, no
+  // parallel intake path. Only the extracted TEXT is ever used; an embedded image/diagram
+  // reference in the file is detected and disclosed, never silently dropped.
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
+  const [uploadHasImageRef, setUploadHasImageRef] = useState(false);
+  const [uploadError, setUploadError] = useState("");
+
+  const handleFileUpload = (file: File) => {
+    setUploadError("");
+    const nameLower = file.name.toLowerCase();
+    const isTextLike = nameLower.endsWith(".txt") || nameLower.endsWith(".md") || file.type.startsWith("text/");
+    if (!isTextLike) {
+      setUploadError("Only plain text (.txt) or markdown (.md) files are supported right now -- upload a written description, not an image or diagram file directly.");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = String(reader.result || "").trim();
+      if (!text) {
+        setUploadError("That file appears to be empty.");
+        return;
+      }
+      setUploadedFileName(file.name);
+      setUploadHasImageRef(MARKDOWN_IMAGE_RE.test(text));
+      // Append rather than overwrite -- a user may have already typed some notes before
+      // deciding to also attach a doc; neither should silently discard the other.
+      setExistingSystemText((prev) => (prev.trim() ? `${prev.trim()}\n\n${text}` : text));
+    };
+    reader.onerror = () => setUploadError("Failed to read that file. Please try again.");
+    reader.readAsText(file);
+  };
+
+  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) handleFileUpload(file);
+    e.target.value = ""; // allow re-selecting the same file after removing it
+  };
+
+  const clearUploadedFile = () => {
+    setUploadedFileName(null);
+    setUploadHasImageRef(false);
+    setUploadError("");
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -154,17 +208,17 @@ export default function IntakeForm() {
           </label>
           <textarea
             id="product-idea"
-            rows={4}
-            placeholder="Describe what your product does, who uses it, key requirements, expected traffic scale, etc."
+            rows={10}
+            placeholder="Describe what your product does, who uses it, key requirements, expected traffic scale, etc. Paste as much as you have -- a full paragraph, an AI-generated brief, whatever you've already written."
             value={ideaText}
             onChange={(e) => setIdeaText(e.target.value)}
             disabled={loading}
-            className="mt-2 w-full rounded-2xl border border-line bg-white px-4 py-3 text-sm text-ink shadow-sm focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50 resize-none"
+            className="mt-2 w-full min-h-[220px] resize-y rounded-2xl border border-line bg-white px-4 py-3 text-sm text-ink shadow-sm focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
             required
           />
         </div>
 
-        <div className="rounded-2xl border border-line bg-paper/70 p-3.5">
+        <div className="rounded-2xl border border-line bg-paper/70 p-4">
           <label className="flex items-center gap-2 text-xs font-semibold text-ink">
             <input
               type="checkbox"
@@ -175,15 +229,85 @@ export default function IntakeForm() {
             />
             I have an existing system (modernizing, not starting from scratch)
           </label>
+
           {hasExistingSystem && (
-            <textarea
-              rows={3}
-              placeholder="Briefly describe what you have today -- tech stack, how it's deployed, and the main pain points (e.g. &quot;a monolithic PHP app on a single VM, no CI/CD, manual deploys, struggling to scale past 500 users&quot;). You can also just check the box and we'll ask about this during the brainstorm."
-              value={existingSystemText}
-              onChange={(e) => setExistingSystemText(e.target.value)}
-              disabled={loading}
-              className="mt-2.5 w-full rounded-xl border border-line bg-white px-3 py-2.5 text-xs text-ink shadow-sm focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50 resize-none"
-            />
+            <div className="mt-4 space-y-4">
+              <div>
+                <label
+                  htmlFor="existing-system-text"
+                  className="block text-[10px] font-bold uppercase tracking-wider text-ink-faint"
+                >
+                  Describe it, or upload a doc below
+                </label>
+                <textarea
+                  id="existing-system-text"
+                  rows={7}
+                  placeholder="Tech stack, how it's deployed, and the main pain points (e.g. &quot;a monolithic PHP app on a single VM, no CI/CD, manual deploys, struggling to scale past 500 users&quot;). You can also leave this blank and we'll ask about it during the brainstorm."
+                  value={existingSystemText}
+                  onChange={(e) => setExistingSystemText(e.target.value)}
+                  disabled={loading}
+                  className="mt-1.5 w-full min-h-[150px] resize-y rounded-xl border border-line bg-white px-3.5 py-3 text-sm text-ink shadow-sm focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
+                />
+              </div>
+
+              <div className="border-t border-line pt-4">
+                <span className="block text-[10px] font-bold uppercase tracking-wider text-ink-faint">
+                  Or upload a document (optional)
+                </span>
+                <p className="mt-1 text-[11px] text-ink-muted leading-relaxed">
+                  Plain text (.txt) or markdown (.md) only for now. Its text is appended to the description above.
+                </p>
+
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".txt,.md,text/plain,text/markdown"
+                  onChange={handleFileInputChange}
+                  disabled={loading}
+                  className="hidden"
+                />
+
+                {!uploadedFileName ? (
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={loading}
+                    className="mt-2.5 flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-line-strong bg-white px-3.5 py-3 text-xs font-semibold text-ink-muted transition hover:border-accent hover:text-accent-ink disabled:opacity-50"
+                  >
+                    📎 Choose a .txt or .md file
+                  </button>
+                ) : (
+                  <div className="mt-2.5 flex items-center justify-between gap-2 rounded-xl border border-success/25 bg-success-soft/50 px-3.5 py-2.5 text-xs text-success">
+                    <span className="flex min-w-0 items-center gap-1.5 font-semibold">
+                      ✅ <span className="truncate">{uploadedFileName}</span> added to the description
+                    </span>
+                    <button
+                      type="button"
+                      onClick={clearUploadedFile}
+                      className="flex-none font-bold text-ink-muted transition hover:text-ink"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                )}
+
+                {uploadError && <p className="mt-2 text-[11px] font-medium text-danger">{uploadError}</p>}
+
+                {/* Discloses rather than silently drops an embedded image/diagram reference --
+                    this app doesn't do image/diagram understanding, so pretending the diagram was
+                    "read" would be actively misleading. */}
+                {uploadHasImageRef && (
+                  <div className="mt-2.5 flex items-start gap-2 rounded-xl border border-warning/25 bg-warning-soft/50 px-3.5 py-2.5 text-[11px] text-warning">
+                    <span className="mt-0.5">⚠️</span>
+                    <span className="leading-relaxed">
+                      This file references an embedded image or diagram. Only the <strong>text</strong> content was
+                      extracted and will be used -- diagram/image understanding isn&apos;t supported yet, so describe
+                      any important visual details in words too.
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
           )}
         </div>
 
