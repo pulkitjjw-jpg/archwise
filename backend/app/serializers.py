@@ -33,6 +33,7 @@ def serialize_requirement(r: Requirement) -> dict:
         "nonFunctional": r.non_functional,
         "industryContext": r.industry_context,
         "existingSystem": r.existing_system,
+        "productDomain": r.product_domain,
         "version": r.version,
         "conversationSummary": r.conversation_summary,
         "conversationSummarySources": r.conversation_summary_sources,

@@ -145,7 +145,7 @@ def _enrich_proposal_item(
                 for prov in ("aws", "azure", "gcp", "kubernetes", "private")
             },
         }
-        return {
+        result = {
             "action": "add",
             "componentId": component_id,
             "componentType": component_type,
@@ -155,6 +155,9 @@ def _enrich_proposal_item(
             "component": full_component,
             "newConnections": p.get("connections") or [],
         }
+        if p.get("domainPattern"):
+            result["domainPattern"] = p["domainPattern"]
+        return result
 
     if action == "modify":
         existing = next((c for c in existing_components if c["id"] == component_id), None)
@@ -163,7 +166,7 @@ def _enrich_proposal_item(
         current_service_name = ((existing.get("cloudMappings") or {}).get(provider) or {}).get(
             "serviceName", existing.get("name")
         )
-        return {
+        result = {
             "action": "modify",
             "componentId": component_id,
             "componentType": existing.get("type"),
@@ -172,6 +175,9 @@ def _enrich_proposal_item(
             "serviceName": current_service_name,
             "previousReasoning": existing.get("reasoning", ""),
         }
+        if p.get("domainPattern"):
+            result["domainPattern"] = p["domainPattern"]
+        return result
 
     return None
 
@@ -307,7 +313,13 @@ async def get_migration_roadmap(
     connections = record.hld.get("connections", [])
 
     phases = await generate_migration_roadmap(
-        provider, reqs.existing_system, provider_components, connections, reqs.functional, settings.openrouter_api_key
+        provider,
+        reqs.existing_system,
+        provider_components,
+        connections,
+        reqs.functional,
+        settings.openrouter_api_key,
+        reqs.product_domain or None,
     )
 
     record.migration_roadmap = {**record.migration_roadmap, provider: phases}
@@ -376,7 +388,12 @@ async def propose_architecture_changes(
     existing_connections = record.hld.get("connections", [])
 
     raw_proposals = await propose_component_changes(
-        payload.description, existing_components, existing_connections, reqs_context, settings.openrouter_api_key
+        payload.description,
+        existing_components,
+        existing_connections,
+        reqs_context,
+        settings.openrouter_api_key,
+        reqs.product_domain or None,
     )
 
     proposals = [
@@ -573,6 +590,7 @@ async def generate_architecture(project_id: uuid.UUID, db: AsyncSession = Depend
 
     reqs_context = {"functional": reqs.functional, "nonFunctional": reqs.non_functional}
     industry_context = reqs.industry_context or DEFAULT_INDUSTRY_CONTEXT
+    product_domain = reqs.product_domain or None
 
     # 3. Fetch the latest architecture for versioning and delta comparison
     latest_arch = await _latest_architecture(db, project_id)
@@ -598,6 +616,7 @@ async def generate_architecture(project_id: uuid.UUID, db: AsyncSession = Depend
         settings.openrouter_api_key,
         latest_arch.hld["components"] if latest_arch else None,
         knowledge_context,
+        product_domain,
     )
 
     # Attach the real stored excerpt text to whichever citations the LLM actually cited -- see

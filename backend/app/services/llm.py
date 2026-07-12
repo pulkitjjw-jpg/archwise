@@ -209,6 +209,17 @@ Industry detection (do this silently on every turn, alongside the active mode's 
 - You may ask AT MOST ONE further brief industry-specific follow-up later in the conversation if the answer above needs clarification (e.g., healthtech: "Which country or region's data residency rules apply to your users?"). Never ask more than 2 industry-specific questions total across the whole conversation, and never let them replace more than one topic in either mode's checklist.
 - If industry is "none", proceed with the active mode's topic list exactly as written -- nothing about the flow changes.
 
+Domain awareness (do this silently on every turn, alongside industry detection above -- this is a DIFFERENT, broader classification than the fintech/healthtech industry check: an app can be healthtech AND a marketplace at once):
+- Classify what CATEGORY of product this is -- e-commerce, SaaS (single- or multi-tenant), marketplace/two-sided platform, content/media platform, real-time messaging/social, internal tool, or whatever category genuinely fits (a short, specific noun phrase, not a rigid enum -- "B2B invoicing SaaS" is better than just "SaaS" when you have that detail).
+- Once you have a category, act like a senior architect who has actually seen many projects in that category before, not a blank-slate question generator: let your general knowledge of how THAT category of product typically evolves -- common scale milestones, typical failure points as it grows, industry-standard patterns for solving them -- inform which follow-up question you ask next, not just the fixed checklist topic names. For example, for an e-commerce idea, "expected scale" isn't just a number -- a senior architect also wants to know catalog size (search/indexing needs emerge past a few thousand SKUs) and whether flash-sale/seasonal traffic spikes are expected (these are well-known e-commerce-specific pressure points), so let that inform HOW you ask the scale question, not just THAT you ask it.
+- This must stay grounded in genuinely well-known, general patterns for that category -- never invent a "well-known" pattern that isn't real, and never claim insider knowledge of any specific company's actual implementation.
+- Set "detectedDomain" to the category (short phrase) and "domainRationale" to one short clause on why -- reuse your prior assessment once set, the same as industry detection.
+
+Reference-system detection (do this silently on every turn, alongside domain awareness above):
+- If the user mentions a specific existing product or company as inspiration or comparison (e.g. "like Shopify but simpler", "similar to how Airbnb handles booking availability", "basically a Notion clone"), acknowledge it naturally in your response and let your GENERAL, PUBLIC knowledge of how that TYPE of system conceptually tends to work inform your follow-up questions -- e.g. for "like Shopify", you might ask about multi-tenant storefront isolation or catalog/inventory sync, since those are well-known conceptual concerns for that category of product.
+- Be explicit that this is general/public pattern knowledge, never implying insider or proprietary knowledge of that specific company's actual real implementation -- if you reference the comparison in "message", phrase it as "systems like [X] typically..." or "the general pattern [X]-style products tend to use is...", never "[X] actually does..." or anything asserting certainty about their real internals.
+- Set "referenceSystem" to the mentioned product/company name if one was mentioned (reuse across turns once set), or null if none was mentioned.
+
 Rules:
 - Do NOT dump a list of questions. Ask ONLY ONE follow-up question in each turn.
 - Be conversational. Acknowledge their previous answer and build on it.
@@ -223,6 +234,9 @@ You MUST respond with a raw JSON object matching this TypeScript structure:
   "stage": "brainstorm" | "requirement_gathering" (set to "requirement_gathering" when isComplete is true, otherwise "brainstorm"),
   "detectedIndustry": "fintech" | "healthtech" | "none",
   "industryRationale": string (one short sentence explaining the classification, even if "none"),
+  "detectedDomain": string (short product-category phrase, e.g. "e-commerce", "B2B invoicing SaaS", "two-sided marketplace" -- your best assessment even from a short idea description),
+  "domainRationale": string (one short clause explaining the classification),
+  "referenceSystem": string | null (a specific product/company the user named as inspiration/comparison, or null),
   "knowledgeLevel": "technical" | "beginner" | "unknown",
   "suggestedReplies": string[]
 }}
@@ -283,8 +297,12 @@ Rules:
   - "deployment": string, how it's currently deployed/operated (manual deploys, any CI/CD, single vs. multiple servers).
   - "painPoints": string, the stated reasons for wanting a new architecture / what's limiting them today.
   Set the whole "existingSystem" object to null if no existing system was discussed anywhere in the conversation — do not invent one.
+- For productDomain: a BROADER classification than industryContext (an app can be healthtech AND a marketplace at once) --
+  - "category": a short, specific product-category noun phrase (e.g. "e-commerce", "B2B invoicing SaaS", "two-sided marketplace", "content/media platform", "real-time messaging"), your best assessment from the whole conversation.
+  - "rationale": one short clause.
+  - "referenceSystem": a specific existing product/company the user named as inspiration or comparison anywhere in the conversation (e.g. "Shopify", "Airbnb"), or null if none was mentioned. Never infer one that wasn't actually named.
 
-CRITICAL: If a non-functional item was NOT discussed in the conversation and cannot be reasonably and strongly inferred from context, set it EXACTLY to "not_specified". Do NOT guess or use silent defaults. The same applies to industryContext — do not infer a regulated industry from weak signal.
+CRITICAL: If a non-functional item was NOT discussed in the conversation and cannot be reasonably and strongly inferred from context, set it EXACTLY to "not_specified". Do NOT guess or use silent defaults. The same applies to industryContext — do not infer a regulated industry from weak signal. productDomain.category is the one exception -- always give your best-effort classification even from limited signal, since every product fits SOME general category and "not_specified" would be useless for that field specifically.
 
 You MUST respond with a raw JSON object matching this structure:
 {
@@ -307,6 +325,11 @@ You MUST respond with a raw JSON object matching this structure:
       "storesPHI": boolean,
       "dataResidency": string
     }
+  },
+  "productDomain": {
+    "category": string,
+    "rationale": string,
+    "referenceSystem": string | null
   },
   "existingSystem": { "techStack": string, "deployment": string, "painPoints": string } | null
 }
@@ -561,6 +584,7 @@ async def generate_migration_roadmap(
     connections: list[dict],
     functional: list[str],
     api_key: str,
+    product_domain: dict | None = None,
 ) -> dict:
     """Generates the Migration Roadmap (Workstream T5) -- a phased plan from the user's stated
     EXISTING system (tech stack, deployment, pain points) to the already-generated target
@@ -570,7 +594,14 @@ async def generate_migration_roadmap(
     invents infrastructure the target design doesn't actually have. Called lazily per provider and
     cached by the caller on the architecture row's migration_roadmap[provider] key, same pattern as
     flow_story."""
-    system_instruction = """
+    domain_instruction = ""
+    if product_domain and product_domain.get("category") and product_domain["category"] != "other":
+        domain_instruction = f"""
+- This product's domain is "{product_domain['category']}". Where a genuinely well-known domain-typical evolution pattern is relevant to WHY a phase is sequenced where it is (e.g. e-commerce platforms typically need to introduce a dedicated search index and a caching layer once catalog size and traffic cross certain thresholds; multi-tenant SaaS typically needs to revisit its tenant-isolation strategy once it crosses from a handful of large customers to many smaller ones), weigh it into "why" and set that phase's "domainPattern" to a short, visibly-labeled qualifier (e.g. "Common next step for e-commerce platforms once catalog search becomes a bottleneck"). Ground this ONLY in genuinely well-established general knowledge for the domain, and only where it's actually relevant to this migration -- most phases will have no "domainPattern" at all, and that's expected.
+"""
+
+    system_instruction = (
+        """
 You are a senior cloud migration architect writing a phased roadmap for a team modernizing an existing production system into a new target cloud architecture that has already been designed.
 
 You are given: the user's description of their CURRENT system (tech stack, deployment, pain points), the TARGET architecture's real components (with the actual cloud service chosen for each and the architect's reasoning for it), the connections between target components, and the product's functional requirements.
@@ -583,7 +614,9 @@ Rules:
 - Each phase's "effort" must be "small", "medium", or "large" -- a RELATIVE sizing judgment (team-weeks of complexity), never a specific time estimate (no "2 weeks", no dates).
 - Be honest about risk: if a phase is inherently risky (e.g. a database cutover), say so in "why".
 - Do not invent legacy technical details the user didn't mention -- only reason from what's actually in "existingSystem".
-
+"""
+        + domain_instruction
+        + """
 You MUST respond with a raw JSON object matching this structure:
 {
   "phases": [
@@ -593,12 +626,14 @@ You MUST respond with a raw JSON object matching this structure:
       "whatChanges": string (concrete description of the actual work in this phase),
       "why": string (the reasoning -- why this phase, why now, what risk it manages or unlocks),
       "usesStranglerFig": boolean,
-      "effort": "small" | "medium" | "large"
+      "effort": "small" | "medium" | "large",
+      "domainPattern": string
     }
   ]
 }
 Do not include markdown code block formatting (like ```json) in your response, return only the raw JSON.
 """
+    )
 
     input_context = {
         "provider": provider,
@@ -607,6 +642,8 @@ Do not include markdown code block formatting (like ```json) in your response, r
         "targetConnections": connections,
         "functionalRequirements": functional,
     }
+    if product_domain and product_domain.get("category") and product_domain["category"] != "other":
+        input_context["productDomain"] = product_domain
     messages_for_api = [
         {"role": "system", "content": system_instruction},
         {"role": "user", "content": json.dumps(input_context)},
@@ -722,6 +759,7 @@ async def propose_component_changes(
     existing_connections: list[dict],
     requirements: dict,
     api_key: str,
+    product_domain: dict | None = None,
 ) -> list[dict]:
     """Identifies which architecture components a freeform chat-described enhancement would add
     or change, provider-agnostically (no service names -- the caller resolves those
@@ -729,7 +767,15 @@ async def propose_component_changes(
     same "rules engine decides, LLM narrates" boundary the rest of the app follows). This is a
     preview only: nothing is persisted here, the caller applies only what the user approves via
     the existing manual-save endpoint."""
-    system_instruction = f"""
+    domain_instruction = ""
+    if product_domain and product_domain.get("category") and product_domain["category"] != "other":
+        domain_instruction = f"""
+- This product's domain is "{product_domain['category']}". Beyond the literal enhancement described, also weigh whether a genuinely well-known domain-typical pattern is now relevant given what's changing (e.g. a reported e-commerce traffic/catalog growth trigger commonly also calls for cart-session caching or a dedicated search index once catalog size crosses a few thousand SKUs) -- this is where PROACTIVE, domain-informed suggestions belong, not just a literal reading of the request. Only propose this if it's a genuinely well-established pattern that plausibly applies at the STATED scale -- never invent one, and never propose it if the description doesn't actually suggest the domain-typical trigger condition is met.
+- When a proposal's reasoning genuinely draws on a domain-typical pattern like this (rather than being a direct, literal response to what was described), set that proposal's "domainPattern" to a short, visibly-labeled qualifier, e.g. "Common next step for e-commerce platforms as catalog size grows". Most proposals will have NO "domainPattern" -- only the ones genuinely triggered by domain knowledge rather than the literal description.
+"""
+
+    system_instruction = (
+        f"""
 You are a senior cloud systems architect. A user has described a new requirement or enhancement to an already-generated architecture, in their own words, via chat. Your job is to identify which architecture components this would affect -- new components to add, or existing components whose role/config needs to change -- NOT to pick specific cloud services (that's resolved separately, deterministically, per cloud provider).
 
 You are given: the enhancement description, the current component list (id, type, name, reasoning), the current connections, and the product's functional/non-functional requirements.
@@ -742,22 +788,26 @@ Rules:
 - For "add" actions, also propose the "connections" needed to wire the new component into the existing flow, each as {{"from": string, "to": string, "protocol": string}}, using real existing component ids (or the new component's own id) as endpoints.
 - If the description doesn't clearly require any architecture change (e.g. it's a clarifying question, not a change), return an empty "proposals" array.
 - Never propose removing a component unless the description explicitly asks to remove/replace that capability.
-
+"""
+        + domain_instruction
+        + """
 You MUST respond with a raw JSON object matching this TypeScript structure:
-{{
+{
   "proposals": [
-    {{
+    {
       "action": "add" | "modify",
       "id": string,
       "type": string (required for "add", ignored for "modify"),
       "name": string,
       "reasoning": string,
-      "connections": [ {{ "from": string, "to": string, "protocol": string }} ] (only for "add", empty array otherwise)
-    }}
+      "connections": [ { "from": string, "to": string, "protocol": string } ] (only for "add", empty array otherwise),
+      "domainPattern": string
+    }
   ]
-}}
+}
 Do not include markdown code block formatting (like ```json) in your raw response, return only the JSON object.
 """
+    )
 
     input_context = {
         "enhancementDescription": description,
@@ -768,6 +818,8 @@ Do not include markdown code block formatting (like ```json) in your raw respons
         "existingConnections": existing_connections,
         "requirements": requirements,
     }
+    if product_domain and product_domain.get("category") and product_domain["category"] != "other":
+        input_context["productDomain"] = product_domain
     messages_for_api = [
         {"role": "system", "content": system_instruction},
         {"role": "user", "content": json.dumps(input_context)},
@@ -908,6 +960,7 @@ async def validate_and_generate_architecture(
     api_key: str,
     prev_hld_components: list[dict] | None = None,
     knowledge_context: list[dict] | None = None,
+    product_domain: dict | None = None,
 ) -> dict:
     knowledge_instruction = ""
     if knowledge_context:
@@ -915,6 +968,21 @@ async def validate_and_generate_architecture(
 5. You are also given "referenceExcerpts" -- passages retrieved from real architecture/software-engineering reference books because they were judged relevant to this specific design (e.g. monolith-vs-microservices trade-offs, layering, component boundaries). Where a passage genuinely informs a component's reasoning or the provider recommendation, you may ground that reasoning in it and cite it naturally in the prose (e.g. "as [Book Title] notes, ..."), and add a "sources" array to that SAME component (or to "recommendation") listing which excerpt(s) you actually drew on: [{"book": string, "chapterOrSection": string, "page": string}], using the exact bookTitle/chapterTitle/pageStart-pageEnd values from that excerpt.
    - Only add a "sources" entry where you genuinely used that excerpt's content -- never cite an excerpt you didn't actually draw on just because it was provided. Most components will have NO sources array at all; that's expected and correct when nothing retrieved was actually relevant to that specific component.
    - Never fabricate a book title, chapter, or page number -- only use the exact values given in referenceExcerpts.
+"""
+
+    domain_instruction = ""
+    if product_domain and product_domain.get("category") and product_domain["category"] != "other":
+        reference_system = product_domain.get("referenceSystem")
+        reference_clause = (
+            f""" The user also referenced "{reference_system}" as inspiration/comparison -- you may use your GENERAL, PUBLIC knowledge of how that TYPE of product conceptually tends to be built to inform reasoning, but NEVER assert or imply certainty about that specific company's actual real implementation (no insider knowledge exists) -- phrase any such reasoning as "systems like {reference_system} typically..." or "the general {reference_system}-style pattern is...", never "{reference_system} actually uses...\""""
+            if reference_system
+            else ""
+        )
+        domain_instruction = f"""
+6. This product's domain is "{product_domain['category']}".{reference_clause} Act like a senior architect who has seen many real projects in this domain before: where a well-known, genuinely real domain-typical pattern is relevant to a component's reasoning (e.g. cart-session caching, inventory consistency handling, and payment retry/idempotency for e-commerce at meaningful scale; multi-tenant data isolation strategies for B2B SaaS; consistency/availability trade-offs for a marketplace's two-sided matching) given the STATED scale/requirements, weigh it in.
+   - Ground this ONLY in genuinely well-established, general knowledge for that domain -- never invent a "well-known" pattern that isn't real, and never apply a pattern the stated scale doesn't actually warrant (e.g. don't suggest cart-session caching for a 50-orders-a-day store).
+   - When a component's reasoning or the provider recommendation genuinely draws on a domain-typical pattern like this (as opposed to being derived purely from THIS project's own stated requirements), set that SAME component's (or "recommendation"'s) "domainPattern" to a short, visibly-labeled qualifier, e.g. "Common pattern for e-commerce platforms at this scale: cart contents are cached separately from the primary order database to keep checkout latency low under spiky traffic." Keep this as its OWN separate field, not blended invisibly into "reasoning" -- the user needs to be able to tell what came from a known domain pattern versus their specific stated requirements.
+   - Most components will have NO "domainPattern" at all -- only add it where a real, relevant domain-typical pattern genuinely applies.
 """
 
     system_instruction = (
@@ -933,6 +1001,7 @@ Your task is to:
    - If the previous version's components list is provided, that's for your context only (e.g. to avoid contradicting a prior decision) — the server computes the version-to-version diff itself; do not attempt to summarize or list changes yourself.
 """
         + knowledge_instruction
+        + domain_instruction
         + """
 You MUST respond with a raw JSON object matching this structure:
 {
@@ -945,6 +1014,7 @@ You MUST respond with a raw JSON object matching this structure:
       "reasoning": string,
       "rulesFired": string[],
       "sources": [ { "book": string, "chapterOrSection": string, "page": string } ],
+      "domainPattern": string,
       "cloudMappings": {
         "aws": {
           "serviceName": string,
@@ -985,7 +1055,8 @@ You MUST respond with a raw JSON object matching this structure:
     "recommendedProvider": "aws" | "azure" | "gcp",
     "rationale": string,
     "keyTradeoffs": [string, string, ...],
-    "sources": [ { "book": string, "chapterOrSection": string, "page": string } ]
+    "sources": [ { "book": string, "chapterOrSection": string, "page": string } ],
+    "domainPattern": string
   }
 }
 Do not use markdown code block formatting (like ```json) in your response, return only the raw JSON.
@@ -999,6 +1070,8 @@ Do not use markdown code block formatting (like ```json) in your response, retur
         "providerCosts": provider_costs,
         "previousArchitectureComponents": prev_hld_components or None,
     }
+    if product_domain and product_domain.get("category") and product_domain["category"] != "other":
+        input_context["productDomain"] = product_domain
     if knowledge_context:
         input_context["referenceExcerpts"] = [
             {

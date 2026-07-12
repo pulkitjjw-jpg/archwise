@@ -332,6 +332,12 @@ type ComponentData = {
   // retrieval genuinely found something the LLM drew on for THIS component; absent (not an empty
   // array) is the normal case for most components.
   sources?: Citation[];
+  // Domain-awareness feature -- a short, visibly-labeled note when this component's reasoning
+  // genuinely drew on a well-known DOMAIN-TYPICAL pattern (e.g. "common e-commerce pattern")
+  // rather than being derived purely from this project's own stated requirements. Kept as its own
+  // field (never blended into "reasoning") so the UI can render it distinctly from both the plain
+  // reasoning text and the book citations in "sources" -- three different kinds of grounding.
+  domainPattern?: string;
   cloudMapping?: CloudMapping; // legacy support
   cloudMappings?: {
     aws: CloudMapping;
@@ -375,6 +381,7 @@ type MigrationPhase = {
   why: string;
   usesStranglerFig: boolean;
   effort: "small" | "medium" | "large";
+  domainPattern?: string;
 };
 
 type ArchitectureData = {
@@ -398,6 +405,8 @@ type ArchitectureData = {
       recommendedProvider: "aws" | "azure" | "gcp";
       rationale: string;
       keyTradeoffs: string[];
+      sources?: Citation[];
+      domainPattern?: string;
     };
     diff?: {
       added: Array<{ id: string; name: string; type: string; reasoning: string }>;
@@ -1554,6 +1563,7 @@ export default function ArchitectureWorkspace({
     component?: ComponentData;
     newConnections?: ConnectionData[];
     previousReasoning?: string;
+    domainPattern?: string;
   };
   const [pendingDescription, setPendingDescription] = useState<string | null>(null);
   const [proposals, setProposals] = useState<ProposedChange[]>([]);
@@ -2385,7 +2395,7 @@ export default function ArchitectureWorkspace({
     );
   }
 
-  const fallbackRecommendation = {
+  const fallbackRecommendation: NonNullable<ArchitectureData["reasoning"]["recommendation"]> = {
     recommendedProvider: "aws" as const,
     rationale: "AWS is recommended due to its mature serverless infrastructure and consistent API response patterns, offering excellent reliability for the estimated traffic profile within budget.",
     keyTradeoffs: [
@@ -2770,6 +2780,15 @@ export default function ArchitectureWorkspace({
                         </div>
                       </div>
                       <p className="mt-2 leading-relaxed text-ink-muted">{p.reasoning}</p>
+                      {p.domainPattern && (
+                        <div className="mt-2 flex items-start gap-1.5 rounded-xl border border-warning/30 bg-warning-soft/40 p-2 text-[10.5px] text-ink-muted leading-relaxed">
+                          <span className="flex-none">🧭</span>
+                          <span>
+                            <span className="mr-1 font-bold uppercase tracking-wide text-[9px] text-warning">Domain Pattern</span>
+                            {p.domainPattern}
+                          </span>
+                        </div>
+                      )}
 
                       {/* Inline discuss/refine thread -- scoped to just this card. Sending a
                           message here never touches proposalDecisions for any other card, so
@@ -4887,6 +4906,20 @@ export default function ArchitectureWorkspace({
                         {selectedNode.reasoning}
                         <SourceCitations sources={selectedNode.sources} />
                       </div>
+                      {/* Domain-awareness (kept visually SEPARATE from the reasoning box above --
+                          a different kind of grounding, from general domain-typical knowledge
+                          rather than this project's own stated requirements, so it must never
+                          read as if it were part of the same claim). */}
+                      {selectedNode.domainPattern && (
+                        <div className="mt-2 flex items-start gap-1.5 rounded-2xl border border-warning/30 bg-warning-soft/40 p-3 text-[11px] text-ink-muted leading-relaxed">
+                          <span className="flex-none text-sm">🧭</span>
+                          <span>
+                            <span className="mr-1 font-bold uppercase tracking-wide text-[9px] text-warning">Domain Pattern</span>
+                            <br />
+                            {selectedNode.domainPattern}
+                          </span>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -4948,6 +4981,17 @@ export default function ArchitectureWorkspace({
                   <p className="text-sm text-ink-muted leading-relaxed mt-2 max-w-4xl">
                     {recommendation.rationale}
                   </p>
+                  <SourceCitations sources={recommendation.sources} />
+                  {recommendation.domainPattern && (
+                    <div className="mt-2 flex max-w-4xl items-start gap-1.5 rounded-2xl border border-warning/30 bg-warning-soft/40 p-3 text-[11px] text-ink-muted leading-relaxed">
+                      <span className="flex-none text-sm">🧭</span>
+                      <span>
+                        <span className="mr-1 font-bold uppercase tracking-wide text-[9px] text-warning">Domain Pattern</span>
+                        <br />
+                        {recommendation.domainPattern}
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -5364,6 +5408,16 @@ export default function ArchitectureWorkspace({
                             <span className="mt-0.5 flex-none text-sm">💡</span>
                             <p className="text-xs text-ink-muted leading-relaxed">{p.why}</p>
                           </div>
+                          {p.domainPattern && (
+                            <div className="mt-2 flex items-start gap-1.5 rounded-xl border border-warning/30 bg-warning-soft/40 p-2.5 text-[11px] text-ink-muted leading-relaxed">
+                              <span className="flex-none text-sm">🧭</span>
+                              <span>
+                                <span className="mr-1 font-bold uppercase tracking-wide text-[9px] text-warning">Domain Pattern</span>
+                                <br />
+                                {p.domainPattern}
+                              </span>
+                            </div>
+                          )}
                         </div>
                       </li>
                     );

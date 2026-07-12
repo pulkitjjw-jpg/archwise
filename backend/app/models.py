@@ -16,6 +16,16 @@ INDUSTRY_CONTEXT_DEFAULT = text(
     """'{"industry":"none","rationale":"","complianceAnswers":[],"flags":{}}'::jsonb"""
 )
 
+# productDomain (domain-awareness feature) -- a BROADER classification than industry_context (an
+# app can be healthtech AND a marketplace at once). "other" is the honest default for a row
+# created before this field existed / before extraction has run, distinct from a real "other"
+# classification the LLM actually chose -- callers that care about the difference check
+# created_at or whether rationale is empty, same precedent as industry_context's "none" default.
+# The backslash before :null escapes SQLAlchemy text()'s bind-parameter syntax (":word" is
+# normally read as a bind param placeholder) -- without it, this raises "invalid input syntax for
+# type json, Token NULL is invalid" because SQLAlchemy silently mangles the literal ":null".
+PRODUCT_DOMAIN_DEFAULT = text(r"""'{"category":"other","rationale":"","referenceSystem"\:null}'::jsonb""")
+
 
 class Project(Base):
     __tablename__ = "projects"
@@ -117,6 +127,12 @@ class Requirement(Base):
     # plain greenfield project. NULL (not an empty dict) is the "not applicable" signal the
     # Migration Roadmap feature gates on, distinct from "asked about it, nothing was said."
     existing_system: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # Domain-awareness feature -- {category, rationale, referenceSystem}, extracted the same way
+    # and at the same time as industryContext (see extract_requirements_from_history), but a
+    # broader/orthogonal classification: product CATEGORY (e-commerce, SaaS, marketplace...) not
+    # regulated-industry compliance regime. Consumed by HLD generation, Migration Roadmap, and
+    # growth-trigger reasoning to ground domain-typical-pattern suggestions.
+    product_domain: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=PRODUCT_DOMAIN_DEFAULT)
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     # Lazily generated + cached on first request (not eagerly on every requirements save) --
     # NULL until someone actually views the Conversation Summary section. This is the one field
