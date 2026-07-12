@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import InfoTooltip from "./InfoTooltip";
+import SourceCitations, { type Citation } from "./SourceCitations";
 import { FIELD_EXPLANATIONS } from "@/lib/field-explanations";
 
 type RequirementsData = {
@@ -22,6 +23,7 @@ type RequirementsData = {
     flags: Record<string, unknown>;
   };
   conversationSummary?: string | null;
+  conversationSummarySources?: Citation[] | null;
 };
 
 const INDUSTRY_BADGE: Record<"fintech" | "healthtech", { label: string; emoji: string }> = {
@@ -55,6 +57,7 @@ export default function RequirementsPanel({
   // Conversation Summary -- cached server-side on the requirements row, so this only pays for a
   // real LLM call the first time a given requirements version is viewed.
   const [conversationSummary, setConversationSummary] = useState<string | null>(null);
+  const [conversationSummarySources, setConversationSummarySources] = useState<Citation[]>([]);
   const [summaryLoading, setSummaryLoading] = useState(false);
 
   const loadConversationSummary = async () => {
@@ -64,6 +67,7 @@ export default function RequirementsPanel({
       if (res.ok) {
         const data = await res.json();
         setConversationSummary(data.summary || null);
+        setConversationSummarySources(data.sources || []);
       }
     } catch (err) {
       console.error("Failed to load conversation summary:", err);
@@ -76,6 +80,7 @@ export default function RequirementsPanel({
     if (!requirements) return;
     if (requirements.conversationSummary) {
       setConversationSummary(requirements.conversationSummary);
+      setConversationSummarySources(requirements.conversationSummarySources || []);
       return;
     }
     loadConversationSummary();
@@ -96,7 +101,7 @@ export default function RequirementsPanel({
   // AI-suggested chip options per field -- fetched fresh on entering edit mode so they reflect
   // whatever's actually specified so far, not stale from a previous session. Each suggestion
   // carries a short "why" grounded in the actual project context, shown via an info tooltip.
-  type Suggestion = { value: string; why: string };
+  type Suggestion = { value: string; why: string; sources?: Citation[] };
   type FieldSuggestions = Partial<Record<keyof typeof editedNFR | "functional", Suggestion[]>>;
   const [fieldSuggestions, setFieldSuggestions] = useState<FieldSuggestions>({});
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
@@ -307,6 +312,11 @@ export default function RequirementsPanel({
                     {s.value}
                   </button>
                   {s.why && <InfoTooltip text={`Why suggested: ${s.why}`} />}
+                  {s.sources && s.sources.length > 0 && (
+                    <InfoTooltip
+                      text={`Source: ${s.sources[0].book}${s.sources[0].page ? `, p.${s.sources[0].page}` : ""} — "${(s.sources[0].excerpt || "").slice(0, 220)}${(s.sources[0].excerpt?.length || 0) > 220 ? "..." : ""}"`}
+                    />
+                  )}
                 </span>
               ))}
             </div>
@@ -449,7 +459,10 @@ export default function RequirementsPanel({
               Summarizing the conversation...
             </div>
           ) : conversationSummary ? (
-            <p className="rounded-2xl bg-paper p-4 text-sm text-ink-muted leading-relaxed">{conversationSummary}</p>
+            <div className="rounded-2xl bg-paper p-4">
+              <p className="text-sm text-ink-muted leading-relaxed">{conversationSummary}</p>
+              <SourceCitations sources={conversationSummarySources} />
+            </div>
           ) : (
             <p className="rounded-2xl bg-paper p-4 text-xs text-ink-faint italic">Summary unavailable.</p>
           )}

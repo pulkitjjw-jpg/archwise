@@ -32,6 +32,7 @@ import {
   type FlowBookendNode,
 } from "@/lib/diagram-layout";
 import InfoTooltip from "./InfoTooltip";
+import SourceCitations, { type Citation } from "./SourceCitations";
 
 type CloudProviderKey = "aws" | "azure" | "gcp" | "kubernetes" | "private";
 
@@ -327,6 +328,10 @@ type ComponentData = {
   description: string;
   reasoning: string;
   rulesFired: string[];
+  // Knowledge-base RAG (architecture/software-engineering book corpus) -- only present when
+  // retrieval genuinely found something the LLM drew on for THIS component; absent (not an empty
+  // array) is the normal case for most components.
+  sources?: Citation[];
   cloudMapping?: CloudMapping; // legacy support
   cloudMappings?: {
     aws: CloudMapping;
@@ -380,6 +385,7 @@ type ArchitectureData = {
     connections: ConnectionData[];
   };
   flowStory?: Record<string, string>;
+  flowStorySources?: Record<string, Citation[]>;
   journeySteps?: Record<string, JourneyStep[]>;
   layoutOverrides?: Record<string, { x: number; y: number }>;
   securityFindings?: Record<string, SecurityFinding[]>;
@@ -1376,9 +1382,11 @@ export default function ArchitectureWorkspace({
   // viewed doesn't even cost a network round trip). Refetches only when the architecture
   // version or active provider actually changes.
   const [flowStoryCache, setFlowStoryCache] = useState<Record<string, string>>({});
+  const [flowStorySourcesCache, setFlowStorySourcesCache] = useState<Record<string, Citation[]>>({});
   const [flowStoryLoading, setFlowStoryLoading] = useState(false);
   const flowStoryKey = architecture ? `${architecture.id}:${activeProvider}` : null;
   const currentFlowStory = flowStoryKey ? flowStoryCache[flowStoryKey] : undefined;
+  const currentFlowStorySources = flowStoryKey ? flowStorySourcesCache[flowStoryKey] : undefined;
 
   useEffect(() => {
     if (!architecture) return;
@@ -1388,6 +1396,8 @@ export default function ArchitectureWorkspace({
     const embedded = architecture.flowStory?.[activeProvider];
     if (embedded) {
       setFlowStoryCache((prev) => ({ ...prev, [key]: embedded }));
+      const embeddedSources = architecture.flowStorySources?.[activeProvider];
+      if (embeddedSources) setFlowStorySourcesCache((prev) => ({ ...prev, [key]: embeddedSources }));
       return;
     }
 
@@ -1400,6 +1410,7 @@ export default function ArchitectureWorkspace({
       .then((data) => {
         if (cancelled) return;
         setFlowStoryCache((prev) => ({ ...prev, [key]: data.story }));
+        setFlowStorySourcesCache((prev) => ({ ...prev, [key]: data.sources || [] }));
       })
       .catch((err) => console.error("Failed to load flow story:", err))
       .finally(() => {
@@ -4000,9 +4011,12 @@ export default function ArchitectureWorkspace({
                       Writing the flow story for {PROVIDER_LABELS[activeProvider]}...
                     </div>
                   ) : currentFlowStory ? (
-                    <p className="mt-3 text-sm text-ink-muted leading-relaxed whitespace-pre-line">
-                      {currentFlowStory}
-                    </p>
+                    <>
+                      <p className="mt-3 text-sm text-ink-muted leading-relaxed whitespace-pre-line">
+                        {currentFlowStory}
+                      </p>
+                      <SourceCitations sources={currentFlowStorySources} />
+                    </>
                   ) : (
                     <p className="mt-3 text-xs text-ink-faint italic">Flow story unavailable.</p>
                   )}
@@ -4871,6 +4885,7 @@ export default function ArchitectureWorkspace({
                       <h5 className="text-xs font-bold text-ink-muted uppercase tracking-wider">Architect Rationale</h5>
                       <div className="mt-2 rounded-2xl border border-accent/25 bg-accent-soft/30 p-3.5 text-xs text-accent-ink font-medium leading-relaxed">
                         {selectedNode.reasoning}
+                        <SourceCitations sources={selectedNode.sources} />
                       </div>
                     </div>
                   )}
