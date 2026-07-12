@@ -13,9 +13,14 @@ import { buildFlowDocumentationMarkdown, downloadMarkdown, type FlowDocComponent
 import {
   computeDiagramLayoutAsync,
   buildRoundedPath,
+  buildFlowBookends,
+  USER_NODE_ID,
+  CLIENT_NODE_ID,
+  RESPONSE_NODE_ID,
   DIAGRAM_NODE_WIDTH,
   DIAGRAM_NODE_HEIGHT,
   type DiagramLayout,
+  type FlowBookendNode,
 } from "@/lib/diagram-layout";
 import InfoTooltip from "./InfoTooltip";
 
@@ -547,7 +552,7 @@ export default function ArchitectureWorkspace({
         // SVG containing foreignObject regardless of content, so PNG export builds its own
         // simplified rect/text representation from the same layout data instead (see
         // diagram-export.ts for why).
-        const pngNodes: PngExportNode[] = diagramComponents
+        const realPngNodes: PngExportNode[] = diagramComponents
           .map((c) => {
             const coord = nodeCoords[c.id];
             if (!coord) return null;
@@ -567,7 +572,30 @@ export default function ArchitectureWorkspace({
           })
           .filter((n): n is PngExportNode => n !== null);
 
-        const pngEdges: PngExportEdge[] = diagramConnections
+        // End-to-end flow bookends (Workstream R) -- included so the exported image matches
+        // what's on screen, same principle as the orthogonal routing/drag positions above.
+        const bookendPngNodes: PngExportNode[] = [];
+        for (const n of bookendNodes) {
+          const coord = nodeCoords[n.id];
+          if (!coord) continue;
+          bookendPngNodes.push({
+            id: n.id,
+            x: coord.x,
+            y: coord.y,
+            width: coord.width,
+            height: coord.height,
+            label: n.kind === "user" ? "Start" : n.kind === "client" ? "Frontend" : "End",
+            serviceName: n.name,
+            isCompliance: false,
+            isOverride: false,
+            accentHex: "#12161F",
+            isBookend: true,
+          });
+        }
+
+        const pngNodes: PngExportNode[] = [...realPngNodes, ...bookendPngNodes];
+
+        const pngEdges: PngExportEdge[] = layoutConnections
           .map((conn) => {
             const points = diagramLayout.edgePoints[`${conn.from}->${conn.to}`];
             if (!points || points.length < 2) return null;
@@ -973,6 +1001,16 @@ export default function ArchitectureWorkspace({
     ? draftHld?.connections || []
     : architecture?.hld.connections || [];
 
+  // End-to-end flow bookends (Workstream R) -- purely a rendering-layer overlay, never written
+  // to hld.components/connections, never exported to Terraform, never priced. diagramComponents/
+  // diagramConnections (real infra data used everywhere else: drawer, editing, sub-choices,
+  // Terraform export) stay completely untouched; these are merged in ONLY for layout+rendering+
+  // image export, computed fresh from whatever the current graph shape is so every existing
+  // project gets this immediately with no migration.
+  const { nodes: bookendNodes, connections: bookendConnections } = buildFlowBookends(diagramComponents, diagramConnections);
+  const layoutComponents = [...diagramComponents, ...bookendNodes];
+  const layoutConnections = [...diagramConnections, ...bookendConnections];
+
   // Manual drag-to-reposition overrides (Workstream Q) -- local state seeded from whatever the
   // loaded architecture version already has saved, optimistically updated on drag and persisted
   // via a lightweight PATCH that merges into the CURRENT version's layout_overrides without
@@ -988,12 +1026,12 @@ export default function ArchitectureWorkspace({
   // a plain computed value. Keyed off a flattened string rather than the raw arrays/objects
   // directly, since diagramComponents/diagramConnections are freshly-derived (non-stable
   // reference) on every render -- depending on them directly would re-run ELK on every render.
-  const layoutKey = `${diagramComponents.map((c) => c.id).join(",")}|${diagramConnections
+  const layoutKey = `${layoutComponents.map((c) => c.id).join(",")}|${layoutConnections
     .map((c) => `${c.from}-${c.to}`)
     .join(",")}|${JSON.stringify(layoutOverrides)}`;
   useEffect(() => {
     let cancelled = false;
-    computeDiagramLayoutAsync(diagramComponents, diagramConnections, layoutOverrides).then((result) => {
+    computeDiagramLayoutAsync(layoutComponents, layoutConnections, layoutOverrides).then((result) => {
       if (!cancelled) setDiagramLayout(result);
     });
     return () => {
@@ -2342,7 +2380,7 @@ export default function ArchitectureWorkspace({
                                 dragged, its connected edges fall back to a live straight line
                                 between renderCoords instead (ELK's stored bend points are only
                                 valid for its own pre-drag positions). */}
-                            {diagramConnections.map((conn, idx) => {
+                            {layoutConnections.map((conn, idx) => {
                               const isLiveDragging =
                                 draggingNodeId && (conn.from === draggingNodeId || conn.to === draggingNodeId);
                               const points = isLiveDragging
@@ -2402,9 +2440,45 @@ export default function ArchitectureWorkspace({
                             {/* Nodes — real per-service icons, rendered as HTML cards inside
                                 foreignObject so text truncates naturally and the icon library
                                 just works, rather than hand-rolled SVG text/rects. */}
-                            {diagramComponents.map((node) => {
+                            {layoutComponents.map((node) => {
                               const coord = renderCoords[node.id];
                               if (!coord) return null;
+
+                              // End-to-end flow bookends (Workstream R) -- visually distinct
+                              // (dark card, person/device/reply icon, no per-service icon or
+                              // cost) and non-interactive: they're not real components, so no
+                              // selection, no drag, no drawer.
+                              if ("kind" in node) {
+                                const bookendIcon =
+                                  node.kind === "user"
+                                    ? "mdi:account-circle"
+                                    : node.kind === "client"
+                                      ? "mdi:monitor-cellphone"
+                                      : "mdi:reply-outline";
+                                const bookendLabel =
+                                  node.kind === "user" ? "Start" : node.kind === "client" ? "Frontend" : "End";
+                                return (
+                                  <foreignObject
+                                    key={node.id}
+                                    x={coord.x - coord.width / 2}
+                                    y={coord.y - coord.height / 2}
+                                    width={coord.width}
+                                    height={coord.height}
+                                  >
+                                    <div className="flex h-full w-full items-center gap-2.5 rounded-2xl border-2 border-dashed border-white/30 bg-ink px-3 py-2 shadow-sm">
+                                      <div className="flex h-9 w-9 flex-none items-center justify-center rounded-lg bg-white/15">
+                                        <Icon icon={bookendIcon} width={20} height={20} className="text-white" />
+                                      </div>
+                                      <div className="min-w-0 flex-1">
+                                        <div className="truncate text-[9.5px] font-bold uppercase tracking-wide text-white/50">
+                                          {bookendLabel}
+                                        </div>
+                                        <div className="truncate text-[12.5px] font-bold text-white">{node.name}</div>
+                                      </div>
+                                    </div>
+                                  </foreignObject>
+                                );
+                              }
 
                               const isSelected = selectedNodeId === node.id;
                               const mapping = getMappingForProvider(node, activeProvider);

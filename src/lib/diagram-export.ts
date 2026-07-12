@@ -140,6 +140,10 @@ export interface PngExportNode {
   isCompliance: boolean;
   isOverride: boolean;
   accentHex: string;
+  // End-to-end flow bookends (Workstream R) -- User/Client/Response, not real infra. Rendered
+  // with a dark fill instead of the usual white card, matching the live diagram's on-screen
+  // style, so the exported image stays visually consistent with what's on screen.
+  isBookend?: boolean;
 }
 
 export interface PngExportEdge {
@@ -176,6 +180,25 @@ function buildPlainDiagramSvg(
   for (const node of nodes) {
     const x = node.x - node.width / 2;
     const y = node.y - node.height / 2;
+
+    if (node.isBookend) {
+      parts.push(
+        `<rect x="${x}" y="${y}" width="${node.width}" height="${node.height}" rx="14" fill="#12161F" stroke="#FFFFFF" stroke-opacity="0.3" stroke-width="1.5" stroke-dasharray="4 3"/>`
+      );
+      parts.push(`<circle cx="${x + 22}" cy="${y + node.height / 2}" r="10" fill="#FFFFFF" fill-opacity="0.15"/>`);
+      parts.push(
+        `<text x="${x + 42}" y="${y + node.height / 2 - 6}" font-family="ui-sans-serif, system-ui, sans-serif" font-size="9" font-weight="700" letter-spacing="0.5" fill="#FFFFFF" fill-opacity="0.5">${escapeXml(
+          truncate(node.label.toUpperCase(), 24)
+        )}</text>`
+      );
+      parts.push(
+        `<text x="${x + 42}" y="${y + node.height / 2 + 12}" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="#FFFFFF">${escapeXml(
+          truncate(node.serviceName, 22)
+        )}</text>`
+      );
+      continue;
+    }
+
     const borderColor = node.isCompliance ? "#9A5B0A" : "#CBD1DC";
     const dash = node.isOverride ? ` stroke-dasharray="4 3"` : "";
     parts.push(

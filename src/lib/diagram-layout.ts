@@ -132,6 +132,57 @@ export async function computeDiagramLayoutAsync(
   return { nodes, edgePoints, width, height };
 }
 
+// End-to-end flow bookends (Workstream R) -- the topology diagram previously showed only cloud
+// infrastructure, with no visual indication of where the flow actually starts (the end user
+// opening the app) or ends (the response coming back to them). Deliberately NOT real
+// architecture components: they're never written to hld.components, never sent through
+// Terraform/K8s export, never priced, never provider-specific -- purely a rendering-layer
+// overlay computed fresh from whatever the current component/connection graph looks like, so
+// every existing project gets this immediately with no migration or regeneration.
+export const USER_NODE_ID = "__end_user__";
+export const CLIENT_NODE_ID = "__client_app__";
+export const RESPONSE_NODE_ID = "__response__";
+
+export type FlowBookendNode = {
+  id: string;
+  name: string;
+  kind: "user" | "client" | "response";
+};
+
+export type FlowBookendConnection = { from: string; to: string; protocol: string };
+
+export function buildFlowBookends(
+  components: { id: string }[],
+  connections: { from: string; to: string }[]
+): { nodes: FlowBookendNode[]; connections: FlowBookendConnection[] } {
+  if (components.length === 0) return { nodes: [], connections: [] };
+
+  const hasIncoming = new Set(connections.map((c) => c.to));
+  const hasOutgoing = new Set(connections.map((c) => c.from));
+  const entryPoints = components.filter((c) => !hasIncoming.has(c.id)).map((c) => c.id);
+  const exitPoints = components.filter((c) => !hasOutgoing.has(c.id)).map((c) => c.id);
+
+  // Defensive fallback: an unusual graph (fully cyclic, or a single node) could have zero
+  // natural entry/exit points -- fall back to the first/last component so the bookends still
+  // attach to something rather than floating disconnected.
+  const entries = entryPoints.length > 0 ? entryPoints : [components[0].id];
+  const exits = exitPoints.length > 0 ? exitPoints : [components[components.length - 1].id];
+
+  const nodes: FlowBookendNode[] = [
+    { id: USER_NODE_ID, name: "End User", kind: "user" },
+    { id: CLIENT_NODE_ID, name: "Client App (Web/Mobile)", kind: "client" },
+    { id: RESPONSE_NODE_ID, name: "Response to User", kind: "response" },
+  ];
+
+  const bookendConnections: FlowBookendConnection[] = [
+    { from: USER_NODE_ID, to: CLIENT_NODE_ID, protocol: "User Action" },
+    ...entries.map((id) => ({ from: CLIENT_NODE_ID, to: id, protocol: "HTTPS Request" })),
+    ...exits.map((id) => ({ from: id, to: RESPONSE_NODE_ID, protocol: "Response" })),
+  ];
+
+  return { nodes, connections: bookendConnections };
+}
+
 // Turns a polyline (straight-line-only ELK bend points, or a 2-point override fallback) into a
 // smooth SVG path with rounded corners at each interior vertex -- a sharp right-angle turn reads
 // as more mechanical/harder to trace at a glance than a gently rounded one, which is why every
