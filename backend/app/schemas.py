@@ -17,6 +17,21 @@ class ConversationCreateRequest(BaseModel):
 class RequirementsPutRequest(BaseModel):
     functional: Any
     nonFunctional: dict[str, Any]
+    # Optional -- omitted by the existing Requirements tab edit flow (which never touches
+    # industry/compliance context), but the What-If Simulator's "Make this real" needs a way to
+    # persist a changed industry/compliance selection too. When omitted, the save endpoint carries
+    # the latest saved industryContext forward unchanged, exactly as it always has.
+    industryContext: dict[str, Any] | None = None
+
+
+class WhatIfPreviewRequest(BaseModel):
+    functional: list[str]
+    nonFunctional: dict[str, Any]
+    industryContext: dict[str, Any]
+    # Freeform text for anything that doesn't map to a structured field (e.g. "add multi-region
+    # failover") -- folded into the functional requirements list server-side, the same channel
+    # the rules engine and LLM already read capability descriptions from.
+    additionalContext: str | None = None
 
 
 # Strict validation for the manual architecture editor's request body -- a deliberate

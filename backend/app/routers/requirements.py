@@ -142,9 +142,11 @@ async def save_requirements(
     latest = await _latest_requirement(db, project_id)
     next_version = latest.version + 1 if latest else 1
 
-    # Manual edits via the requirements panel don't touch industry context -- carry the latest
-    # detected value forward rather than letting the column default silently wipe it.
-    industry_context = latest.industry_context if latest else DEFAULT_INDUSTRY_CONTEXT
+    # Manual edits via the Requirements tab never send industryContext -- carry the latest
+    # detected value forward rather than letting the column default silently wipe it. The What-If
+    # Simulator's "Make this real" is the one caller that DOES send an explicit industryContext
+    # (a changed compliance/industry selection), which takes precedence when present.
+    industry_context = payload.industryContext or (latest.industry_context if latest else DEFAULT_INDUSTRY_CONTEXT)
 
     # Always insert a new record for version history
     record = Requirement(

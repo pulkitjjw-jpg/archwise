@@ -1371,67 +1371,149 @@ export default function ArchitectureWorkspace({
   const [discussionInput, setDiscussionInput] = useState("");
   const [discussionLoading, setDiscussionLoading] = useState(false);
 
-  // What-If Simulator (Workstream T1) -- a sandbox for exploring a hypothetical change (10x
-  // scale, a different budget, a different provider, or any freeform description) and previewing
-  // its cost/component impact WITHOUT creating a saved version. Deliberately reuses the exact
-  // same propose-changes endpoint the growth-trigger chat flow above already calls -- that
-  // endpoint already never persists anything, so "preview only" falls out of the existing
-  // contract for free rather than needing a parallel preview system. Kept as entirely separate
-  // state from proposals/pendingDescription above so exploring a what-if scenario never clobbers
-  // (or gets clobbered by) a live growth-trigger review.
+  // What-If Simulator (Workstream T1, extended per explicit feedback) -- a sandbox for exploring
+  // a hypothetical that varies ANY requirement field (not just scale/budget): functional
+  // capabilities, all 7 non-functional fields, industry/compliance context, plus a freeform note
+  // for anything that doesn't map to a structured field. Runs the exact same rules-engine + LLM
+  // pipeline real generation uses (architecture_generation.py's generate_architecture_bundle,
+  // called via the new /architectures/whatif-preview endpoint) against these hypothetical values,
+  // never persisting anything. Kept as entirely separate state from proposals/pendingDescription
+  // above so exploring a what-if scenario never clobbers (or gets clobbered by) a live
+  // growth-trigger review.
+  type WhatIfNFR = {
+    expectedScale: string;
+    readWritePattern: string;
+    dataNature: string;
+    latencySensitivity: string;
+    budget: string;
+    teamMaturity: string;
+    compliance: string;
+  };
+  const BLANK_NFR: WhatIfNFR = {
+    expectedScale: "",
+    readWritePattern: "",
+    dataNature: "",
+    latencySensitivity: "",
+    budget: "",
+    teamMaturity: "",
+    compliance: "",
+  };
+  const NFR_FIELD_LABELS: Record<keyof WhatIfNFR, string> = {
+    expectedScale: "Expected Traffic / Scale",
+    readWritePattern: "Read/Write Pattern",
+    dataNature: "Data Types",
+    latencySensitivity: "Latency Sensitivity",
+    budget: "Budget Range",
+    teamMaturity: "Team Technical Maturity",
+    compliance: "Security & Compliance",
+  };
+  type WhatIfIndustry = "none" | "fintech" | "healthtech";
+  type WhatIfSnapshot = {
+    functional: string;
+    nfr: WhatIfNFR;
+    industry: WhatIfIndustry;
+    handlesCardData: boolean;
+    storesPHI: boolean;
+  };
+  type WhatIfPreviewData = {
+    components: ComponentData[];
+    connections: ConnectionData[];
+    assumptions: string[];
+    risks: string[];
+    recommendation?: { recommendedProvider: string; rationale: string; keyTradeoffs: string[] };
+    diff: {
+      added: { id: string; name: string; type: string; reasoning: string }[];
+      removed: { id: string; name: string; type: string }[];
+      modified: { id: string; name: string; type: string; changes: { parameter: string; oldVal: string; newVal: string; reasoning: string }[] }[];
+    } | null;
+    securityFindings: Record<string, SecurityFinding[]>;
+  };
+
   const [whatIfMode, setWhatIfMode] = useState(false);
-  const [whatIfScale, setWhatIfScale] = useState(1);
-  const [whatIfBudget, setWhatIfBudget] = useState("");
-  const [whatIfDescription, setWhatIfDescription] = useState("");
+  const [whatIfFunctional, setWhatIfFunctional] = useState("");
+  const [whatIfNFR, setWhatIfNFR] = useState<WhatIfNFR>(BLANK_NFR);
+  const [whatIfIndustry, setWhatIfIndustry] = useState<WhatIfIndustry>("none");
+  const [whatIfHandlesCardData, setWhatIfHandlesCardData] = useState(false);
+  const [whatIfStoresPHI, setWhatIfStoresPHI] = useState(false);
+  const [whatIfAdditionalContext, setWhatIfAdditionalContext] = useState("");
   const [whatIfProvider, setWhatIfProvider] = useState<CloudProviderKey>(activeProvider);
-  const [whatIfProposals, setWhatIfProposals] = useState<ProposedChange[] | null>(null);
-  const [whatIfSelectedIds, setWhatIfSelectedIds] = useState<Set<string>>(new Set());
+  const [whatIfOriginal, setWhatIfOriginal] = useState<WhatIfSnapshot | null>(null);
+  const [whatIfPreview, setWhatIfPreview] = useState<WhatIfPreviewData | null>(null);
   const [whatIfLoading, setWhatIfLoading] = useState(false);
   const [whatIfApplying, setWhatIfApplying] = useState(false);
   const [whatIfError, setWhatIfError] = useState("");
 
-  const resetWhatIf = () => {
-    setWhatIfProposals(null);
-    setWhatIfSelectedIds(new Set());
-    setWhatIfScale(1);
-    setWhatIfBudget("");
-    setWhatIfDescription("");
+  // Pre-populates every field from the project's CURRENT saved requirements (the same data the
+  // Requirements tab shows) and snapshots those starting values so edits can be visually marked
+  // as "changed" against them.
+  const openWhatIf = () => {
+    const nfr: WhatIfNFR = { ...BLANK_NFR, ...(requirements?.nonFunctional || {}) };
+    const functionalStr = (requirements?.functional || []).join("\n");
+    const industry: WhatIfIndustry = requirements?.industryContext?.industry || "none";
+    const flags = requirements?.industryContext?.flags || {};
+    const handlesCardData = !!flags.handlesCardDataDirectly;
+    const storesPHI = !!flags.storesPHI;
+
+    setWhatIfFunctional(functionalStr);
+    setWhatIfNFR(nfr);
+    setWhatIfIndustry(industry);
+    setWhatIfHandlesCardData(handlesCardData);
+    setWhatIfStoresPHI(storesPHI);
+    setWhatIfAdditionalContext("");
+    setWhatIfProvider(activeProvider);
+    setWhatIfOriginal({ functional: functionalStr, nfr, industry, handlesCardData, storesPHI });
+    setWhatIfPreview(null);
+    setWhatIfError("");
+    setWhatIfMode(true);
+  };
+
+  const closeWhatIf = () => {
+    setWhatIfMode(false);
+    setWhatIfPreview(null);
     setWhatIfError("");
   };
 
-  const buildWhatIfDescription = (): string => {
-    const parts: string[] = [];
-    if (whatIfScale !== 1) parts.push(`Scale increases by ${whatIfScale}x from the current stated usage.`);
-    if (whatIfBudget.trim()) parts.push(`The target monthly budget changes to ${whatIfBudget.trim()}.`);
-    if (whatIfDescription.trim()) parts.push(whatIfDescription.trim());
-    return parts.join(" ");
-  };
+  const isNFRFieldChanged = (field: keyof WhatIfNFR) => !!whatIfOriginal && whatIfNFR[field] !== whatIfOriginal.nfr[field];
+  const isFunctionalChanged = !!whatIfOriginal && whatIfFunctional !== whatIfOriginal.functional;
+  const isIndustryChanged =
+    !!whatIfOriginal &&
+    (whatIfIndustry !== whatIfOriginal.industry ||
+      whatIfHandlesCardData !== whatIfOriginal.handlesCardData ||
+      whatIfStoresPHI !== whatIfOriginal.storesPHI);
+
+  const buildWhatIfIndustryContext = () => ({
+    industry: whatIfIndustry,
+    rationale: requirements?.industryContext?.rationale || "",
+    complianceAnswers: requirements?.industryContext?.complianceAnswers || [],
+    flags: {
+      ...(whatIfIndustry === "fintech" ? { handlesCardDataDirectly: whatIfHandlesCardData } : {}),
+      ...(whatIfIndustry === "healthtech" ? { storesPHI: whatIfStoresPHI } : {}),
+    },
+  });
 
   const runWhatIfSimulation = async () => {
     if (!architecture) return;
-    const description = buildWhatIfDescription();
-    if (!description) {
-      setWhatIfError("Adjust the scale, set a target budget, or describe a hypothetical change first.");
-      return;
-    }
     setWhatIfError("");
     setWhatIfLoading(true);
-    setWhatIfProposals(null);
-    setWhatIfSelectedIds(new Set());
+    setWhatIfPreview(null);
     try {
-      const res = await fetch(
-        `/api/projects/${projectId}/architectures/${architecture.id}/propose-changes?provider=${whatIfProvider}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ description, provider: whatIfProvider }),
-        }
-      );
+      const functionalList = whatIfFunctional
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const res = await fetch(`/api/projects/${projectId}/architectures/whatif-preview`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          functional: functionalList,
+          nonFunctional: whatIfNFR,
+          industryContext: buildWhatIfIndustryContext(),
+          additionalContext: whatIfAdditionalContext,
+        }),
+      });
       if (!res.ok) throw new Error("Failed to run this simulation");
       const data = await res.json();
-      const nextProposals: ProposedChange[] = data.proposals || [];
-      setWhatIfProposals(nextProposals);
-      setWhatIfSelectedIds(new Set(nextProposals.map((p) => p.componentId)));
+      setWhatIfPreview(data);
     } catch (err: any) {
       setWhatIfError(err.message || "Something went wrong running this simulation.");
     } finally {
@@ -1439,23 +1521,14 @@ export default function ArchitectureWorkspace({
     }
   };
 
-  // Pure client-side projection -- merges only the CURRENTLY SELECTED preview proposals into a
-  // scratch copy of the real components (never touching architecture state) and re-runs the same
-  // cost reduction calculateTotalCost already uses, just parametrized over that scratch array
-  // instead of architecture.hld.components.
-  const computeWhatIfCostPreview = (): { before: { min: number; max: number }; after: { min: number; max: number } } | null => {
-    if (!architecture) return null;
+  // Pure client-side cost projection -- the preview already returns full alternate components
+  // (with real cloudMappings from the same generation pipeline), so this just re-runs the same
+  // cost reduction calculateTotalCost already uses, over the preview's components instead of
+  // architecture.hld.components. Never touches architecture state.
+  const whatIfCostPreview = (): { before: { min: number; max: number }; after: { min: number; max: number } } | null => {
+    if (!architecture || !whatIfPreview) return null;
     const before = calculateTotalCost(whatIfProvider);
-    let simulatedComponents = [...architecture.hld.components];
-    for (const p of whatIfProposals || []) {
-      if (!whatIfSelectedIds.has(p.componentId)) continue;
-      if (p.action === "add" && p.component) {
-        simulatedComponents = [...simulatedComponents, p.component];
-      } else if (p.action === "modify") {
-        simulatedComponents = simulatedComponents.map((c) => (c.id === p.componentId ? { ...c, reasoning: p.reasoning } : c));
-      }
-    }
-    const after = simulatedComponents.reduce(
+    const after = whatIfPreview.components.reduce(
       (acc, c) => {
         const mapping = getMappingForProvider(c, whatIfProvider);
         return { min: acc.min + (mapping?.costEstimate.min || 0), max: acc.max + (mapping?.costEstimate.max || 0) };
@@ -1465,50 +1538,49 @@ export default function ArchitectureWorkspace({
     return { before, after };
   };
 
-  const toggleWhatIfSelected = (componentId: string) => {
-    setWhatIfSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(componentId)) next.delete(componentId);
-      else next.add(componentId);
-      return next;
-    });
-  };
-
-  // "Make this real" -- identical merge-then-save shape to handleApplyProposals below, reusing
-  // the SAME manual-save endpoint/versioning pipeline (Workstream K's approval pattern). This is
-  // the one and only place a what-if scenario can turn into an actual saved architecture version.
+  // "Make this real" -- applies ALL changed fields, not just scale/budget: saves a new
+  // requirements version (functional + every NFR field + industryContext, extending the existing
+  // PUT /requirements endpoint) and then regenerates through the REAL auto-generate endpoint from
+  // those just-saved requirements, so the resulting architecture version is produced by the exact
+  // same path as a normal "Regenerate" -- not a separate, parallel save mechanism.
   const handleMakeWhatIfReal = async () => {
-    if (!architecture || !whatIfProposals) return;
-    const selected = whatIfProposals.filter((p) => whatIfSelectedIds.has(p.componentId));
-    if (selected.length === 0) return;
-
-    let newComponents = [...architecture.hld.components];
-    let newConnections = [...architecture.hld.connections];
-    for (const p of selected) {
-      if (p.action === "add" && p.component) {
-        newComponents = [...newComponents, p.component];
-        newConnections = [...newConnections, ...(p.newConnections || [])];
-      } else if (p.action === "modify") {
-        newComponents = newComponents.map((c) => (c.id === p.componentId ? { ...c, reasoning: p.reasoning } : c));
-      }
-    }
-
+    if (!architecture) return;
     try {
       setWhatIfApplying(true);
       setWhatIfError("");
-      const res = await fetch(`/api/projects/${projectId}/architectures/manual`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ components: newComponents, connections: newConnections }),
-      });
-      if (!res.ok) {
-        const errData = await res.json();
-        throw new Error(errData.error || "Failed to save this scenario as a real version");
+
+      const functionalList = whatIfFunctional
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      // A confirmed freeform scenario note becomes a real, permanent functional requirement --
+      // the preview already folds it into the same functional-requirements channel, so making it
+      // "real" means persisting it there too rather than silently dropping it.
+      if (whatIfAdditionalContext.trim()) {
+        functionalList.push(whatIfAdditionalContext.trim());
       }
-      const data = await res.json();
-      resetWhatIf();
-      setWhatIfMode(false);
-      await loadArchitecture(data.architecture.version);
+
+      const reqRes = await fetch(`/api/projects/${projectId}/requirements`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          functional: functionalList,
+          nonFunctional: whatIfNFR,
+          industryContext: buildWhatIfIndustryContext(),
+        }),
+      });
+      if (!reqRes.ok) throw new Error("Failed to save the updated requirements");
+
+      const archRes = await fetch(`/api/projects/${projectId}/architectures`, { method: "POST" });
+      if (!archRes.ok) {
+        const errData = await archRes.json().catch(() => ({}));
+        throw new Error(errData.detail || errData.error || "Failed to generate the new architecture version");
+      }
+      const archData = await archRes.json();
+
+      closeWhatIf();
+      onRequirementsChange();
+      await loadArchitecture(archData.architecture.version);
     } catch (err: any) {
       setWhatIfError(err.message || "An error occurred while saving this scenario.");
     } finally {
@@ -2084,17 +2156,14 @@ export default function ArchitectureWorkspace({
           {viewMode === "diagram" && architecture && !isEditing && (
             <span className="inline-flex items-center gap-1.5">
               <button
-                onClick={() => {
-                  setWhatIfMode((v) => !v);
-                  if (whatIfMode) resetWhatIf();
-                }}
+                onClick={() => (whatIfMode ? closeWhatIf() : openWhatIf())}
                 className={`rounded-xl px-3 py-1.5 text-xs font-bold uppercase transition shadow-sm active:scale-95 ${
                   whatIfMode ? "bg-accent text-white" : "bg-paper border border-line text-ink-muted hover:text-ink"
                 }`}
               >
                 🔮 What-If
               </button>
-              <InfoTooltip text="Explore a hypothetical -- 10x scale, a different budget, a different provider -- and preview the cost/component impact WITHOUT creating a saved version, like a calculator rather than a commitment. Nothing changes unless you click 'Make this real' on the preview." />
+              <InfoTooltip text="Explore a hypothetical that changes ANY requirement -- scale, budget, data types, compliance, or a freeform scenario -- and preview the cost/component impact using the exact same generation pipeline real architectures use, WITHOUT creating a saved version. Nothing changes unless you click 'Make this real' on the preview." />
             </span>
           )}
 
@@ -2354,55 +2423,120 @@ export default function ArchitectureWorkspace({
       )}
 
       {/* What-If Simulator panel (Workstream T1) -- explicitly NOT the same block/state as Chat-
-          Based Enhancement Proposals above, even though the two look similar: this one runs
-          on-demand from slider/text inputs rather than a growth-trigger chat conclusion, and
-          nothing here is ever auto-applied -- only "Make this real" below can turn it into an
+          Based Enhancement Proposals above. Pre-filled from the project's real saved requirements
+          so every field the actual generation pipeline considers is editable here, not just
+          scale/budget -- a "changed" ring marks anything edited away from its saved value.
+          Nothing here is ever auto-applied -- only "Make this real" below can turn it into an
           actual saved version. */}
       {whatIfMode && viewMode === "diagram" && architecture && (
         <div className="mx-6 mt-4 rounded-2xl border-2 border-dashed border-accent/40 bg-accent-soft/25 p-4">
           <div className="flex items-start justify-between gap-2">
             <span className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-accent-ink">
               <span>🔮</span> What-If Simulator
-              <InfoTooltip text="A sandbox for exploring a hypothetical scenario. Running a simulation calls the same preview infrastructure chat-proposed changes already use -- nothing about your real architecture changes unless you click 'Make this real' below." />
+              <InfoTooltip text="Pre-filled with your project's current saved requirements. Edit any field to explore a hypothetical -- running a simulation re-runs the exact same rules-engine + LLM pipeline real architecture generation uses, just against these values, without saving anything." />
             </span>
-            <button
-              onClick={() => {
-                setWhatIfMode(false);
-                resetWhatIf();
-              }}
-              className="text-xs font-bold text-ink-muted transition hover:text-ink"
-            >
+            <button onClick={closeWhatIf} className="text-xs font-bold text-ink-muted transition hover:text-ink">
               Close
             </button>
           </div>
 
+          <p className="mt-2 text-[10.5px] text-ink-muted">
+            Every field below starts at your project&apos;s current saved value.{" "}
+            <span className="font-bold text-accent-ink">Edited fields are ringed in purple.</span>
+          </p>
+
+          {/* Functional requirements */}
+          <div className="mt-3">
+            <label
+              className={`flex items-center gap-1 text-[9px] font-bold uppercase tracking-wide ${
+                isFunctionalChanged ? "text-accent-ink" : "text-ink-faint"
+              }`}
+            >
+              Functional Capabilities (one per line)
+              {isFunctionalChanged && <Icon icon="mdi:pencil-circle" width={11} height={11} />}
+            </label>
+            <textarea
+              value={whatIfFunctional}
+              onChange={(e) => setWhatIfFunctional(e.target.value)}
+              rows={3}
+              className={`mt-1.5 w-full rounded-lg border bg-white px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-accent/30 ${
+                isFunctionalChanged ? "border-accent ring-1 ring-accent/40" : "border-line"
+              }`}
+            />
+          </div>
+
+          {/* All 7 non-functional fields -- same set/labels as the Requirements tab */}
           <div className="mt-3 grid gap-3 sm:grid-cols-2">
-            <div>
-              <label className="text-[9px] font-bold uppercase tracking-wide text-ink-faint">
-                Scale multiplier: {whatIfScale}x
-              </label>
-              <input
-                type="range"
-                min={1}
-                max={20}
-                step={1}
-                value={whatIfScale}
-                onChange={(e) => setWhatIfScale(Number(e.target.value))}
-                className="mt-1.5 w-full accent-accent"
-              />
+            {(Object.keys(NFR_FIELD_LABELS) as (keyof WhatIfNFR)[]).map((field) => {
+              const changed = isNFRFieldChanged(field);
+              return (
+                <div key={field}>
+                  <label
+                    className={`flex items-center gap-1 text-[9px] font-bold uppercase tracking-wide ${
+                      changed ? "text-accent-ink" : "text-ink-faint"
+                    }`}
+                  >
+                    {NFR_FIELD_LABELS[field]}
+                    {changed && <Icon icon="mdi:pencil-circle" width={11} height={11} />}
+                  </label>
+                  <input
+                    type="text"
+                    value={whatIfNFR[field]}
+                    onChange={(e) => setWhatIfNFR((prev) => ({ ...prev, [field]: e.target.value }))}
+                    className={`mt-1.5 w-full rounded-lg border bg-white px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-accent/30 ${
+                      changed ? "border-accent ring-1 ring-accent/40" : "border-line"
+                    }`}
+                  />
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Industry / compliance context */}
+          <div className={`mt-3 rounded-xl border p-3 ${isIndustryChanged ? "border-accent ring-1 ring-accent/40" : "border-line"}`}>
+            <label
+              className={`flex items-center gap-1 text-[9px] font-bold uppercase tracking-wide ${
+                isIndustryChanged ? "text-accent-ink" : "text-ink-faint"
+              }`}
+            >
+              Industry / Compliance Regime
+              {isIndustryChanged && <Icon icon="mdi:pencil-circle" width={11} height={11} />}
+            </label>
+            <div className="mt-1.5 flex w-max bg-paper/80 p-0.5 rounded-lg border border-line shadow-sm">
+              {(["none", "fintech", "healthtech"] as const).map((ind) => (
+                <button
+                  key={ind}
+                  onClick={() => setWhatIfIndustry(ind)}
+                  className={`px-2.5 py-1 text-[9px] font-extrabold uppercase rounded transition ${
+                    whatIfIndustry === ind ? "bg-ink text-white shadow-sm" : "text-ink-muted hover:text-ink"
+                  }`}
+                >
+                  {ind === "none" ? "General" : ind === "fintech" ? "Fintech" : "Healthtech"}
+                </button>
+              ))}
             </div>
-            <div>
-              <label className="text-[9px] font-bold uppercase tracking-wide text-ink-faint">
-                Target monthly budget (optional)
+            {whatIfIndustry === "fintech" && (
+              <label className="mt-2 flex items-center gap-1.5 text-[11px] font-semibold text-ink-muted">
+                <input
+                  type="checkbox"
+                  checked={whatIfHandlesCardData}
+                  onChange={(e) => setWhatIfHandlesCardData(e.target.checked)}
+                  className="h-3.5 w-3.5 accent-accent"
+                />
+                Handles cardholder data directly (drives PCI-DSS components like tokenization)
               </label>
-              <input
-                type="text"
-                value={whatIfBudget}
-                onChange={(e) => setWhatIfBudget(e.target.value)}
-                placeholder="e.g. $500/mo"
-                className="mt-1.5 w-full rounded-lg border border-line bg-white px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-accent/30"
-              />
-            </div>
+            )}
+            {whatIfIndustry === "healthtech" && (
+              <label className="mt-2 flex items-center gap-1.5 text-[11px] font-semibold text-ink-muted">
+                <input
+                  type="checkbox"
+                  checked={whatIfStoresPHI}
+                  onChange={(e) => setWhatIfStoresPHI(e.target.checked)}
+                  className="h-3.5 w-3.5 accent-accent"
+                />
+                Stores PHI (drives HIPAA components like a dedicated PHI vault)
+              </label>
+            )}
           </div>
 
           <div className="mt-3">
@@ -2422,13 +2556,15 @@ export default function ArchitectureWorkspace({
             </div>
           </div>
 
+          {/* Freeform note -- works ALONGSIDE the structured fields above, for anything that
+              doesn't map cleanly to one of them (e.g. "add multi-region failover"). */}
           <div className="mt-3">
             <label className="text-[9px] font-bold uppercase tracking-wide text-ink-faint">
-              Describe a hypothetical change (optional)
+              Anything else? (optional freeform note)
             </label>
             <textarea
-              value={whatIfDescription}
-              onChange={(e) => setWhatIfDescription(e.target.value)}
+              value={whatIfAdditionalContext}
+              onChange={(e) => setWhatIfAdditionalContext(e.target.value)}
               placeholder="e.g. what if we add multi-region failover?"
               rows={2}
               className="mt-1.5 w-full rounded-lg border border-line bg-white px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-accent/30"
@@ -2442,10 +2578,10 @@ export default function ArchitectureWorkspace({
             disabled={whatIfLoading}
             className="mt-3 rounded-xl bg-accent px-3 py-1.5 text-xs font-bold uppercase text-white shadow-sm transition hover:opacity-90 active:scale-95 disabled:opacity-50"
           >
-            {whatIfLoading ? "Simulating..." : "Run Simulation"}
+            {whatIfLoading ? "Simulating (running the full generation pipeline)..." : "Run Simulation"}
           </button>
 
-          {whatIfProposals && (
+          {whatIfPreview && (
             <div className="mt-4 border-t border-accent/25 pt-3">
               <span className="inline-flex items-center gap-1 rounded-full bg-ink px-2.5 py-1 text-[9px] font-extrabold uppercase tracking-wide text-white">
                 <Icon icon="mdi:eye-outline" width={11} height={11} />
@@ -2453,77 +2589,102 @@ export default function ArchitectureWorkspace({
               </span>
 
               {(() => {
-                const costPreview = computeWhatIfCostPreview();
+                const costPreview = whatIfCostPreview();
                 if (!costPreview) return null;
                 const wentUp = costPreview.after.min + costPreview.after.max > costPreview.before.min + costPreview.before.max;
-                const unchanged = costPreview.after.min === costPreview.before.min && costPreview.after.max === costPreview.before.max;
-                const selectedProposals = (whatIfProposals || []).filter((p) => whatIfSelectedIds.has(p.componentId));
-                const hasOnlyModifies = selectedProposals.length > 0 && selectedProposals.every((p) => p.action === "modify");
                 return (
-                  <>
-                    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-                      <span className="text-ink-muted">Projected cost for {PROVIDER_LABELS[whatIfProvider]}:</span>
-                      <span className="font-bold text-ink">
-                        ${costPreview.before.min} - ${costPreview.before.max}/mo
-                      </span>
-                      <Icon icon="mdi:arrow-right" width={12} height={12} className="text-ink-faint" />
-                      <span className={`font-bold ${wentUp ? "text-warning" : "text-success"}`}>
-                        ${costPreview.after.min} - ${costPreview.after.max}/mo
-                      </span>
-                    </div>
-                    {/* "Modify" proposals only carry updated reasoning text, never a recomputed
-                        cloudMapping/cost -- true everywhere this proposal shape is used (growth-
-                        trigger proposals have the same limitation), not something specific to
-                        this preview. Silently showing "no change" here would read as broken for
-                        a scale/budget scenario, so say plainly why the number didn't move. */}
-                    {unchanged && hasOnlyModifies && (
-                      <p className="mt-1 text-[10.5px] italic text-ink-faint">
-                        These changes describe how existing components should scale (capacity, replicas, tiers), not a
-                        swap to a different-priced service -- so this preview&apos;s dollar figure doesn&apos;t move yet.
-                        Click &ldquo;Make this real&rdquo; then adjust instance sizes in Edit Architecture for an updated cost.
-                      </p>
-                    )}
-                  </>
+                  <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                    <span className="text-ink-muted">Projected cost for {PROVIDER_LABELS[whatIfProvider]}:</span>
+                    <span className="font-bold text-ink">
+                      ${costPreview.before.min} - ${costPreview.before.max}/mo
+                    </span>
+                    <Icon icon="mdi:arrow-right" width={12} height={12} className="text-ink-faint" />
+                    <span className={`font-bold ${wentUp ? "text-warning" : "text-success"}`}>
+                      ${costPreview.after.min} - ${costPreview.after.max}/mo
+                    </span>
+                  </div>
                 );
               })()}
 
-              {whatIfProposals.length === 0 ? (
-                <p className="mt-2 text-xs text-ink-muted">
-                  No architecture changes are needed for this scenario on {PROVIDER_LABELS[whatIfProvider]} -- your
-                  existing components already cover it.
+              {whatIfPreview.recommendation && (
+                <p className="mt-2 text-[11px] text-ink-muted">
+                  <span className="font-bold text-ink">Recommended provider: </span>
+                  {whatIfPreview.recommendation.recommendedProvider.toUpperCase()} — {whatIfPreview.recommendation.rationale}
                 </p>
-              ) : (
-                <div className="mt-2 space-y-2">
-                  {whatIfProposals.map((p) => (
-                    <div key={p.componentId} className="flex items-start gap-2 rounded-xl border border-line-strong bg-white p-3 text-xs">
-                      <input
-                        type="checkbox"
-                        checked={whatIfSelectedIds.has(p.componentId)}
-                        onChange={() => toggleWhatIfSelected(p.componentId)}
-                        className="mt-0.5 h-3.5 w-3.5 flex-none accent-accent"
-                        aria-label={`Include ${p.componentName} in this scenario`}
-                      />
-                      <div>
-                        <span className="font-bold text-ink">
-                          {p.action === "add" ? "+ Add" : "✎ Modify"}: {p.componentName}
-                        </span>
-                        <p className="mt-1 text-ink-muted">{p.reasoning}</p>
-                      </div>
+              )}
+
+              {/* Full diff (added/modified/removed) -- the same shape and rendering style as the
+                  "What Changed in Version X" panel elsewhere in Topology View, since this preview
+                  and that panel are both compute_architecture_diff output. */}
+              {whatIfPreview.diff &&
+              (whatIfPreview.diff.added?.length || whatIfPreview.diff.modified?.length || whatIfPreview.diff.removed?.length) ? (
+                <div className="mt-3 grid gap-3 sm:grid-cols-3 border-t border-line pt-3">
+                  {whatIfPreview.diff.added?.length > 0 && (
+                    <div className="space-y-1.5">
+                      <span className="text-[9px] font-black text-success uppercase tracking-widest block bg-success-soft/60 border border-success/25 px-2 py-0.5 rounded w-max">
+                        + Added
+                      </span>
+                      <ul className="text-xs space-y-1.5 text-ink-muted">
+                        {whatIfPreview.diff.added.map((item, idx) => (
+                          <li key={idx}>
+                            <span className="font-bold text-ink block">{item.name}</span>
+                            <span className="block text-[10.5px] italic">{item.reasoning}</span>
+                          </li>
+                        ))}
+                      </ul>
                     </div>
-                  ))}
+                  )}
+                  {whatIfPreview.diff.modified?.length > 0 && (
+                    <div className="space-y-1.5">
+                      <span className="text-[9px] font-black text-warning uppercase tracking-widest block bg-warning-soft/60 border border-warning/25 px-2 py-0.5 rounded w-max">
+                        ~ Modified
+                      </span>
+                      <ul className="text-xs space-y-2 text-ink-muted">
+                        {whatIfPreview.diff.modified.map((item, idx) => (
+                          <li key={idx}>
+                            <span className="font-bold text-ink block">{item.name}</span>
+                            {item.changes.map((ch, cIdx) => (
+                              <div key={cIdx} className="mt-0.5 pl-2 border-l-2 border-line text-[10.5px]">
+                                <span className="text-ink-faint line-through">{ch.oldVal}</span> ➜{" "}
+                                <span className="font-bold text-ink">{ch.newVal}</span>
+                              </div>
+                            ))}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {whatIfPreview.diff.removed?.length > 0 && (
+                    <div className="space-y-1.5">
+                      <span className="text-[9px] font-black text-danger uppercase tracking-widest block bg-danger-soft/60 border border-danger/25 px-2 py-0.5 rounded w-max">
+                        − Removed
+                      </span>
+                      <ul className="text-xs space-y-1.5 text-ink-muted">
+                        {whatIfPreview.diff.removed.map((item, idx) => (
+                          <li key={idx}>
+                            <span className="font-bold text-ink line-through block">{item.name}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                 </div>
+              ) : (
+                <p className="mt-2 text-xs text-ink-muted">
+                  No architecture changes were needed for this scenario -- your existing components already cover it.
+                </p>
               )}
 
               <div className="mt-3 flex items-center gap-2">
                 <button
                   onClick={handleMakeWhatIfReal}
-                  disabled={whatIfApplying || whatIfSelectedIds.size === 0}
+                  disabled={whatIfApplying}
                   className="rounded-xl bg-success px-3 py-1.5 text-xs font-bold uppercase text-white shadow-sm transition hover:opacity-90 active:scale-95 disabled:opacity-40"
                 >
                   {whatIfApplying ? "Saving..." : "✓ Make this real"}
                 </button>
                 <button
-                  onClick={resetWhatIf}
+                  onClick={() => setWhatIfPreview(null)}
                   className="rounded-xl bg-ink-muted px-3 py-1.5 text-xs font-bold uppercase text-white shadow-sm transition hover:bg-ink active:scale-95"
                 >
                   Discard

@@ -8,21 +8,23 @@ from app.config import settings
 from app.constants import DEFAULT_INDUSTRY_CONTEXT
 from app.db import get_db
 from app.models import Architecture, Project, Requirement
-from app.schemas import LayoutOverrideRequest, ManualArchitectureRequest, ProposeChangesRequest, RefineProposalRequest
+from app.schemas import (
+    LayoutOverrideRequest,
+    ManualArchitectureRequest,
+    ProposeChangesRequest,
+    RefineProposalRequest,
+    WhatIfPreviewRequest,
+)
 from app.serializers import serialize_architecture
 from app.services.architecture_diff import calculate_total_cost, compute_architecture_diff
-from app.services.cloud_mapping import get_cloud_mapping
-from app.services.industry_rules import run_industry_rules
-from app.services.lld_rules import run_lld_rules_engine
+from app.services.architecture_generation import build_cloud_mapping, generate_architecture_bundle
 from app.services.llm import (
     generate_flow_story,
     generate_user_journey,
     propose_component_changes,
     refine_component_proposal,
-    validate_and_generate_architecture,
 )
 from app.services.path_verification import verify_journey_path
-from app.services.rules_engine import run_rules_engine
 from app.services.security_rules import run_security_rules
 from app.services.validation import validate_architecture_layout
 
@@ -50,17 +52,6 @@ def _next_version(latest_arch: Architecture | None) -> str:
         patch = int(parts[2]) + 1
         return f"{parts[0]}.{parts[1]}.{patch}"
     return "0.1.0"
-
-
-def _build_cloud_mapping(provider: str, component: dict, reqs_context: dict, industry_context: dict) -> dict:
-    mapping = get_cloud_mapping(provider, component["type"], component["id"], reqs_context)
-    lld = run_lld_rules_engine(provider, component["type"], component["id"], reqs_context, None, industry_context)
-    return {
-        "serviceName": mapping["serviceName"],
-        "alternatives": mapping["alternatives"],
-        "costEstimate": mapping["costEstimate"],
-        "lld": {"config": lld["config"], "reasoning": lld["reasoning"]},
-    }
 
 
 @router.get("/projects/{project_id}/architectures")
@@ -129,7 +120,7 @@ def _enrich_proposal_item(
         if component_id in existing_ids:
             return None  # LLM picked a colliding id -- drop rather than silently overwrite an existing component
         component_type = p.get("type") or "compute"
-        mapping = _build_cloud_mapping(provider, {"id": component_id, "type": component_type}, reqs_context, industry_context)
+        mapping = build_cloud_mapping(provider, {"id": component_id, "type": component_type}, reqs_context, industry_context)
         full_component = {
             "id": component_id,
             "name": p.get("name") or component_id,
@@ -139,7 +130,7 @@ def _enrich_proposal_item(
             "rulesFired": [],
             "metadata": {"isManuallyAdded": True, "overrideSource": "user"},
             "cloudMappings": {
-                prov: _build_cloud_mapping(prov, {"id": component_id, "type": component_type}, reqs_context, industry_context)
+                prov: build_cloud_mapping(prov, {"id": component_id, "type": component_type}, reqs_context, industry_context)
                 for prov in ("aws", "azure", "gcp", "kubernetes", "private")
             },
         }
@@ -327,6 +318,51 @@ async def propose_architecture_changes(
     return {"proposals": proposals}
 
 
+@router.post("/projects/{project_id}/architectures/whatif-preview")
+async def preview_whatif_architecture(
+    project_id: uuid.UUID, payload: WhatIfPreviewRequest, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """What-If Simulator (Workstream T1, extended): runs the FULL real-generation pipeline
+    (generate_architecture_bundle -- same rules engine + LLM validation generate_architecture
+    itself uses) against hypothetical requirement values instead of the project's saved ones, and
+    never writes to the database. A structured "what if every requirement field changed together"
+    preview, not just a scale/budget slider -- because the real generation pipeline already
+    considers all of these fields together, simulating a subset would misrepresent how the actual
+    architecture would come out."""
+    project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    latest_arch = await _latest_architecture(db, project_id)
+
+    functional = list(payload.functional)
+    if payload.additionalContext and payload.additionalContext.strip():
+        # Folded into the SAME functional-requirements channel the rules engine and LLM already
+        # read capability descriptions from -- not a new, unproven LLM input field.
+        functional.append(f"[What-if scenario] {payload.additionalContext.strip()}")
+
+    reqs_context = {"functional": functional, "nonFunctional": payload.nonFunctional}
+    industry_context = payload.industryContext or DEFAULT_INDUSTRY_CONTEXT
+
+    bundle = await generate_architecture_bundle(
+        project.name,
+        reqs_context,
+        industry_context,
+        settings.openrouter_api_key,
+        latest_arch.hld["components"] if latest_arch else None,
+    )
+
+    return {
+        "components": bundle["components"],
+        "connections": bundle["connections"],
+        "assumptions": bundle["assumptions"],
+        "risks": bundle["risks"],
+        "recommendation": bundle["recommendation"],
+        "diff": bundle["diff"],
+        "securityFindings": bundle["securityFindings"],
+    }
+
+
 @router.post("/projects/{project_id}/architectures/{architecture_id}/refine-proposal")
 async def refine_proposal(
     project_id: uuid.UUID, architecture_id: uuid.UUID, payload: RefineProposalRequest, db: AsyncSession = Depends(get_db)
@@ -402,116 +438,27 @@ async def generate_architecture(project_id: uuid.UUID, db: AsyncSession = Depend
     reqs_context = {"functional": reqs.functional, "nonFunctional": reqs.non_functional}
     industry_context = reqs.industry_context or DEFAULT_INDUSTRY_CONTEXT
 
-    # 3. Run rules engine to produce baseline HLD, then layer industry-specific compliance
-    # components on top (audit log, tokenization, PHI vault, de-identification pipeline -- see
-    # industry_rules.py). A generic project (industry: "none") gets nothing extra here.
-    baseline = run_rules_engine(reqs_context)
-    industry_result = run_industry_rules(industry_context, reqs_context["functional"])
-
-    all_components = baseline["components"] + industry_result["components"]
-    all_connections = baseline["connections"] + industry_result["connections"]
-    all_rules_trace = baseline["rulesTrace"] + industry_result["rulesTrace"]
-
-    # 4. Resolve mappings, costs, and LLD baselines for AWS, Azure, and GCP for each component
-    mapped_baseline_components = [
-        {
-            **c,
-            "cloudMappings": {
-                "aws": _build_cloud_mapping("aws", c, reqs_context, industry_context),
-                "azure": _build_cloud_mapping("azure", c, reqs_context, industry_context),
-                "gcp": _build_cloud_mapping("gcp", c, reqs_context, industry_context),
-            },
-        }
-        for c in all_components
-    ]
-
-    # 4b. Resolve Kubernetes + private-cloud mappings for every component too -- but keep these
-    # entirely OUT of what gets sent to the LLM. They're fully deterministic (no managed-service
-    # pricing nuance to "validate"), and adding two more providers' worth of reasoning to
-    # validate_and_generate_architecture's job would meaningfully grow its prompt/output size,
-    # which makes Gemini's occasional malformed-JSON problem worse. Computed here, merged onto
-    # the LLM's response afterward (step 7b).
-    extra_provider_mappings_by_id = {
-        c["id"]: {
-            "kubernetes": _build_cloud_mapping("kubernetes", c, reqs_context, industry_context),
-            "private": _build_cloud_mapping("private", c, reqs_context, industry_context),
-        }
-        for c in all_components
-    }
-
-    # 5. Calculate baseline total costs
-    provider_costs = {"aws": {"min": 0, "max": 0}, "azure": {"min": 0, "max": 0}, "gcp": {"min": 0, "max": 0}}
-    for c in mapped_baseline_components:
-        for prov in ("aws", "azure", "gcp"):
-            provider_costs[prov]["min"] += c["cloudMappings"][prov]["costEstimate"]["min"]
-            provider_costs[prov]["max"] += c["cloudMappings"][prov]["costEstimate"]["max"]
-
-    # 6. Fetch the latest architecture for versioning and delta comparison
+    # 3. Fetch the latest architecture for versioning and delta comparison
     latest_arch = await _latest_architecture(db, project_id)
     next_version = _next_version(latest_arch)
 
-    # 7. Validate, enrich and recommend provider with LLM, passing HLD + LLD baselines & previous components
-    enriched = await validate_and_generate_architecture(
+    # 4. The shared rules-engine + LLM-validation + cloud-mapping pipeline (architecture_
+    # generation.py) -- identical to what the What-If preview endpoint below calls, just against
+    # this project's real saved requirements instead of hypothetical ones.
+    bundle = await generate_architecture_bundle(
         project.name,
-        {**reqs_context, "industryContext": industry_context},
-        {"components": mapped_baseline_components, "connections": all_connections},
-        provider_costs,
+        reqs_context,
+        industry_context,
         settings.openrouter_api_key,
         latest_arch.hld["components"] if latest_arch else None,
     )
 
-    # Merge deterministic industry-rule risks (e.g. data residency, processor-scope caveats) in
-    # alongside whatever risks the LLM itself surfaced from unspecified requirement fields.
-    enriched["risks"] = (enriched.get("risks") or []) + industry_result["risks"]
-
-    # 7b. Re-attach the deterministic rule-engine's "alternatives" (each carrying its own
-    # costEstimate) onto the LLM's output. The LLM is intentionally not asked to reproduce cost
-    # data for alternatives (keeps its output smaller/faster and avoids drift); those
-    # alternatives + costs power the manual editor's cloud-service-swap feature, so every
-    # component must have them regardless of what the LLM returned.
-    baseline_by_id = {c["id"]: c for c in mapped_baseline_components}
-    for c in enriched["components"]:
-        baseline_component = baseline_by_id.get(c["id"])
-        if not baseline_component or not c.get("cloudMappings"):
-            continue
-        for prov in ("aws", "azure", "gcp"):
-            if c["cloudMappings"].get(prov) and baseline_component["cloudMappings"].get(prov):
-                c["cloudMappings"][prov]["alternatives"] = baseline_component["cloudMappings"][prov]["alternatives"]
-
-        # Attach the Kubernetes + private-cloud mappings computed in step 4b. These never went
-        # to the LLM, so they're attached wholesale rather than merged field-by-field.
-        extra = extra_provider_mappings_by_id.get(c["id"])
-        if extra:
-            c["cloudMappings"]["kubernetes"] = extra["kubernetes"]
-            c["cloudMappings"]["private"] = extra["private"]
-
-    # 8. Compute the version-to-version diff deterministically in Python (never from the LLM)
-    # so costDelta is always present and before/after values always come from the actual stored
-    # previous/new component records.
-    diff = None
-    if latest_arch:
-        diff = compute_architecture_diff(
-            enriched["components"],
-            latest_arch.hld.get("components", []),
-            {
-                "defaultAddedReasoning": "Added in response to updated requirements.",
-                "defaultChangeReasoning": "Updated in response to requirement changes.",
-            },
-        )
-
-    # 8b. Deterministic security-posture audit (Workstream T4) -- cheap enough (no LLM) to compute
-    # for all 5 providers up front rather than lazily, since LLD config (and therefore findings)
-    # genuinely differs per provider.
-    security_findings = {
-        prov: run_security_rules(enriched["components"], enriched["connections"], industry_context, prov)
-        for prov in ("aws", "azure", "gcp", "kubernetes", "private")
-    }
-
-    # 9. Save new architecture version with all three cloud mappings, recommendations, and LLD specs
+    # 5. Save new architecture version with all five cloud mappings, recommendations, LLD specs,
+    # and security findings.
     record = Architecture(
         project_id=project_id,
         version=next_version,
-        hld={"components": enriched["components"], "connections": enriched["connections"]},
+        hld={"components": bundle["components"], "connections": bundle["connections"]},
         reasoning={
             "decisions": [
                 {
@@ -521,20 +468,20 @@ async def generate_architecture(project_id: uuid.UUID, db: AsyncSession = Depend
                     "tradeoffs": [],
                     "alternatives": [],
                 }
-                for rule in all_rules_trace
+                for rule in bundle["rulesTrace"]
             ],
-            "assumptions": enriched["assumptions"],
-            "risks": enriched["risks"],
-            "recommendation": enriched["recommendation"],
-            "diff": diff,
+            "assumptions": bundle["assumptions"],
+            "risks": bundle["risks"],
+            "recommendation": bundle["recommendation"],
+            "diff": bundle["diff"],
         },
         cloud_provider="aws",
-        security_findings=security_findings,
+        security_findings=bundle["securityFindings"],
     )
     db.add(record)
     await db.flush()
 
-    # 10. Update project's current version
+    # 6. Update project's current version
     project.current_version = next_version
 
     await db.commit()
@@ -594,11 +541,11 @@ async def save_manual_architecture(
                     "overrideSource": "user",
                 },
                 "cloudMappings": {
-                    "aws": _build_cloud_mapping("aws", c, reqs_context, industry_context),
-                    "azure": _build_cloud_mapping("azure", c, reqs_context, industry_context),
-                    "gcp": _build_cloud_mapping("gcp", c, reqs_context, industry_context),
-                    "kubernetes": _build_cloud_mapping("kubernetes", c, reqs_context, industry_context),
-                    "private": _build_cloud_mapping("private", c, reqs_context, industry_context),
+                    "aws": build_cloud_mapping("aws", c, reqs_context, industry_context),
+                    "azure": build_cloud_mapping("azure", c, reqs_context, industry_context),
+                    "gcp": build_cloud_mapping("gcp", c, reqs_context, industry_context),
+                    "kubernetes": build_cloud_mapping("kubernetes", c, reqs_context, industry_context),
+                    "private": build_cloud_mapping("private", c, reqs_context, industry_context),
                 },
             }
         )
