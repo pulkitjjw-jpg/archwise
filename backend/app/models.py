@@ -41,6 +41,36 @@ class Project(Base):
     conversations: Mapped[list["Conversation"]] = relationship(back_populates="project", passive_deletes=True)
     requirements: Mapped[list["Requirement"]] = relationship(back_populates="project", passive_deletes=True)
     architectures: Mapped[list["Architecture"]] = relationship(back_populates="project", passive_deletes=True)
+    share_links: Mapped[list["ShareLink"]] = relationship(back_populates="project", passive_deletes=True)
+
+
+class ShareLink(Base):
+    """Workstream T7 -- an unguessable token granting read-only, no-login access to a project's
+    latest architecture. Deliberately its own table (not a column on Project) so a project can
+    have several links with independent lifetimes, and revoking one never affects another. The
+    app has no per-user auth anywhere (see main.py's single shared internal-auth secret, which
+    only gates Next's server talking to FastAPI, never an end user) -- this token is the first and
+    only thing in the app that gates access to a specific project's data at all."""
+
+    __tablename__ = "share_links"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    token: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
+    )
+    # NULL while active; set to revoke. A row is never deleted on revoke (unlike everything else
+    # in this app, which is either append-only-versioned or a plain mutable pointer) so "this link
+    # used to exist and was revoked" stays visible in the creator's link-management list, distinct
+    # from a token that never existed.
+    revoked_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+    project: Mapped["Project"] = relationship(back_populates="share_links")
 
 
 class Conversation(Base):

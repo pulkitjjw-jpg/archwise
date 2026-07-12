@@ -1482,6 +1482,65 @@ export default function ArchitectureWorkspace({
     securityFindings: Record<string, SecurityFinding[]>;
   };
 
+  // Shareable Read-Only Review Links (Workstream T7) -- lets the creator generate an unguessable
+  // no-login link (and manage/revoke existing ones) for this project. The link itself is served
+  // by a completely separate page/component (src/app/share/[token]/page.tsx + ShareView.tsx) that
+  // never imports any edit/save code, so this panel only ever creates/lists/revokes tokens -- it
+  // never renders the shared view itself.
+  type ShareLink = { id: string; token: string; createdAt: string; revokedAt: string | null; isActive: boolean };
+  const [shareMenuOpen, setShareMenuOpen] = useState(false);
+  const [shareLinks, setShareLinks] = useState<ShareLink[]>([]);
+  const [shareLinksLoading, setShareLinksLoading] = useState(false);
+  const [shareCreating, setShareCreating] = useState(false);
+  const [copiedShareId, setCopiedShareId] = useState<string | null>(null);
+
+  const loadShareLinks = () => {
+    setShareLinksLoading(true);
+    fetch(`/api/projects/${projectId}/share-links`)
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error("Failed to load share links"))))
+      .then((data) => setShareLinks(data.shareLinks || []))
+      .catch((err) => console.error("Failed to load share links:", err))
+      .finally(() => setShareLinksLoading(false));
+  };
+
+  const handleOpenShareMenu = () => {
+    setShareMenuOpen((v) => !v);
+    if (!shareMenuOpen) loadShareLinks();
+  };
+
+  const handleCreateShareLink = async () => {
+    try {
+      setShareCreating(true);
+      const res = await fetch(`/api/projects/${projectId}/share-links`, { method: "POST" });
+      if (!res.ok) throw new Error("Failed to create share link");
+      const data = await res.json();
+      setShareLinks((prev) => [data.shareLink, ...prev]);
+    } catch (err) {
+      console.error("Failed to create share link:", err);
+    } finally {
+      setShareCreating(false);
+    }
+  };
+
+  const handleRevokeShareLink = async (id: string) => {
+    try {
+      const res = await fetch(`/api/projects/${projectId}/share-links/${id}`, { method: "DELETE" });
+      if (!res.ok) throw new Error("Failed to revoke share link");
+      const data = await res.json();
+      setShareLinks((prev) => prev.map((l) => (l.id === id ? data.shareLink : l)));
+    } catch (err) {
+      console.error("Failed to revoke share link:", err);
+    }
+  };
+
+  const handleCopyShareLink = (link: ShareLink) => {
+    const url = `${window.location.origin}/share/${link.token}`;
+    navigator.clipboard.writeText(url).then(() => {
+      setCopiedShareId(link.id);
+      setTimeout(() => setCopiedShareId(null), 2000);
+    });
+  };
+
   const [whatIfMode, setWhatIfMode] = useState(false);
   const [whatIfFunctional, setWhatIfFunctional] = useState("");
   const [whatIfNFR, setWhatIfNFR] = useState<WhatIfNFR>(BLANK_NFR);
@@ -2215,6 +2274,90 @@ export default function ArchitectureWorkspace({
             </select>
             <InfoTooltip text="Every regenerate or manual save creates a new version instead of overwriting — older versions stay here, read-only, so you can always see what the design looked like before a change." />
           </div>
+
+          {/* Shareable Read-Only Review Links (Workstream T7) -- available regardless of
+              viewMode/isEditing, since sharing a link doesn't touch draft state at all. */}
+          {architecture && (
+            <span className="relative inline-flex items-center gap-1">
+              <button
+                onClick={handleOpenShareMenu}
+                className={`flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-bold uppercase transition shadow-sm active:scale-95 ${
+                  shareMenuOpen ? "bg-accent text-white" : "bg-paper border border-line text-ink-muted hover:text-ink"
+                }`}
+              >
+                <Icon icon="mdi:share-variant-outline" width={14} height={14} />
+                Share
+              </button>
+              {shareMenuOpen && (
+                <div className="absolute right-0 top-full z-30 mt-1.5 w-80 rounded-2xl border border-line bg-white p-3 shadow-lg animate-fadeIn">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-extrabold uppercase tracking-wide text-ink-faint">Read-only review links</span>
+                    <button
+                      onClick={() => setShareMenuOpen(false)}
+                      className="text-ink-faint hover:text-ink"
+                      aria-label="Close"
+                    >
+                      <Icon icon="mdi:close" width={14} height={14} />
+                    </button>
+                  </div>
+                  <p className="mt-1 text-[10.5px] text-ink-muted">
+                    Anyone with a link can view this architecture (diagram, cost, flow story) without an account -- no
+                    edit, export, or generate controls. Revoke anytime.
+                  </p>
+
+                  <button
+                    onClick={handleCreateShareLink}
+                    disabled={shareCreating}
+                    className="mt-2.5 w-full rounded-xl bg-accent px-3 py-1.5 text-xs font-bold uppercase text-white shadow-sm transition hover:opacity-90 active:scale-95 disabled:opacity-50"
+                  >
+                    {shareCreating ? "Creating..." : "+ Create new link"}
+                  </button>
+
+                  <div className="mt-3 max-h-64 space-y-1.5 overflow-y-auto">
+                    {shareLinksLoading ? (
+                      <p className="text-center text-[11px] text-ink-muted">Loading...</p>
+                    ) : shareLinks.length === 0 ? (
+                      <p className="text-center text-[11px] text-ink-muted">No links yet.</p>
+                    ) : (
+                      shareLinks.map((link) => (
+                        <div
+                          key={link.id}
+                          className={`rounded-xl border p-2.5 text-[11px] ${
+                            link.isActive ? "border-line-strong bg-paper/60" : "border-line bg-paper/30 opacity-60"
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className={`font-bold ${link.isActive ? "text-ink" : "text-ink-faint line-through"}`}>
+                              {link.isActive ? "Active" : "Revoked"}
+                            </span>
+                            <span className="text-[9.5px] text-ink-faint">
+                              {new Date(link.createdAt).toLocaleDateString()}
+                            </span>
+                          </div>
+                          {link.isActive && (
+                            <div className="mt-1.5 flex items-center gap-1.5">
+                              <button
+                                onClick={() => handleCopyShareLink(link)}
+                                className="flex-1 rounded-lg border border-line-strong bg-white px-2 py-1 text-left font-mono text-[10px] text-ink-muted hover:border-accent hover:text-accent-ink"
+                              >
+                                {copiedShareId === link.id ? "Copied!" : `/share/${link.token.slice(0, 14)}...`}
+                              </button>
+                              <button
+                                onClick={() => handleRevokeShareLink(link.id)}
+                                className="rounded-lg bg-danger-soft px-2 py-1 font-bold uppercase text-danger transition hover:bg-danger/20"
+                              >
+                                Revoke
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+            </span>
+          )}
 
           {/* What-If Simulator (Workstream T1) -- a sandbox, deliberately separate from the
               manual-edit toggle below: exploring a hypothetical never creates a version, and is

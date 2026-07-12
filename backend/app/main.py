@@ -5,7 +5,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.config import settings
-from app.routers import architectures, conversations, export, health, projects, requirements
+from app.routers import architectures, conversations, export, health, projects, requirements, share
 
 logger = logging.getLogger("app")
 
@@ -53,3 +53,4 @@ app.include_router(conversations.router, prefix="/api")
 app.include_router(requirements.router, prefix="/api")
 app.include_router(architectures.router, prefix="/api")
 app.include_router(export.router, prefix="/api")
+app.include_router(share.router, prefix="/api")
