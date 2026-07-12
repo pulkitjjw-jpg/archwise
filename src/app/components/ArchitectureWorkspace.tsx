@@ -10,7 +10,13 @@ import { resolveServiceIcon } from "@/lib/service-icons";
 import { getLearnContent, getPlainDescription } from "@/lib/component-descriptions";
 import { exportDiagramAsPng, exportDiagramAsSvg, type PngExportEdge, type PngExportNode } from "@/lib/diagram-export";
 import { buildFlowDocumentationMarkdown, downloadMarkdown, type FlowDocComponent } from "@/lib/flow-documentation-export";
-import { verifyJourneyPath, buildStepEdgeColors, getStepColor, type JourneyVerification } from "@/lib/journey-verification";
+import {
+  verifyJourneyPath,
+  buildStepEdgeColors,
+  buildStructuralEdgeColors,
+  getStepColor,
+  type JourneyVerification,
+} from "@/lib/journey-verification";
 import {
   computeDiagramLayoutAsync,
   buildRoundedPath,
@@ -1273,6 +1279,10 @@ export default function ArchitectureWorkspace({
   // Not memoized -- cheap pure function over a handful of connections, consistent with
   // diagramComponents/diagramConnections above, which are also plain recomputed consts.
   const stepEdgeInfo = showFlowSteps && currentJourney ? buildStepEdgeColors(currentJourney, diagramConnections) : {};
+  // Fallback for connections the currently-traced journey doesn't touch at all -- without this,
+  // most of a real diagram stayed a single undifferentiated blue, making it impossible to tell
+  // which of several parallel/overlapping lines went to which component.
+  const structuralEdgeColors = showFlowSteps ? buildStructuralEdgeColors(diagramConnections) : {};
 
   const handleJourneyComponentClick = (componentId: string) => {
     setViewMode("diagram");
@@ -2503,7 +2513,11 @@ export default function ArchitectureWorkspace({
                               // the exact same ELK/elbow geometry every other edge uses, never a
                               // different, simpler line for colored edges.
                               const edgeInfo = stepEdgeInfo[`${conn.from}->${conn.to}`];
-                              const stepColor = edgeInfo?.color;
+                              // Numbered badges (below) only ever apply to journey-covered edges --
+                              // the structural fallback gives every OTHER edge its own distinct
+                              // color too, so the whole diagram is legible, but it's not part of
+                              // a numbered step and gets no badge.
+                              const stepColor = edgeInfo?.color || structuralEdgeColors[`${conn.from}->${conn.to}`];
                               // Badge placed at the polyline's middle vertex -- good enough to sit
                               // ON the route (per the ask to mark steps directly on the diagram,
                               // not only in the side legend) without full arc-length math.

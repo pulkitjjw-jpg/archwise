@@ -102,3 +102,24 @@ export function buildStepEdgeColors(
   }
   return edgeInfo;
 }
+
+// A second, more muted palette for connections the journey doesn't touch at all (e.g. a batch
+// job or an analytics path no traced user journey happens to walk through). Visually distinct
+// from STEP_COLORS -- these aren't numbered steps, they're "still a real, single flow, just not
+// one of the ones currently being narrated" -- but still gives every overlapping line its own
+// hue instead of leaving it a single undifferentiated blue, which was the actual complaint: with
+// many parallel edges converging on one node, an all-blue diagram makes it impossible to tell
+// which line came from which component.
+const STRUCTURAL_COLORS = ["#94A3B8", "#0EA5E9", "#A78BFA", "#F59E0B", "#34D399", "#F472B6", "#22D3EE", "#FB7185"];
+
+// Assigns every real connection a stable, distinct color by its position in the connections list
+// (stable because that list's order doesn't change between renders of the same architecture).
+// Used as the fallback for edges buildStepEdgeColors above leaves uncovered, so turning "Flow
+// steps" on colors the ENTIRE diagram, not only the specific journey that happened to be traced.
+export function buildStructuralEdgeColors(connections: VerificationConnection[]): Record<string, string> {
+  const colors: Record<string, string> = {};
+  connections.forEach((conn, idx) => {
+    colors[`${conn.from}->${conn.to}`] = STRUCTURAL_COLORS[idx % STRUCTURAL_COLORS.length];
+  });
+  return colors;
+}
