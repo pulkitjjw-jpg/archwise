@@ -69,6 +69,25 @@ const TYPE_LABELS: Record<string, string> = {
   deidentification: "De-identification",
 };
 
+// Add Component dropdown options -- the source of truth for both rendering the <select> and
+// checking whether an AI-suggested type (Workstream W) already has an option, so a suggestion
+// whose type isn't in this fixed list (e.g. the LLM's "realtime") can still be reflected in the
+// select via a dynamically-added fallback option rather than silently resetting to blank.
+const NODE_TYPE_OPTIONS: { value: string; label: string }[] = [
+  { value: "compute", label: "Compute" },
+  { value: "db", label: "Database" },
+  { value: "cache", label: "Cache" },
+  { value: "queue", label: "Queue" },
+  { value: "cdn", label: "CDN" },
+  { value: "storage", label: "Object Storage" },
+  { value: "auth", label: "Auth" },
+  { value: "lb", label: "Load Balancer" },
+  { value: "tokenization", label: "Tokenization Layer" },
+  { value: "audit-log", label: "Audit Log Store" },
+  { value: "phi-vault", label: "PHI Data Vault" },
+  { value: "deidentification", label: "De-identification Pipeline" },
+];
+
 type SubChoiceOption = {
   value: string;
   label: string;
@@ -446,6 +465,14 @@ export default function ArchitectureWorkspace({
   const [newEdgeTo, setNewEdgeTo] = useState("");
   const [newEdgeProtocol, setNewEdgeProtocol] = useState("HTTPS");
 
+  // Manual Editor Controls (Workstream W) -- AI-suggested components worth adding next, based on
+  // the current draft + real requirements. Fetched once on entering edit mode and via a manual
+  // refresh, not on every draft change, since it calls the LLM.
+  const [componentSuggestions, setComponentSuggestions] = useState<
+    { type: string; name: string; reasoning: string }[]
+  >([]);
+  const [componentSuggestionsLoading, setComponentSuggestionsLoading] = useState(false);
+
   const [swapReason, setSwapReason] = useState("");
 
   const [savingManualChanges, setSavingManualChanges] = useState(false);
@@ -724,18 +751,38 @@ export default function ArchitectureWorkspace({
     }
   };
 
+  const loadComponentSuggestions = (components: ComponentData[], connections: { from: string; to: string; protocol?: string }[]) => {
+    setComponentSuggestionsLoading(true);
+    fetch(`/api/projects/${projectId}/architectures/component-suggestions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ components, connections }),
+    })
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error("Failed to load component suggestions"))))
+      .then((data) => setComponentSuggestions(data.suggestions || []))
+      .catch((err) => console.error("Failed to load component suggestions:", err))
+      .finally(() => setComponentSuggestionsLoading(false));
+  };
+
   const handleEnterEditMode = () => {
     if (!architecture) return;
-    setDraftHld({
-      components: JSON.parse(JSON.stringify(architecture.hld.components)),
-      connections: JSON.parse(JSON.stringify(architecture.hld.connections)),
-    });
+    const components = JSON.parse(JSON.stringify(architecture.hld.components));
+    const connections = JSON.parse(JSON.stringify(architecture.hld.connections));
+    setDraftHld({ components, connections });
     setIsEditing(true);
     setError("");
     const firstNode = architecture.hld.components[0]?.id || "";
     const secondNode = architecture.hld.components[1]?.id || "";
     setNewEdgeFrom(firstNode);
     setNewEdgeTo(secondNode);
+    setComponentSuggestions([]);
+    loadComponentSuggestions(components, connections);
+  };
+
+  const applyComponentSuggestion = (s: { type: string; name: string; reasoning: string }) => {
+    setNewNodeType(s.type);
+    setNewNodeName(s.name);
+    setNewNodeReasoning(s.reasoning);
   };
 
   const handleCancelEditMode = () => {
@@ -3980,25 +4027,49 @@ export default function ArchitectureWorkspace({
                         <div className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-ink">
                           <Icon icon="mdi:cube-plus-outline" width={14} height={14} />
                           Add Component
+                          <InfoTooltip text="Adds a new box to the draft diagram -- pick a type, give it a name, and optionally note why it's needed. It only joins the diagram once you click 'Add Component Node' below, and only becomes permanent once you save the draft." />
                         </div>
+                        {(componentSuggestionsLoading || componentSuggestions.length > 0) && (
+                          <div className="mt-2.5">
+                            <span className="text-[9px] font-bold uppercase tracking-wide text-ink-faint">
+                              {componentSuggestionsLoading ? "Suggesting relevant components..." : "AI-suggested, based on your requirements:"}
+                            </span>
+                            {componentSuggestions.length > 0 && (
+                              <div className="mt-1.5 flex flex-wrap gap-1">
+                                {componentSuggestions.map((s, idx) => (
+                                  <span
+                                    key={idx}
+                                    className="inline-flex max-w-full items-center gap-1 rounded-full border border-accent/25 bg-accent-soft py-0.5 pl-2 pr-1.5 transition hover:border-accent hover:bg-accent/15"
+                                  >
+                                    <button
+                                      type="button"
+                                      onClick={() => applyComponentSuggestion(s)}
+                                      title={`${s.name}: ${s.reasoning}`}
+                                      className="max-w-[220px] truncate text-[10px] font-medium text-accent-ink"
+                                    >
+                                      + {s.name}
+                                    </button>
+                                    <InfoTooltip text={`Why suggested: ${s.reasoning}`} />
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
                         <div className="mt-3 space-y-2.5">
                           <select
                             value={newNodeType}
                             onChange={(e) => setNewNodeType(e.target.value)}
                             className="w-full bg-white border border-line rounded-xl px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-accent"
                           >
-                            <option value="compute">Compute</option>
-                            <option value="db">Database</option>
-                            <option value="cache">Cache</option>
-                            <option value="queue">Queue</option>
-                            <option value="cdn">CDN</option>
-                            <option value="storage">Object Storage</option>
-                            <option value="auth">Auth</option>
-                            <option value="lb">Load Balancer</option>
-                            <option value="tokenization">Tokenization Layer</option>
-                            <option value="audit-log">Audit Log Store</option>
-                            <option value="phi-vault">PHI Data Vault</option>
-                            <option value="deidentification">De-identification Pipeline</option>
+                            {NODE_TYPE_OPTIONS.map((opt) => (
+                              <option key={opt.value} value={opt.value}>
+                                {opt.label}
+                              </option>
+                            ))}
+                            {!NODE_TYPE_OPTIONS.some((opt) => opt.value === newNodeType) && (
+                              <option value={newNodeType}>{TYPE_LABELS[newNodeType] || newNodeType}</option>
+                            )}
                           </select>
                           <input
                             type="text"
@@ -4029,32 +4100,45 @@ export default function ArchitectureWorkspace({
                         <div className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-ink">
                           <Icon icon="mdi:transit-connection-variant" width={14} height={14} />
                           Add Connection
+                          <InfoTooltip text="Draws a link between two existing components in the diagram, meaning data or requests flow between them. Pick the source, the destination, and the protocol they talk over (e.g. HTTPS, TCP, gRPC)." />
                         </div>
                         <div className="mt-3 space-y-2.5">
-                          <select
-                            value={newEdgeFrom}
-                            onChange={(e) => setNewEdgeFrom(e.target.value)}
-                            className="w-full bg-white border border-line rounded-xl px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-accent"
-                          >
-                            <option value="">Select from...</option>
-                            {draftHld.components.map((c) => (
-                              <option key={c.id} value={c.id}>
-                                {c.name} ({c.type})
-                              </option>
-                            ))}
-                          </select>
-                          <select
-                            value={newEdgeTo}
-                            onChange={(e) => setNewEdgeTo(e.target.value)}
-                            className="w-full bg-white border border-line rounded-xl px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-accent"
-                          >
-                            <option value="">Select to...</option>
-                            {draftHld.components.map((c) => (
-                              <option key={c.id} value={c.id}>
-                                {c.name} ({c.type})
-                              </option>
-                            ))}
-                          </select>
+                          <div>
+                            <label className="mb-1 flex items-center gap-1 text-[9px] font-bold uppercase tracking-wide text-ink-faint">
+                              From
+                              <InfoTooltip text="The component the connection starts at -- the one initiating the request or sending the data." />
+                            </label>
+                            <select
+                              value={newEdgeFrom}
+                              onChange={(e) => setNewEdgeFrom(e.target.value)}
+                              className="w-full bg-white border border-line rounded-xl px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-accent"
+                            >
+                              <option value="">Select from...</option>
+                              {draftHld.components.map((c) => (
+                                <option key={c.id} value={c.id}>
+                                  {c.name} ({c.type})
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          <div>
+                            <label className="mb-1 flex items-center gap-1 text-[9px] font-bold uppercase tracking-wide text-ink-faint">
+                              To
+                              <InfoTooltip text="The component the connection ends at -- the one receiving the request or data." />
+                            </label>
+                            <select
+                              value={newEdgeTo}
+                              onChange={(e) => setNewEdgeTo(e.target.value)}
+                              className="w-full bg-white border border-line rounded-xl px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-accent"
+                            >
+                              <option value="">Select to...</option>
+                              {draftHld.components.map((c) => (
+                                <option key={c.id} value={c.id}>
+                                  {c.name} ({c.type})
+                                </option>
+                              ))}
+                            </select>
+                          </div>
                           <div className="flex gap-2.5">
                             <input
                               type="text"
@@ -4077,8 +4161,9 @@ export default function ArchitectureWorkspace({
                           rather than wrapped chips, so long component names never crowd two
                           entries onto the same visual line. */}
                       <div className="border-t border-line pt-6">
-                        <span className="mb-2.5 block text-xs font-bold uppercase tracking-wider text-ink">
+                        <span className="mb-2.5 flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-ink">
                           Active Connection Links
+                          <InfoTooltip text="Every connection currently in the draft diagram. Click the × on a row to remove that link -- like everything else here, it's only permanent once you save the draft." />
                         </span>
                         <div className="flex flex-col gap-2 max-h-[180px] overflow-y-auto pr-1">
                           {draftHld.connections.length === 0 ? (

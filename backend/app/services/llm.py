@@ -622,6 +622,43 @@ KNOWN_COMPONENT_TYPES = (
 )
 
 
+async def generate_component_suggestions(
+    existing_components: list[dict], existing_connections: list[dict], requirements: dict, api_key: str
+) -> dict:
+    """Manual Editor Controls (Workstream W) -- suggests components likely worth adding next,
+    given what's already in the draft diagram and the project's real requirements, so "Add
+    Component" isn't just an unguided flat type dropdown. Stateless, not persisted -- the caller
+    passes the CURRENT draft (not the last-saved architecture) so suggestions track in-progress
+    manual edits, and is expected to re-fetch after significant draft changes, not on every
+    keystroke."""
+    system_instruction = f"""
+You are a senior cloud systems architect reviewing a draft architecture diagram someone is manually editing. You are given the current list of components already in the diagram and the product's stated requirements (functional capabilities, non-functional requirements, industry/compliance context).
+
+Suggest 3 to 4 SPECIFIC components genuinely worth adding next -- things implied by the requirements or missing capabilities that aren't already present in the diagram, not generic infrastructure filler. Never suggest a component whose role is already covered by an existing one.
+
+Rules:
+- "type" should be one of these known types if it genuinely fits: {", ".join(KNOWN_COMPONENT_TYPES)}. Only invent a new short kebab-case type if none of the known ones fit even loosely.
+- "name" is a short, specific, human-readable component name (e.g. "Fraud Detection Service", not "Compute Instance").
+- "reasoning" is one short clause (under 20 words) tied to a SPECIFIC stated requirement or gap in the current diagram -- e.g. "requirements mention SMS reminders but no messaging/notification component exists yet".
+- Order suggestions by how clearly justified they are by the stated requirements, most-justified first.
+
+You MUST respond with a raw JSON object matching this structure:
+{{"suggestions": [{{"type": string, "name": string, "reasoning": string}}]}}
+Do not include markdown code block formatting (like ```json) in your response, return only the raw JSON.
+"""
+
+    input_context = {
+        "existingComponents": [{"name": c.get("name"), "type": c.get("type")} for c in existing_components],
+        "existingConnections": existing_connections,
+        "requirements": requirements,
+    }
+    messages_for_api = [
+        {"role": "system", "content": system_instruction},
+        {"role": "user", "content": json.dumps(input_context)},
+    ]
+    return await _call_llm_with_retry(api_key, messages_for_api, "Component suggestions generation")
+
+
 async def propose_component_changes(
     description: str,
     existing_components: list[dict],

@@ -9,6 +9,7 @@ from app.constants import DEFAULT_INDUSTRY_CONTEXT
 from app.db import get_db
 from app.models import Architecture, Project, Requirement
 from app.schemas import (
+    ComponentSuggestionsRequest,
     LayoutOverrideRequest,
     ManualArchitectureRequest,
     ProposeChangesRequest,
@@ -19,6 +20,7 @@ from app.serializers import serialize_architecture
 from app.services.architecture_diff import calculate_total_cost, compute_architecture_diff
 from app.services.architecture_generation import build_cloud_mapping, generate_architecture_bundle
 from app.services.llm import (
+    generate_component_suggestions,
     generate_flow_story,
     generate_migration_roadmap,
     generate_user_journey,
@@ -402,6 +404,38 @@ async def get_whatif_suggestions(project_id: uuid.UUID, db: AsyncSession = Depen
             "industryContext": reqs.industry_context or DEFAULT_INDUSTRY_CONTEXT,
         },
     }
+
+
+@router.post("/projects/{project_id}/architectures/component-suggestions")
+async def get_component_suggestions(
+    project_id: uuid.UUID, payload: ComponentSuggestionsRequest, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """Manual Editor Controls (Workstream W) -- AI-suggested component types/names worth adding
+    next, given the CLIENT'S current draft diagram (which may include unsaved manual edits) and
+    the project's real saved requirements. Stateless, not persisted -- meant to be re-fetched when
+    entering edit mode or after a meaningful draft change, not on every keystroke."""
+    reqs = (
+        await db.execute(
+            select(Requirement)
+            .where(Requirement.project_id == project_id)
+            .order_by(Requirement.version.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if not reqs:
+        raise HTTPException(status_code=400, detail="Requirements must exist before suggesting components")
+
+    suggestions = await generate_component_suggestions(
+        [c.model_dump() for c in payload.components],
+        [c.model_dump(by_alias=True) for c in payload.connections],
+        {
+            "functional": reqs.functional,
+            "nonFunctional": reqs.non_functional,
+            "industryContext": reqs.industry_context or DEFAULT_INDUSTRY_CONTEXT,
+        },
+        settings.openrouter_api_key,
+    )
+    return {"suggestions": suggestions.get("suggestions", [])}
 
 
 @router.post("/projects/{project_id}/architectures/whatif-preview")

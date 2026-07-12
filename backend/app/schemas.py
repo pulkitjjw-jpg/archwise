@@ -103,6 +103,14 @@ class ManualArchitectureRequest(BaseModel):
     connections: list[Connection]
 
 
+# Manual Editor Controls (Workstream W) -- the client sends its CURRENT draft (which may already
+# include manual edits not yet saved), not just the last-persisted architecture, so suggestions
+# track the in-progress editing session.
+class ComponentSuggestionsRequest(BaseModel):
+    components: list[Component]
+    connections: list[Connection]
+
+
 class ProposeChangesRequest(BaseModel):
     description: str
     provider: str
