@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { ARCHITECTURE_TEMPLATES } from "@/lib/architecture-templates";
 
 export default function IntakeForm() {
   const router = useRouter();
@@ -9,6 +10,19 @@ export default function IntakeForm() {
   const [ideaText, setIdeaText] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  // Workstream T6 -- picking a template only pre-fills the idea text below with a realistic
+  // starting paragraph for that kind of product; it never skips the brainstorm that follows.
+  // Scale, budget, compliance, and team maturity are deliberately left out of every template so
+  // the conversation still has real, non-trivial questions to ask regardless of which is picked.
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
+  const selectedTemplate = ARCHITECTURE_TEMPLATES.find((t) => t.id === selectedTemplateId) || null;
+
+  const applyTemplate = (templateId: string | null) => {
+    setSelectedTemplateId(templateId);
+    const template = ARCHITECTURE_TEMPLATES.find((t) => t.id === templateId);
+    setIdeaText(template ? template.ideaText : "");
+  };
 
   // Workstream T5 -- lets a team modernizing an existing app (not starting from scratch) say so
   // up front. The brainstorm then also asks about current stack/deployment/pain points, and once
@@ -77,13 +91,55 @@ export default function IntakeForm() {
 
       <form onSubmit={handleSubmit} className="mt-6 space-y-4">
         <div>
+          <label className="block text-xs font-semibold uppercase tracking-wider text-ink-muted">
+            Start from a template? (optional)
+          </label>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            <button
+              type="button"
+              onClick={() => applyTemplate(null)}
+              disabled={loading}
+              className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition disabled:opacity-50 ${
+                !selectedTemplateId
+                  ? "border-ink bg-ink text-white"
+                  : "border-line bg-white text-ink-muted hover:border-ink-faint"
+              }`}
+            >
+              ✏️ Start from scratch
+            </button>
+            {ARCHITECTURE_TEMPLATES.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => applyTemplate(t.id)}
+                disabled={loading}
+                title={t.tagline}
+                className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition disabled:opacity-50 ${
+                  selectedTemplateId === t.id
+                    ? "border-accent bg-accent text-white"
+                    : "border-line bg-white text-ink-muted hover:border-ink-faint"
+                }`}
+              >
+                {t.emoji} {t.label}
+              </button>
+            ))}
+          </div>
+          {selectedTemplate && (
+            <p className="mt-2 text-[11px] text-ink-muted">
+              {selectedTemplate.tagline}. Pre-filled the idea below as a starting point -- edit it freely, and we&apos;ll
+              still ask about scale, budget, and compliance in the brainstorm next.
+            </p>
+          )}
+        </div>
+
+        <div>
           <label htmlFor="project-name" className="block text-xs font-semibold uppercase tracking-wider text-ink-muted">
             Project Name
           </label>
           <input
             type="text"
             id="project-name"
-            placeholder="e.g. FinTech Payment Gateway, SaaS CRM"
+            placeholder={selectedTemplate ? selectedTemplate.namePlaceholder : "e.g. FinTech Payment Gateway, SaaS CRM"}
             value={name}
             onChange={(e) => setName(e.target.value)}
             disabled={loading}
