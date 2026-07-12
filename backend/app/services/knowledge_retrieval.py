@@ -35,29 +35,42 @@ class RetrievedChunk:
     book_title: str
     author: str
     chapter_title: str | None
-    page_start: int
-    page_end: int
+    page_start: int | None
+    page_end: int | None
     chunk_text: str
     topic_tags: list[str]
     similarity: float
+    # Domain-awareness (Part 2) -- "principle" (the 5 general books) or "reference-architecture"
+    # (AWS/Azure/GCP's own published guides for a specific product domain). Citation display keys
+    # off this to read as "Principle Source: ..." vs "Pattern Source: ..." -- different kinds of
+    # grounding, not interchangeable.
+    source_type: str = "principle"
+    domain_tags: list[str] | None = None
+    source_url: str | None = None
 
 
 async def retrieve_relevant_knowledge(
-    db: AsyncSession, query: str, top_k: int = 5, min_similarity: float = MIN_SIMILARITY
+    db: AsyncSession,
+    query: str,
+    top_k: int = 5,
+    min_similarity: float = MIN_SIMILARITY,
+    source_type: str | None = None,
 ) -> list[RetrievedChunk]:
     """Embeds `query` and returns up to `top_k` chunks from the knowledge base ordered by
     relevance, each above `min_similarity`. Returns an empty list when nothing clears the bar --
     callers must treat that as "no grounding available" (see architecture_generation.py's Step 3
-    wiring), never fall back to forcing in the closest-but-irrelevant chunk."""
+    wiring), never fall back to forcing in the closest-but-irrelevant chunk.
+
+    source_type -- None (default) searches the whole corpus; pass "principle" or
+    "reference-architecture" to search only that slice (see retrieve_domain_pattern_knowledge,
+    which scopes to "reference-architecture" specifically)."""
     query_vector = embed_query(query)
     distance_expr = KnowledgeChunk.embedding.cosine_distance(query_vector)
-    rows = (
-        await db.execute(
-            select(KnowledgeChunk, distance_expr.label("distance"))
-            .order_by(distance_expr)
-            .limit(top_k)
-        )
-    ).all()
+    stmt = select(KnowledgeChunk, distance_expr.label("distance"))
+    if source_type:
+        stmt = stmt.where(KnowledgeChunk.source_type == source_type)
+    stmt = stmt.order_by(distance_expr).limit(top_k)
+    rows = (await db.execute(stmt)).all()
 
     results: list[RetrievedChunk] = []
     for chunk, distance in rows:
@@ -75,9 +88,47 @@ async def retrieve_relevant_knowledge(
                 chunk_text=chunk.chunk_text,
                 topic_tags=chunk.topic_tags,
                 similarity=round(similarity, 4),
+                source_type=chunk.source_type,
+                domain_tags=chunk.domain_tags,
+                source_url=chunk.source_url,
             )
         )
     return results
+
+
+# Reference-architecture chunks are a much smaller corpus (~50 chunks across 5 documents vs. 1,629
+# principle chunks) -- a separate, lower threshold than MIN_SIMILARITY, empirically re-validated
+# against this specific corpus (see Part 2 rollout notes) rather than assumed to match the
+# principles corpus's calibration, since corpus size/composition materially affects where genuine
+# matches separate from coincidental ones (this is exactly the lesson from calibrating
+# MIN_SIMILARITY itself against the full vs. single-book principles corpus).
+REFERENCE_ARCHITECTURE_MIN_SIMILARITY = 0.60
+
+
+def build_domain_pattern_query(product_domain: dict) -> str:
+    """Builds the retrieval query for the reference-architecture corpus specifically -- phrased
+    around the product's DOMAIN/CATEGORY rather than its full requirements, since these documents
+    are provider reference architectures for a whole category of product (e-commerce, SaaS...),
+    not tied to any specific project's individual requirements."""
+    category = product_domain.get("category", "")
+    return f"Reference architecture patterns and established design approaches for {category} systems."
+
+
+async def retrieve_domain_pattern_knowledge(db: AsyncSession, product_domain: dict | None, top_k: int = 3) -> list[RetrievedChunk]:
+    """Retrieves reference-architecture chunks for a project's classified domain, to use ALONGSIDE
+    (never instead of) general-principles retrieval -- see Part 2 of the domain-awareness rollout.
+    Returns [] immediately (no embedding call, no DB query) when no domain was classified, matching
+    the same "no grounding available" contract retrieve_relevant_knowledge has for an empty
+    similarity match -- callers treat both cases identically."""
+    if not product_domain or not product_domain.get("category") or product_domain["category"] == "other":
+        return []
+    return await retrieve_relevant_knowledge(
+        db,
+        build_domain_pattern_query(product_domain),
+        top_k=top_k,
+        min_similarity=REFERENCE_ARCHITECTURE_MIN_SIMILARITY,
+        source_type="reference-architecture",
+    )
 
 
 def build_requirements_context_query(reqs_context: dict, industry_context: dict) -> str:
@@ -126,6 +177,8 @@ def chunk_to_prompt_dict(chunk: RetrievedChunk) -> dict:
         "pageStart": chunk.page_start,
         "pageEnd": chunk.page_end,
         "text": chunk.chunk_text,
+        "sourceType": chunk.source_type,
+        "sourceUrl": chunk.source_url,
     }
 
 
@@ -140,7 +193,8 @@ def enrich_citations(sources: list[dict] | None, knowledge_context: list[dict]) 
     title, since the LLM sometimes cites a more specific internal sub-heading found within a
     chunk's text (verified accurate in practice, e.g. "A.1.1 Web Applications" nested inside a
     chunk titled "A. A Design Concepts Catalog") that won't string-match the chunk's own
-    chapter_title metadata."""
+    chapter_title metadata. Web-sourced reference-architecture chunks have no page at all
+    (pageStart/pageEnd are None) -- those match on book title alone."""
     if not sources:
         return []
     enriched = []
@@ -149,14 +203,13 @@ def enrich_citations(sources: list[dict] | None, knowledge_context: list[dict]) 
             page = int(str(s.get("page", "")).split("-")[0].strip())
         except (ValueError, TypeError):
             page = None
-        match = next(
-            (
-                c
-                for c in knowledge_context
-                if c["bookTitle"] == s.get("book") and (page is None or c["pageStart"] <= page <= c["pageEnd"])
-            ),
-            None,
-        )
+
+        def _page_matches(c: dict, page: int | None = page) -> bool:
+            if c["pageStart"] is None or c["pageEnd"] is None:
+                return True  # web source, no page concept -- title match alone is sufficient
+            return page is None or c["pageStart"] <= page <= c["pageEnd"]
+
+        match = next((c for c in knowledge_context if c["bookTitle"] == s.get("book") and _page_matches(c)), None)
         if not match:
             continue
         enriched.append(
@@ -164,8 +217,10 @@ def enrich_citations(sources: list[dict] | None, knowledge_context: list[dict]) 
                 "book": s.get("book"),
                 "author": match["author"],
                 "chapterOrSection": s.get("chapterOrSection"),
-                "page": s.get("page"),
+                "page": s.get("page") if match["pageStart"] is not None else None,
                 "excerpt": match["text"],
+                "sourceType": match["sourceType"],
+                "sourceUrl": match.get("sourceUrl"),
             }
         )
     return enriched

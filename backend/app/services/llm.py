@@ -388,6 +388,7 @@ Do not include markdown code block formatting (like ```json) in your response, r
                 "pageStart": c["pageStart"],
                 "pageEnd": c["pageEnd"],
                 "text": c["text"],
+                "sourceType": c.get("sourceType", "principle"),
             }
             for c in knowledge_context
         ]
@@ -458,6 +459,7 @@ Do not include markdown code block formatting (like ```json) in your response, r
                 "pageStart": c["pageStart"],
                 "pageEnd": c["pageEnd"],
                 "text": c["text"],
+                "sourceType": c.get("sourceType", "principle"),
             }
             for c in knowledge_context
         ]
@@ -940,6 +942,7 @@ Do not include markdown code block formatting (like ```json) in your response, r
                 "pageStart": c["pageStart"],
                 "pageEnd": c["pageEnd"],
                 "text": c["text"],
+                "sourceType": c.get("sourceType", "principle"),
             }
             for c in knowledge_context
         ]
@@ -965,7 +968,7 @@ async def validate_and_generate_architecture(
     knowledge_instruction = ""
     if knowledge_context:
         knowledge_instruction = """
-5. You are also given "referenceExcerpts" -- passages retrieved from real architecture/software-engineering reference books because they were judged relevant to this specific design (e.g. monolith-vs-microservices trade-offs, layering, component boundaries). Where a passage genuinely informs a component's reasoning or the provider recommendation, you may ground that reasoning in it and cite it naturally in the prose (e.g. "as [Book Title] notes, ..."), and add a "sources" array to that SAME component (or to "recommendation") listing which excerpt(s) you actually drew on: [{"book": string, "chapterOrSection": string, "page": string}], using the exact bookTitle/chapterTitle/pageStart-pageEnd values from that excerpt.
+5. You are also given "referenceExcerpts" -- passages retrieved because they were judged relevant to this specific design. Each excerpt has a "sourceType": either "principle" (from a general architecture/software-engineering reference book -- timeless theory like monolith-vs-microservices trade-offs, layering, component boundaries) or "reference-architecture" (from AWS/Azure/GCP's own published reference-architecture guide for a specific product domain -- an established, provider-endorsed pattern for that domain, e.g. "how AWS's own e-commerce reference architecture handles the order-submission flow"). These are different KINDS of grounding -- a "reference-architecture" excerpt supports a claim like "this follows an established e-commerce reference pattern," a "principle" excerpt supports a more general architectural claim. Where a passage genuinely informs a component's reasoning or the provider recommendation, you may ground that reasoning in it, and add a "sources" array to that SAME component (or to "recommendation") listing which excerpt(s) you actually drew on: [{"book": string, "chapterOrSection": string, "page": string}], using the exact bookTitle/chapterTitle/pageStart-pageEnd values from that excerpt (pageStart/pageEnd may be null for a "reference-architecture" web source -- in that case just omit "page" or leave it empty).
    - Only add a "sources" entry where you genuinely used that excerpt's content -- never cite an excerpt you didn't actually draw on just because it was provided. Most components will have NO sources array at all; that's expected and correct when nothing retrieved was actually relevant to that specific component.
    - Never fabricate a book title, chapter, or page number -- only use the exact values given in referenceExcerpts.
 """
@@ -1081,6 +1084,7 @@ Do not use markdown code block formatting (like ```json) in your response, retur
                 "pageStart": c["pageStart"],
                 "pageEnd": c["pageEnd"],
                 "text": c["text"],
+                "sourceType": c.get("sourceType", "principle"),
             }
             for c in knowledge_context
         ]

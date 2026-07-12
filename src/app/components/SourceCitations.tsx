@@ -7,8 +7,15 @@ export type Citation = {
   book: string;
   author?: string;
   chapterOrSection?: string | null;
-  page: string;
+  page?: string | null;
   excerpt?: string;
+  // Domain-awareness Part 2 -- "reference-architecture" (AWS/Azure/GCP's own published guide for
+  // a specific product domain, an established provider-endorsed PATTERN) vs "principle" (default;
+  // one of the 5 general architecture/software-engineering books, timeless PRINCIPLE). Both build
+  // credibility but signal a different kind of grounding, so the label itself changes ("Pattern
+  // Source" vs "Principle Source"), not just the linked book.
+  sourceType?: "principle" | "reference-architecture";
+  sourceUrl?: string | null;
 };
 
 // Knowledge-base RAG citation display -- deliberately understated (small, faint, below the
@@ -27,16 +34,25 @@ export default function SourceCitations({ sources }: { sources?: Citation[] | nu
     <div className="mt-1.5 flex flex-col gap-1">
       {sources.map((s, idx) => {
         const isExpanded = expandedIndex === idx;
+        const isPattern = s.sourceType === "reference-architecture";
+        const label = isPattern ? "Pattern Source" : "Principle Source";
         return (
           <div key={idx}>
             <button
               type="button"
               onClick={() => setExpandedIndex(isExpanded ? null : idx)}
-              className="inline-flex items-center gap-1 text-[10px] font-medium text-ink-faint transition hover:text-accent-ink"
+              className={`inline-flex items-center gap-1 text-[10px] font-medium transition ${
+                isPattern ? "text-accent-ink/70 hover:text-accent-ink" : "text-ink-faint hover:text-accent-ink"
+              }`}
             >
-              <Icon icon="mdi:book-open-page-variant-outline" width={11} height={11} className="flex-none" />
+              <Icon
+                icon={isPattern ? "mdi:map-marker-path" : "mdi:book-open-page-variant-outline"}
+                width={11}
+                height={11}
+                className="flex-none"
+              />
               <span className="truncate">
-                Source: {s.book}
+                {label}: {s.book}
                 {s.page ? `, p.${s.page}` : ""}
               </span>
               <Icon icon={isExpanded ? "mdi:chevron-up" : "mdi:chevron-down"} width={11} height={11} className="flex-none" />
@@ -48,6 +64,16 @@ export default function SourceCitations({ sources }: { sources?: Citation[] | nu
                 )}
                 {s.excerpt && <p className="italic">&ldquo;{s.excerpt}&rdquo;</p>}
                 {s.author && <div className="mt-1.5 text-[9px] text-ink-faint">— {s.author}</div>}
+                {s.sourceUrl && (
+                  <a
+                    href={s.sourceUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="mt-1.5 block text-[9px] text-accent-ink hover:underline"
+                  >
+                    View original source ↗
+                  </a>
+                )}
               </div>
             )}
           </div>

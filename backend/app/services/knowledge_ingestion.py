@@ -10,6 +10,7 @@ import re
 from dataclasses import dataclass
 
 import pdfplumber
+from bs4 import BeautifulSoup
 
 # pdfplumber's default x_tolerance (3) merges adjacent words with no explicit space glyph between
 # them into one run (verified against real extraction output on these books, e.g. "pastfewyears"
@@ -59,8 +60,10 @@ class PageText:
 class RawChunk:
     text: str
     chapter_title: str | None
-    page_start: int
-    page_end: int
+    # None for web-sourced (HTML/Markdown) reference-architecture chunks, which have no page
+    # concept -- always set for PDF sources (chunk_book).
+    page_start: int | None
+    page_end: int | None
 
 
 def extract_pages(pdf_path: str) -> list[PageText]:
@@ -71,7 +74,36 @@ def extract_pages(pdf_path: str) -> list[PageText]:
         for idx, page in enumerate(pdf.pages):
             raw = page.extract_text(x_tolerance=PDF_X_TOLERANCE) or ""
             pages.append(PageText(page_number=idx + 1, text=_clean_text(raw)))
-    return pages
+    return _strip_running_headers(pages)
+
+
+def _strip_running_headers(pages: list[PageText]) -> list[PageText]:
+    """Some PDFs (verified on an AWS whitepaper) repeat a running header as the literal FIRST line
+    of every page's extracted text, with no blank line before the real heading that follows it
+    (e.g. "Real-Time Communication on AWS AWS Whitepaper\nIntroduction\n..."). Left in place, the
+    chunker's heading-detector matches the running header (itself a plausible-looking title-case
+    line) rather than the real "Introduction" heading one line down, so every chunk in the document
+    ends up mislabeled with the same generic running-header title. Detects a first line repeated
+    across a large fraction of pages and strips just that line, letting the real heading underneath
+    surface normally -- never touches a first line that varies page to page (the normal case)."""
+    if len(pages) < 4:
+        return pages
+    first_lines = [p.text.split("\n", 1)[0].strip() for p in pages if p.text]
+    if not first_lines:
+        return pages
+    from collections import Counter
+
+    most_common_line, count = Counter(first_lines).most_common(1)[0]
+    if not most_common_line or count / len(first_lines) < 0.4:
+        return pages  # no dominant repeated line -- normal document, leave untouched
+    stripped = []
+    for p in pages:
+        first, sep, rest = p.text.partition("\n")
+        if first.strip() == most_common_line:
+            stripped.append(PageText(page_number=p.page_number, text=rest.strip()))
+        else:
+            stripped.append(p)
+    return stripped
 
 
 def _clean_text(text: str) -> str:
@@ -100,14 +132,19 @@ def _looks_like_heading(line: str) -> str | None:
     if m:
         return m.group(2).strip()
     # A plain heading candidate must look title-ish (most words capitalized) to avoid matching an
-    # ordinary short sentence fragment that happens to lack terminal punctuation.
+    # ordinary short sentence fragment that happens to lack terminal punctuation. A lone word/
+    # slash-joined term (e.g. "Softswitch/PBX", verified as a real sub-heading in a technical
+    # whitepaper) is also accepted -- a standalone short line in extracted PDF text is essentially
+    # never a coincidental prose fragment (real sentences wrap across the page width), so this
+    # doesn't meaningfully raise the false-positive rate the >=2-word case was guarding against.
     m = _PLAIN_HEADING_RE.match(line)
     if m:
         words = line.split()
-        if len(words) >= 2:
-            capitalized = sum(1 for w in words if w[:1].isupper())
-            if capitalized / len(words) >= 0.6:
-                return line
+        if len(words) == 1:
+            return line
+        capitalized = sum(1 for w in words if w[:1].isupper())
+        if capitalized / len(words) >= 0.6:
+            return line
     return None
 
 
@@ -181,3 +218,144 @@ def chunk_book(
 
     flush()
     return chunks
+
+
+# --- Reference-architecture ingestion (Part 2): HTML/Markdown sources, no page concept -----------
+#
+# Unlike the 5 PDF books, these documents (AWS/Azure/GCP's own published reference-architecture
+# guides) come from the web with no real "page" -- headings are explicit and reliable (real <h1-6>
+# tags, or real "#"/"##" Markdown syntax), so rather than reusing the PDF-oriented heading-guessing
+# heuristic above, extraction normalizes every heading into a "# " (Markdown-style) prefixed line
+# and chunk_plain_document splits on THAT explicit marker -- more reliable than regex-guessing
+# because these sources actually mark their structure, unlike a PDF's plain text layer.
+
+_MD_HEADING_RE = re.compile(r"^#{1,6}\s+(.+)$")
+_MD_FRONTMATTER_RE = re.compile(r"\A---\n.*?\n---\n", re.DOTALL)
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")  # [text](url) -> text
+_MD_INLINE_CODE_RE = re.compile(r"`([^`]+)`")  # `code` -> code
+
+
+def extract_markdown_text(markdown: str) -> str:
+    """Strips YAML frontmatter and lightweight Markdown syntax (links, inline code) while keeping
+    heading lines ('#'..'######') intact as the explicit chunk-boundary marker chunk_plain_document
+    looks for. Deliberately does NOT strip '#' from headings themselves -- that's the signal."""
+    text = _MD_FRONTMATTER_RE.sub("", markdown)
+    text = _MD_LINK_RE.sub(r"\1", text)
+    text = _MD_INLINE_CODE_RE.sub(r"\1", text)
+    return text.strip()
+
+
+# Elements that are never real article content on a docs/blog page -- navigation, ads, cookie
+# banners, related-links rails, etc. Stripped before extracting text so none of this pollutes a
+# chunk (verified against real fetches of learn.microsoft.com and cloud.google.com pages, both of
+# which carry substantial nav/footer chrome around the actual article).
+_HTML_NOISE_SELECTORS = (
+    "nav",
+    "header",
+    "footer",
+    "script",
+    "style",
+    "aside",
+    "[role='navigation']",
+    "[role='banner']",
+    "[role='contentinfo']",
+    ".breadcrumb",
+    ".pageActions",
+    ".feedback-section",
+)
+
+
+def extract_html_text(html: str) -> str:
+    """Extracts the main article's text from a docs/blog page, normalizing <h1>-<h6> tags into
+    '# '-prefixed marker lines (one '#' per heading level) so chunk_plain_document can find them
+    the same way it finds Markdown headings -- both sources end up in the same normalized shape.
+    Prefers a <article>/<main> element if present (real content, minimal chrome); falls back to
+    <body> otherwise."""
+    soup = BeautifulSoup(html, "html.parser")
+    for selector in _HTML_NOISE_SELECTORS:
+        for el in soup.select(selector):
+            el.decompose()
+
+    root = soup.find("article") or soup.find("main") or soup.body or soup
+    lines: list[str] = []
+    for el in root.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p", "li"]):
+        text = el.get_text(" ", strip=True)
+        if not text:
+            continue
+        if el.name and el.name[0] == "h" and el.name[1:].isdigit():
+            level = int(el.name[1:])
+            lines.append(f"\n{'#' * level} {text}\n")
+        else:
+            lines.append(text)
+    return "\n\n".join(lines).strip()
+
+
+def chunk_plain_document(
+    text: str,
+    min_words: int = MIN_CHUNK_WORDS,
+    max_words: int = MAX_CHUNK_WORDS,
+) -> list[RawChunk]:
+    """Chunks a normalized plain-text document (headings marked as '#'-prefixed lines, from either
+    extract_markdown_text or extract_html_text) into ~200-500 word chunks on heading boundaries --
+    the web-source counterpart to chunk_book, minus PDF page tracking (page_start/page_end are
+    always None; callers know these came from a URL, not a page number)."""
+    chunks: list[RawChunk] = []
+    current_paragraphs: list[str] = []
+    current_heading: str | None = None
+
+    def flush() -> None:
+        if not current_paragraphs:
+            return
+        chunk_text = "\n\n".join(current_paragraphs).strip()
+        if not chunk_text:
+            return
+        chunks.append(RawChunk(text=chunk_text, chapter_title=current_heading, page_start=None, page_end=None))
+
+    for para in re.split(r"\n\s*\n", text):
+        para = para.strip()
+        if not para:
+            continue
+        heading_match = _MD_HEADING_RE.match(para)
+        if heading_match:
+            flush()
+            current_paragraphs = []
+            current_heading = heading_match.group(1).strip()
+            continue
+
+        current_word_count = sum(len(p.split()) for p in current_paragraphs)
+        para_word_count = len(para.split())
+        if current_word_count >= min_words and current_word_count + para_word_count > max_words:
+            flush()
+            current_paragraphs = []
+        current_paragraphs.append(para)
+
+    flush()
+    return _merge_degenerate_chunks(chunks)
+
+
+# A trailing heading with barely any content under it (verified case: a doc's final "Related
+# resources" section reduced to one bullet point, "- Architectural considerations for a
+# multitenant solution") produces a chunk too short to carry real topical signal -- in practice
+# such a short chunk's embedding scores anomalously high across UNRELATED queries (generic
+# short phrases are less topically distinctive, not more), which is a worse outcome than just not
+# having it as a separately-citable chunk at all. Web sources hit this more than PDF books (a
+# genuine trailing links/references section is common on a docs page, rare mid-book).
+_MIN_STANDALONE_CHUNK_WORDS = 25
+
+
+def _merge_degenerate_chunks(chunks: list[RawChunk]) -> list[RawChunk]:
+    if len(chunks) < 2:
+        return chunks
+    merged: list[RawChunk] = [chunks[0]]
+    for chunk in chunks[1:]:
+        if len(chunk.text.split()) < _MIN_STANDALONE_CHUNK_WORDS:
+            prev = merged[-1]
+            merged[-1] = RawChunk(
+                text=f"{prev.text}\n\n{chunk.text}",
+                chapter_title=prev.chapter_title,
+                page_start=prev.page_start,
+                page_end=chunk.page_end if chunk.page_end is not None else prev.page_end,
+            )
+        else:
+            merged.append(chunk)
+    return merged

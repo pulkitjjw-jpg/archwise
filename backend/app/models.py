@@ -236,14 +236,37 @@ class KnowledgeChunk(Base):
     # Best-effort, regex-heuristic section-heading detection at ingestion time -- "Unknown
     # section" when no heading could be confidently detected above this chunk, never a guess.
     chapter_title: Mapped[str | None] = mapped_column(Text, nullable=True)
-    page_start: Mapped[int] = mapped_column(Integer, nullable=False)
-    page_end: Mapped[int] = mapped_column(Integer, nullable=False)
+    # NULLable (not NOT NULL) since only PDF sources have a real page concept -- a web-sourced
+    # reference-architecture chunk (source_type="reference-architecture") has no page number at
+    # all, and forcing a placeholder value here would be a fabricated citation detail. PDF sources
+    # (source_type="principle", plus any PDF-based reference-architecture doc like an AWS
+    # whitepaper) always set both.
+    page_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    page_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
     chunk_text: Mapped[str] = mapped_column(Text, nullable=False)
     embedding: Mapped[list[float]] = mapped_column(Vector(KNOWLEDGE_EMBEDDING_DIM), nullable=False)
     # LLM-generated during ingestion (one pass per chunk) -- short topic slugs like
     # "monolith-vs-microservices", used only for human-readable inspection/debugging right now;
     # retrieval itself is purely embedding-similarity-based, not a tag filter.
     topic_tags: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    # Domain-awareness (Part 2 of the knowledge-base RAG rollout) -- "principle" (the original 5
+    # architecture/software-engineering books, general timeless principles) vs "reference-
+    # architecture" (AWS/Azure/GCP's own published reference architecture guides for a specific
+    # product domain -- e-commerce, SaaS multi-tenant, media/content, real-time messaging). Citation
+    # display and retrieval-time framing both key off this: a reference-architecture citation reads
+    # as "Pattern Source: ..." (an established, provider-endorsed pattern for that domain), a
+    # principle citation reads as "Principle Source: ..." (general architectural theory) -- these
+    # are different KINDS of grounding, not interchangeable.
+    source_type: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'principle'"))
+    # Which product domain(s) a reference-architecture chunk applies to (e.g. ["e-commerce"]) --
+    # always empty for source_type="principle" (general principles aren't domain-scoped). Informs
+    # which reference-architecture chunks get pulled into a retrieval query for a project already
+    # classified into a domain (see knowledge_retrieval.py), though retrieval itself still ranks by
+    # embedding similarity first -- this is descriptive metadata, not a hard filter.
+    domain_tags: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    # The public URL a reference-architecture chunk was sourced from, for HTML/Markdown sources
+    # with no page concept (NULL for PDF-based sources, which cite by page instead).
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
     )

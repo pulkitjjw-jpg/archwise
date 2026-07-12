@@ -24,6 +24,7 @@ from app.services.knowledge_retrieval import (
     build_requirements_context_query,
     chunk_to_prompt_dict,
     enrich_citations,
+    retrieve_domain_pattern_knowledge,
     retrieve_relevant_knowledge,
 )
 from app.services.llm import (
@@ -603,8 +604,15 @@ async def generate_architecture(project_id: uuid.UUID, db: AsyncSession = Depend
     # available before the LLM call. An empty list (nothing cleared the similarity threshold) is
     # passed through unchanged; validate_and_generate_architecture treats that as "no grounding
     # available" and never fabricates a citation.
+    #
+    # Part 2: reference-architecture chunks (AWS/Azure/GCP's own published guides for this
+    # project's classified domain) are retrieved ALONGSIDE the general-principles chunks, never
+    # instead of them -- retrieve_domain_pattern_knowledge returns [] immediately when no domain
+    # was classified, so this is a no-op for any project that predates the domain-awareness feature
+    # or whose brainstorm genuinely didn't reveal a specific domain.
     knowledge_chunks = await retrieve_relevant_knowledge(db, build_requirements_context_query(reqs_context, industry_context))
-    knowledge_context = [chunk_to_prompt_dict(c) for c in knowledge_chunks]
+    domain_pattern_chunks = await retrieve_domain_pattern_knowledge(db, product_domain)
+    knowledge_context = [chunk_to_prompt_dict(c) for c in knowledge_chunks + domain_pattern_chunks]
 
     # 4. The shared rules-engine + LLM-validation + cloud-mapping pipeline (architecture_
     # generation.py) -- identical to what the What-If preview endpoint below calls, just against
