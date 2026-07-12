@@ -10,6 +10,12 @@ export default function IntakeForm() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  // Workstream T5 -- lets a team modernizing an existing app (not starting from scratch) say so
+  // up front. The brainstorm then also asks about current stack/deployment/pain points, and once
+  // a target architecture exists, a phased Migration Roadmap becomes available.
+  const [hasExistingSystem, setHasExistingSystem] = useState(false);
+  const [existingSystemText, setExistingSystemText] = useState("");
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim() || !ideaText.trim()) {
@@ -26,7 +32,7 @@ export default function IntakeForm() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ name, ideaText }),
+        body: JSON.stringify({ name, ideaText, hasExistingSystem, existingSystemText }),
       });
 
       if (!response.ok) {
@@ -100,6 +106,29 @@ export default function IntakeForm() {
             className="mt-2 w-full rounded-2xl border border-line bg-white px-4 py-3 text-sm text-ink shadow-sm focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50 resize-none"
             required
           />
+        </div>
+
+        <div className="rounded-2xl border border-line bg-paper/70 p-3.5">
+          <label className="flex items-center gap-2 text-xs font-semibold text-ink">
+            <input
+              type="checkbox"
+              checked={hasExistingSystem}
+              onChange={(e) => setHasExistingSystem(e.target.checked)}
+              disabled={loading}
+              className="h-4 w-4 accent-accent"
+            />
+            I have an existing system (modernizing, not starting from scratch)
+          </label>
+          {hasExistingSystem && (
+            <textarea
+              rows={3}
+              placeholder="Briefly describe what you have today -- tech stack, how it's deployed, and the main pain points (e.g. &quot;a monolithic PHP app on a single VM, no CI/CD, manual deploys, struggling to scale past 500 users&quot;). You can also just check the box and we'll ask about this during the brainstorm."
+              value={existingSystemText}
+              onChange={(e) => setExistingSystemText(e.target.value)}
+              disabled={loading}
+              className="mt-2.5 w-full rounded-xl border border-line bg-white px-3 py-2.5 text-xs text-ink shadow-sm focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50 resize-none"
+            />
+          )}
         </div>
 
         {error && <p className="text-xs font-medium text-danger">{error}</p>}

@@ -20,6 +20,7 @@ from app.services.architecture_diff import calculate_total_cost, compute_archite
 from app.services.architecture_generation import build_cloud_mapping, generate_architecture_bundle
 from app.services.llm import (
     generate_flow_story,
+    generate_migration_roadmap,
     generate_user_journey,
     propose_component_changes,
     refine_component_proposal,
@@ -244,6 +245,56 @@ async def get_user_journey(
     # Verification is recomputed fresh every fetch, not cached alongside the steps -- it's cheap
     # (pure in-memory graph check) and a stale "verified" verdict would defeat the point.
     return {"journeySteps": steps, "verification": verify_journey_path(steps, provider_components, connections)}
+
+
+@router.post("/projects/{project_id}/architectures/{architecture_id}/migration-roadmap")
+async def get_migration_roadmap(
+    project_id: uuid.UUID, architecture_id: uuid.UUID, provider: str, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """Migration Roadmap (Workstream T5) -- a phased plan from the user's stated existing system to
+    this target architecture. Only meaningful for a project whose latest Requirement has
+    existing_system set (i.e. the "I have an existing system" intake toggle was used and the
+    brainstorm actually captured something) -- 400s otherwise rather than fabricating a legacy
+    system to migrate from. Lazily generated and cached per provider, same pattern as flow-story."""
+    if provider not in VALID_FLOW_STORY_PROVIDERS:
+        raise HTTPException(status_code=400, detail="Invalid provider specified")
+
+    record = (
+        await db.execute(
+            select(Architecture).where(Architecture.id == architecture_id, Architecture.project_id == project_id)
+        )
+    ).scalar_one_or_none()
+    if not record:
+        raise HTTPException(status_code=404, detail="Architecture version not found")
+
+    if record.migration_roadmap.get(provider):
+        return {"phases": record.migration_roadmap[provider]}
+
+    reqs = (
+        await db.execute(
+            select(Requirement)
+            .where(Requirement.project_id == project_id)
+            .order_by(Requirement.version.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if not reqs or not reqs.existing_system:
+        raise HTTPException(
+            status_code=400,
+            detail="No existing system was captured for this project -- the Migration Roadmap only applies when starting from an existing system.",
+        )
+
+    provider_components = _provider_components(record.hld.get("components", []), provider)
+    connections = record.hld.get("connections", [])
+
+    phases = await generate_migration_roadmap(
+        provider, reqs.existing_system, provider_components, connections, reqs.functional, settings.openrouter_api_key
+    )
+
+    record.migration_roadmap = {**record.migration_roadmap, provider: phases}
+    await db.commit()
+
+    return {"phases": phases}
 
 
 @router.patch("/projects/{project_id}/architectures/{architecture_id}/layout")

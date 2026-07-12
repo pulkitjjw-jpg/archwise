@@ -90,21 +90,32 @@ async def create_project(payload: ProjectCreateRequest, db: AsyncSession = Depen
     if not payload.name or not payload.ideaText:
         raise HTTPException(status_code=400, detail="name and ideaText are required")
 
-    project = Project(name=payload.name, current_version="0.1.0")
+    project = Project(name=payload.name, current_version="0.1.0", has_existing_system=payload.hasExistingSystem)
     db.add(project)
     await db.flush()
 
     # Log the initial idea as the first user conversation turn
     db.add(Conversation(project_id=project.id, role="user", message=payload.ideaText, stage="intake"))
 
+    intake_history = [{"role": "user", "message": payload.ideaText, "stage": "intake"}]
+
+    # Workstream T5 -- if the user described an existing system, log it as its own intake turn
+    # (clearly labeled, not silently merged into the idea text) so it's a distinct, extractable
+    # part of the conversation history rather than buried prose.
+    if payload.hasExistingSystem and payload.existingSystemText and payload.existingSystemText.strip():
+        existing_system_message = f"Existing system: {payload.existingSystemText.strip()}"
+        db.add(Conversation(project_id=project.id, role="user", message=existing_system_message, stage="intake"))
+        intake_history.append({"role": "user", "message": existing_system_message, "stage": "intake"})
+
     # Call LLM to get the first brainstorm question
     first_question = "Thank you. Let's start the brainstorm. Can you tell me what target traffic size or request volume you expect?"
     first_suggested_replies: list[str] = []
     try:
         turn = await get_next_brainstorm_turn(
-            [{"role": "user", "message": payload.ideaText, "stage": "intake"}],
+            intake_history,
             payload.name,
             settings.openrouter_api_key,
+            has_existing_system=payload.hasExistingSystem,
         )
         first_question = turn["message"]
         first_suggested_replies = turn.get("suggestedReplies") or []

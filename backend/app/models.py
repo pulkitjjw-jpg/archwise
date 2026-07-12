@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import ForeignKey, Integer, Text, text
+from sqlalchemy import Boolean, ForeignKey, Integer, Text, text
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -32,6 +32,11 @@ class Project(Base):
     # doesn't flip-flop mid-conversation. Same "mutable project-level pointer" precedent as
     # current_version, not a versioned content field.
     knowledge_level: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'unknown'"))
+    # Set once at project creation (Workstream T5's "I have an existing system" intake toggle),
+    # never re-classified mid-conversation -- same locked-pointer precedent as knowledge_level.
+    # Threaded into get_next_brainstorm_turn so the brainstorm asks about the current stack/
+    # deployment/pain points instead of (or alongside) the usual greenfield checklist.
+    has_existing_system: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
 
     conversations: Mapped[list["Conversation"]] = relationship(back_populates="project", passive_deletes=True)
     requirements: Mapped[list["Requirement"]] = relationship(back_populates="project", passive_deletes=True)
@@ -75,6 +80,11 @@ class Requirement(Base):
     industry_context: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=INDUSTRY_CONTEXT_DEFAULT
     )
+    # Extracted alongside functional/nonFunctional/industryContext (Workstream T5) when
+    # Project.has_existing_system is set -- {techStack, deployment, painPoints} or NULL for a
+    # plain greenfield project. NULL (not an empty dict) is the "not applicable" signal the
+    # Migration Roadmap feature gates on, distinct from "asked about it, nothing was said."
+    existing_system: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     # Lazily generated + cached on first request (not eagerly on every requirements save) --
     # NULL until someone actually views the Conversation Summary section. This is the one field
@@ -130,6 +140,13 @@ class Architecture(Base):
     # providers are computed and stored up front at generation/manual-save time, the same moment
     # hld/reasoning are set, rather than lazily per-provider on first view.
     security_findings: Mapped[dict[str, list[dict]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    # Keyed by provider, each value a list of phase dicts (Workstream T5) -- lazily generated +
+    # cached on first request, same pattern as flow_story/journey_steps, since it's an LLM call
+    # and most architectures never came from an "existing system" intake at all. Only meaningful
+    # when the project's latest Requirement has existing_system set; the endpoint 400s otherwise.
+    migration_roadmap: Mapped[dict[str, list[dict]]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
     created_at: Mapped[datetime] = mapped_column(

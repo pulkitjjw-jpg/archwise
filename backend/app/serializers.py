@@ -9,6 +9,7 @@ def serialize_project(p: Project) -> dict:
         "createdAt": p.created_at,
         "currentVersion": p.current_version,
         "knowledgeLevel": p.knowledge_level,
+        "hasExistingSystem": p.has_existing_system,
     }
 
 
@@ -31,6 +32,7 @@ def serialize_requirement(r: Requirement) -> dict:
         "functional": r.functional,
         "nonFunctional": r.non_functional,
         "industryContext": r.industry_context,
+        "existingSystem": r.existing_system,
         "version": r.version,
         "conversationSummary": r.conversation_summary,
         "createdAt": r.created_at,
@@ -49,5 +51,6 @@ def serialize_architecture(a: Architecture) -> dict:
         "journeySteps": a.journey_steps,
         "layoutOverrides": a.layout_overrides,
         "securityFindings": a.security_findings,
+        "migrationRoadmap": a.migration_roadmap,
         "createdAt": a.created_at,
     }

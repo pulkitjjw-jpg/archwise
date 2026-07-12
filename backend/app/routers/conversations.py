@@ -49,6 +49,7 @@ async def create_conversation_turn(
     project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
     project_name = (project.name if project else None) or "Cloud Project"
     known_knowledge_level = (project.knowledge_level if project else None) or "unknown"
+    has_existing_system = bool(project.has_existing_system) if project else False
 
     # 4. Generate AI follow-up
     assistant_turn_data = {
@@ -63,6 +64,7 @@ async def create_conversation_turn(
             project_name,
             settings.openrouter_api_key,
             known_knowledge_level,
+            has_existing_system=has_existing_system,
         )
         assistant_turn_data = {
             "message": next_turn["message"],

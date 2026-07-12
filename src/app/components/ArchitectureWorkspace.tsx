@@ -343,6 +343,15 @@ type SecurityFinding = {
   recommendation: string;
 };
 
+type MigrationPhase = {
+  phase: number;
+  title: string;
+  whatChanges: string;
+  why: string;
+  usesStranglerFig: boolean;
+  effort: "small" | "medium" | "large";
+};
+
 type ArchitectureData = {
   id: string;
   version: string;
@@ -354,6 +363,7 @@ type ArchitectureData = {
   journeySteps?: Record<string, JourneyStep[]>;
   layoutOverrides?: Record<string, { x: number; y: number }>;
   securityFindings?: Record<string, SecurityFinding[]>;
+  migrationRoadmap?: Record<string, MigrationPhase[]>;
   reasoning: {
     decisions: any[];
     assumptions: string[];
@@ -405,7 +415,7 @@ export default function ArchitectureWorkspace({
   const [generationStageIndex, setGenerationStageIndex] = useState(0);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [activeProvider, setActiveProvider] = useState<CloudProviderKey>("aws");
-  const [viewMode, setViewMode] = useState<"diagram" | "comparison" | "journey">("diagram");
+  const [viewMode, setViewMode] = useState<"diagram" | "comparison" | "journey" | "migration">("diagram");
   const [isLldExpanded, setIsLldExpanded] = useState(false);
   // Collapsed by default -- learning depth is available on demand, not imposed on expert users
   // who already know what a message queue is.
@@ -1315,6 +1325,49 @@ export default function ArchitectureWorkspace({
     };
   }, [viewMode, showFlowSteps, architecture, activeProvider]);
 
+  // Migration Roadmap (Workstream T5) -- a phased plan from the project's stated existing system
+  // (captured at intake) to this target architecture. Fetched lazily only when this tab is
+  // opened, same caching discipline as flow story / user journey above.
+  const [migrationCache, setMigrationCache] = useState<Record<string, MigrationPhase[]>>({});
+  const [migrationLoading, setMigrationLoading] = useState(false);
+  const [migrationError, setMigrationError] = useState("");
+  const migrationKey = architecture ? `${architecture.id}:${activeProvider}` : null;
+  const currentMigrationRoadmap = migrationKey ? migrationCache[migrationKey] : undefined;
+
+  useEffect(() => {
+    if (viewMode !== "migration" || !architecture) return;
+    const key = `${architecture.id}:${activeProvider}`;
+    if (migrationCache[key]) return;
+
+    const embedded = architecture.migrationRoadmap?.[activeProvider];
+    if (embedded) {
+      setMigrationCache((prev) => ({ ...prev, [key]: embedded }));
+      return;
+    }
+
+    let cancelled = false;
+    setMigrationLoading(true);
+    setMigrationError("");
+    fetch(`/api/projects/${projectId}/architectures/${architecture.id}/migration-roadmap?provider=${activeProvider}`, {
+      method: "POST",
+    })
+      .then((res) => (res.ok ? res.json() : res.json().then((d) => Promise.reject(new Error(d.detail || "Failed to load the migration roadmap")))))
+      .then((data) => {
+        if (cancelled) return;
+        setMigrationCache((prev) => ({ ...prev, [key]: data.phases }));
+      })
+      .catch((err) => {
+        if (!cancelled) setMigrationError(err.message || "Failed to load the migration roadmap");
+      })
+      .finally(() => {
+        if (!cancelled) setMigrationLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [viewMode, architecture, activeProvider]);
+
   // Multi-colored flow paths (Workstream S) -- an overlay ONLY: recolors the stroke of edges
   // ELK already routed, never recomputes their geometry. Each journey step gets a fixed color;
   // an edge wholly within one step, or bridging step i to step i+1, is colored accordingly.
@@ -2116,6 +2169,19 @@ export default function ArchitectureWorkspace({
             >
               🧭 User Journey
             </button>
+            {/* Migration Roadmap (Workstream T5) -- only shown for a project that actually
+                declared an existing system at intake; a plain greenfield project never sees a
+                dead tab with nothing to show. */}
+            {requirements?.existingSystem && (
+              <button
+                onClick={() => setViewMode("migration")}
+                className={`px-3 py-1.5 text-xs font-bold rounded-lg transition ${
+                  viewMode === "migration" ? "bg-white text-ink shadow-sm" : "text-ink-muted hover:text-ink"
+                }`}
+              >
+                🛤️ Migration Roadmap
+              </button>
+            )}
           </div>
           {onToggleFocusMode && (
             <span className="inline-flex items-center gap-1">
@@ -4405,7 +4471,7 @@ export default function ArchitectureWorkspace({
               </div>
             </div>
           </div>
-        ) : (
+        ) : viewMode === "journey" ? (
           /* User Journey Architecture View -- end-user-centric, step-by-step, distinct from the
              infra-centric topology diagram but linkable to it (clicking a step's component chip
              jumps back to Topology View with that component selected). Synthesized from the
@@ -4526,6 +4592,109 @@ export default function ArchitectureWorkspace({
                       </div>
                     </li>
                   ))}
+                </ol>
+              )}
+            </div>
+          </div>
+        ) : (
+          /* Migration Roadmap View (Workstream T5) -- a phased plan from the project's stated
+             existing system to this target architecture. Only reachable via the tab, which is
+             itself only shown when requirements.existingSystem is set, so this view never
+             renders for a plain greenfield project. */
+          <div className="h-full overflow-y-auto p-6">
+            <div className="mx-auto max-w-3xl">
+              <div className="flex flex-wrap items-center justify-between gap-y-2">
+                <div className="flex items-center gap-2">
+                  <h4 className="text-lg font-black text-ink">Migration Roadmap</h4>
+                  <InfoTooltip text="A phased plan for migrating from your existing system to this target architecture, using the strangler-fig pattern where it genuinely applies -- incrementally routing traffic to new components while the legacy system keeps running, rather than one risky cutover. Grounded in this provider's actual target components." />
+                </div>
+                <div className="flex bg-paper/80 p-0.5 rounded-lg border border-line shadow-sm">
+                  {(["aws", "azure", "gcp", "kubernetes", "private"] as const).map((p) => (
+                    <button
+                      key={p}
+                      onClick={() => setActiveProvider(p)}
+                      className={`px-2 py-1 text-[9px] font-extrabold uppercase rounded transition ${
+                        activeProvider === p ? "bg-ink text-white shadow-sm" : "text-ink-muted hover:text-ink"
+                      }`}
+                    >
+                      {PROVIDER_LABELS[p]}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <p className="mt-1.5 text-xs text-ink-muted leading-relaxed">
+                From what you described about your existing system to this target architecture for {PROVIDER_LABELS[activeProvider]}.
+              </p>
+
+              {requirements?.existingSystem && (
+                <div className="mt-4 rounded-2xl border border-line bg-paper/60 p-3.5 text-xs">
+                  <span className="text-[9px] font-bold uppercase tracking-wide text-ink-faint">Your existing system</span>
+                  <p className="mt-1 text-ink-muted">
+                    <span className="font-semibold text-ink">Stack: </span>
+                    {requirements.existingSystem.techStack || "not specified"}
+                  </p>
+                  <p className="mt-1 text-ink-muted">
+                    <span className="font-semibold text-ink">Deployment: </span>
+                    {requirements.existingSystem.deployment || "not specified"}
+                  </p>
+                  <p className="mt-1 text-ink-muted">
+                    <span className="font-semibold text-ink">Pain points: </span>
+                    {requirements.existingSystem.painPoints || "not specified"}
+                  </p>
+                </div>
+              )}
+
+              {migrationLoading ? (
+                <div className="mt-8 flex items-center justify-center gap-2 text-xs text-ink-muted">
+                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+                  Planning the migration for {PROVIDER_LABELS[activeProvider]}...
+                </div>
+              ) : migrationError ? (
+                <div className="mt-8 text-center text-xs text-danger">{migrationError}</div>
+              ) : !currentMigrationRoadmap || currentMigrationRoadmap.length === 0 ? (
+                <div className="mt-8 text-center text-xs text-ink-muted">No migration roadmap could be generated yet for this provider.</div>
+              ) : (
+                <ol className="mt-6 space-y-0">
+                  {currentMigrationRoadmap.map((p, idx) => {
+                    const EFFORT_COLOR: Record<MigrationPhase["effort"], string> = {
+                      small: "bg-success-soft border-success/25 text-success",
+                      medium: "bg-warning-soft border-warning/25 text-warning",
+                      large: "bg-danger-soft border-danger/25 text-danger",
+                    };
+                    return (
+                      <li key={idx} className="relative pl-10 pb-8 last:pb-0">
+                        {idx < currentMigrationRoadmap.length - 1 && (
+                          <span className="absolute left-[15px] top-8 bottom-0 w-0.5 bg-line" />
+                        )}
+                        <span className="absolute left-0 top-0 flex h-8 w-8 items-center justify-center rounded-full bg-ink text-xs font-extrabold text-white">
+                          {p.phase}
+                        </span>
+                        <div className="rounded-2xl border border-line bg-white p-4 shadow-sm">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="text-sm font-bold text-ink">{p.title}</span>
+                            <div className="flex items-center gap-1.5">
+                              {p.usesStranglerFig && (
+                                <span className="rounded-full border border-accent/25 bg-accent-soft px-2 py-0.5 text-[9px] font-extrabold uppercase tracking-wide text-accent-ink">
+                                  Strangler-fig
+                                </span>
+                              )}
+                              <span className={`rounded-full border px-2 py-0.5 text-[9px] font-extrabold uppercase tracking-wide ${EFFORT_COLOR[p.effort]}`}>
+                                {p.effort} effort
+                              </span>
+                            </div>
+                          </div>
+                          <div className="mt-2 flex items-start gap-1.5">
+                            <span className="mt-0.5 flex-none text-sm">🔧</span>
+                            <p className="text-xs text-ink leading-relaxed">{p.whatChanges}</p>
+                          </div>
+                          <div className="mt-2 flex items-start gap-1.5">
+                            <span className="mt-0.5 flex-none text-sm">💡</span>
+                            <p className="text-xs text-ink-muted leading-relaxed">{p.why}</p>
+                          </div>
+                        </div>
+                      </li>
+                    );
+                  })}
                 </ol>
               )}
             </div>

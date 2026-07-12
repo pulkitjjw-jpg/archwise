@@ -115,6 +115,7 @@ async def get_next_brainstorm_turn(
     project_name: str,
     api_key: str,
     known_knowledge_level: str = "unknown",
+    has_existing_system: bool = False,
 ) -> dict:
     is_growth_phase = any(h["stage"] == "growth_trigger" for h in history)
 
@@ -156,10 +157,22 @@ This user was already classified as a BEGINNER (layman, zero architecture knowle
             knowledge_level_instruction = """
 This user was already classified as TECHNICAL earlier in this conversation. Set "knowledgeLevel" to "technical" again (do not change it once set) and use TECHNICAL MODE below for this question."""
 
+        existing_system_instruction = (
+            """
+IMPORTANT: This user already has an EXISTING system in production -- they are migrating/modernizing, not building from scratch. At a natural point in the conversation (don't tack on extra turns for this -- blend it into whichever topic it fits, e.g. team capability or budget is a natural moment to also ask about the current setup), also gather:
+1. What the current system is built with (languages, frameworks, hosting -- e.g. "a Django app on a single VM", "PHP on shared hosting", "a Rails monolith on Heroku").
+2. How it's currently deployed/operated (manual deploys? any CI/CD? one server or several?).
+3. Their main pain points or reasons for wanting a new architecture (what's actually broken or limiting them today).
+This is in ADDITION to the normal checklist below, not a replacement for it -- the target architecture still needs the same information a greenfield project would."""
+            if has_existing_system
+            else ""
+        )
+
         system_instruction = f"""
 You are a senior cloud systems architect conducting a discovery and brainstorming session with a client for a project named "{project_name}".
 Your goal is to gather enough context to generate a high-quality High-Level Design (HLD) architecture.
 {knowledge_level_instruction}
+{existing_system_instruction}
 
 === TECHNICAL MODE (confident, detailed answers -- founder/engineer who already thinks in architecture terms) ===
 Keep the conversation tight and efficient. Ask exactly ONE clear, specific question at a time to clarify:
@@ -265,6 +278,11 @@ Rules:
     - "handlesCardDataDirectly": boolean, fintech only, true if the user handles card data directly, false if only through a processor like Stripe. Omit the key entirely if not fintech or not discussed.
     - "storesPHI": boolean, healthtech only, true if the user stores/processes PHI. Omit the key entirely if not healthtech or not discussed.
     - "dataResidency": string, healthtech only, the country/region mentioned, or "not_specified" if healthtech but never discussed. Omit the key entirely if not healthtech.
+- For existingSystem: ONLY if the conversation discusses an EXISTING system being migrated/modernized (not a from-scratch build) —
+  - "techStack": string, the current system's languages/frameworks/hosting as described (e.g. "Django monolith on a single EC2 VM, PostgreSQL on the same box").
+  - "deployment": string, how it's currently deployed/operated (manual deploys, any CI/CD, single vs. multiple servers).
+  - "painPoints": string, the stated reasons for wanting a new architecture / what's limiting them today.
+  Set the whole "existingSystem" object to null if no existing system was discussed anywhere in the conversation — do not invent one.
 
 CRITICAL: If a non-functional item was NOT discussed in the conversation and cannot be reasonably and strongly inferred from context, set it EXACTLY to "not_specified". Do NOT guess or use silent defaults. The same applies to industryContext — do not infer a regulated industry from weak signal.
 
@@ -289,7 +307,8 @@ You MUST respond with a raw JSON object matching this structure:
       "storesPHI": boolean,
       "dataResidency": string
     }
-  }
+  },
+  "existingSystem": { "techStack": string, "deployment": string, "painPoints": string } | null
 }
 Do not include markdown code block formatting (like ```json) in your response, return only the raw JSON.
 """
@@ -476,6 +495,67 @@ Do not include markdown code block formatting (like ```json) in your response, r
         {"role": "user", "content": json.dumps(input_context)},
     ]
     return await _call_llm_with_retry(api_key, messages_for_api, "Executive summary generation")
+
+
+async def generate_migration_roadmap(
+    provider: str,
+    existing_system: dict,
+    components: list[dict],
+    connections: list[dict],
+    functional: list[str],
+    api_key: str,
+) -> dict:
+    """Generates the Migration Roadmap (Workstream T5) -- a phased plan from the user's stated
+    EXISTING system (tech stack, deployment, pain points) to the already-generated target
+    architecture, using the strangler-fig pattern where applicable (incrementally routing traffic
+    to new components while the legacy system keeps running, rather than a single risky cutover).
+    Grounded in the real target components/reasoning already computed for this provider -- never
+    invents infrastructure the target design doesn't actually have. Called lazily per provider and
+    cached by the caller on the architecture row's migration_roadmap[provider] key, same pattern as
+    flow_story."""
+    system_instruction = """
+You are a senior cloud migration architect writing a phased roadmap for a team modernizing an existing production system into a new target cloud architecture that has already been designed.
+
+You are given: the user's description of their CURRENT system (tech stack, deployment, pain points), the TARGET architecture's real components (with the actual cloud service chosen for each and the architect's reasoning for it), the connections between target components, and the product's functional requirements.
+
+Write a phased migration plan -- typically 3 to 5 phases, never more than 6. Use the strangler-fig pattern where it genuinely applies (e.g. "Phase 1: put the new API gateway in front of the legacy monolith, routing only new endpoints through it while the monolith keeps serving the rest" -- incrementally carving pieces out of the legacy system rather than a single big-bang cutover), but only claim strangler-fig where it actually fits this specific migration -- don't force the label onto a phase that's really just infrastructure setup.
+
+Rules:
+- Ground every phase in the REAL target components given -- reference their actual service names/reasoning, not generic advice.
+- Order phases the way a team would actually execute them (foundational infrastructure and low-risk pieces first, the riskiest/most central piece -- often the core data store or the monolith itself -- later, once the surrounding pieces are proven).
+- Each phase's "effort" must be "small", "medium", or "large" -- a RELATIVE sizing judgment (team-weeks of complexity), never a specific time estimate (no "2 weeks", no dates).
+- Be honest about risk: if a phase is inherently risky (e.g. a database cutover), say so in "why".
+- Do not invent legacy technical details the user didn't mention -- only reason from what's actually in "existingSystem".
+
+You MUST respond with a raw JSON object matching this structure:
+{
+  "phases": [
+    {
+      "phase": number (1-indexed, in execution order),
+      "title": string (short, e.g. "Containerize the monolith"),
+      "whatChanges": string (concrete description of the actual work in this phase),
+      "why": string (the reasoning -- why this phase, why now, what risk it manages or unlocks),
+      "usesStranglerFig": boolean,
+      "effort": "small" | "medium" | "large"
+    }
+  ]
+}
+Do not include markdown code block formatting (like ```json) in your response, return only the raw JSON.
+"""
+
+    input_context = {
+        "provider": provider,
+        "existingSystem": existing_system,
+        "targetComponents": components,
+        "targetConnections": connections,
+        "functionalRequirements": functional,
+    }
+    messages_for_api = [
+        {"role": "system", "content": system_instruction},
+        {"role": "user", "content": json.dumps(input_context)},
+    ]
+    result = await _call_llm_with_retry(api_key, messages_for_api, "Migration roadmap generation")
+    return result.get("phases") or []
 
 
 KNOWN_COMPONENT_TYPES = (

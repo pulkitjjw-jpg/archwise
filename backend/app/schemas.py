@@ -6,6 +6,12 @@ from pydantic import BaseModel, ConfigDict, Field
 class ProjectCreateRequest(BaseModel):
     name: str
     ideaText: str
+    # Workstream T5 -- "I have an existing system" intake toggle. hasExistingSystem alone (with
+    # no text) is still meaningful: it locks Project.has_existing_system so the brainstorm asks
+    # about the current stack/deployment/pain points as part of its normal questions, rather than
+    # requiring the description be dumped in one block up front.
+    hasExistingSystem: bool = False
+    existingSystemText: str | None = None
 
 
 class ConversationCreateRequest(BaseModel):

@@ -72,6 +72,7 @@ async def extract_requirements(project_id: uuid.UUID, db: AsyncSession = Depends
         functional=extracted["functional"],
         non_functional=extracted["nonFunctional"],
         industry_context=extracted["industryContext"],
+        existing_system=extracted.get("existingSystem"),
         version=next_version,
     )
     db.add(record)
