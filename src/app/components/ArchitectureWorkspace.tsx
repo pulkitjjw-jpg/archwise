@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Icon } from "@iconify/react";
 import { TransformWrapper, TransformComponent } from "react-zoom-pan-pinch";
@@ -579,11 +579,67 @@ export default function ArchitectureWorkspace({
       const data = await res.json();
       setArchitecture(data.architecture);
       await loadArchitecture(data.architecture.version);
+      // Workstream X: "Regenerate Design" now goes through a preview step first (see
+      // handlePreviewRegenerate below) -- once the real version is actually created here, that
+      // preview is stale, so clear it rather than leave a confirm/discard panel referencing a
+      // version that's already been superseded.
+      setRegeneratePreview(null);
     } catch (err: any) {
       setError(err.message || "An unexpected error occurred during generation.");
     } finally {
       setGenerating(false);
     }
+  };
+
+  // Workstream X: "Regenerate Design" used to call handleGenerate directly and silently create a
+  // new persisted version with no preview -- every other edit pathway here (Manual Editor
+  // Controls, service swap, chat enhancement proposals, What-If) stages a draft/preview before an
+  // explicit confirm. This closes that gap by reusing the EXACT SAME whatif-preview endpoint, just
+  // called with the project's current real requirements unchanged -- since generate_architecture_
+  // bundle is called identically either way (same reqs_context, same latest-architecture diff
+  // baseline), the preview this returns is byte-for-byte what "Regenerate Design" would actually
+  // produce, without persisting anything until the user explicitly applies it.
+  const [regeneratePreview, setRegeneratePreview] = useState<WhatIfPreviewData | null>(null);
+  const [regeneratePreviewLoading, setRegeneratePreviewLoading] = useState(false);
+  const [regenerateError, setRegenerateError] = useState("");
+  const regeneratePreviewRef = useRef<HTMLDivElement>(null);
+
+  const handlePreviewRegenerate = async () => {
+    if (isGenerationBlocked || !requirements) return;
+    setRegenerateError("");
+    setRegeneratePreviewLoading(true);
+    setRegeneratePreview(null);
+    try {
+      const res = await fetch(`/api/projects/${projectId}/architectures/whatif-preview`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          functional: requirements.functional,
+          nonFunctional: requirements.nonFunctional,
+          industryContext: requirements.industryContext,
+        }),
+      });
+      if (!res.ok) throw new Error("Failed to preview the regenerated design");
+      const data = await res.json();
+      setRegeneratePreview(data);
+    } catch (err: any) {
+      setRegenerateError(err.message || "Something went wrong generating this preview.");
+    } finally {
+      setRegeneratePreviewLoading(false);
+    }
+  };
+
+  const regenerateCostPreview = (): { before: { min: number; max: number }; after: { min: number; max: number } } | null => {
+    if (!architecture || !regeneratePreview) return null;
+    const before = calculateTotalCost(activeProvider);
+    const after = regeneratePreview.components.reduce(
+      (acc, c) => {
+        const mapping = getMappingForProvider(c, activeProvider);
+        return { min: acc.min + (mapping?.costEstimate.min || 0), max: acc.max + (mapping?.costEstimate.max || 0) };
+      },
+      { min: 0, max: 0 }
+    );
+    return { before, after };
   };
 
   const handleExport = () => {
@@ -1085,6 +1141,45 @@ export default function ArchitectureWorkspace({
     }, 0);
     return { min, max };
   };
+
+  // Workstream X: a running draft-vs-current-saved-version summary for Manual Editor Controls --
+  // every other draft edit pathway here (What-If, Regenerate) shows a before/after diff before its
+  // confirm button; the manual editor previously only showed the live-edited diagram itself with
+  // no explicit comparison against the last saved version. Purely a client-side structural diff
+  // (id presence/name/type/service changes) -- unlike compute_architecture_diff server-side, there's
+  // no LLM reasoning to generate here, just "what's different from what's saved."
+  const draftDiffSummary = useMemo(() => {
+    if (!isEditing || !draftHld || !architecture) return null;
+    const savedById = new Map(architecture.hld.components.map((c) => [c.id, c]));
+    const draftById = new Map(draftHld.components.map((c) => [c.id, c]));
+    const added = draftHld.components.filter((c) => !savedById.has(c.id));
+    const removed = architecture.hld.components.filter((c) => !draftById.has(c.id));
+    const modified = draftHld.components
+      .filter((c) => savedById.has(c.id))
+      .map((c) => {
+        const original = savedById.get(c.id)!;
+        const changes: { parameter: string; oldVal: string; newVal: string }[] = [];
+        if (original.name !== c.name) changes.push({ parameter: "name", oldVal: original.name, newVal: c.name });
+        if (original.type !== c.type) changes.push({ parameter: "type", oldVal: original.type, newVal: c.type });
+        const origService = getMappingForProvider(original, activeProvider)?.serviceName;
+        const draftService = getMappingForProvider(c, activeProvider)?.serviceName;
+        if (origService && draftService && origService !== draftService) {
+          changes.push({ parameter: "service", oldVal: origService, newVal: draftService });
+        }
+        return { id: c.id, name: c.name, changes };
+      })
+      .filter((m) => m.changes.length > 0);
+    const connectionKey = (conns: ConnectionData[]) =>
+      [...conns].map((c) => `${c.from}->${c.to}:${c.protocol}`).sort().join("|");
+    const connectionsChanged = connectionKey(draftHld.connections) !== connectionKey(architecture.hld.connections);
+    return {
+      added,
+      removed,
+      modified,
+      connectionsChanged,
+      hasChanges: added.length > 0 || removed.length > 0 || modified.length > 0 || connectionsChanged,
+    };
+  }, [isEditing, draftHld, architecture, activeProvider]);
 
   // Run layout validations reactively when draftHld or activeProvider changes
   useEffect(() => {
@@ -1699,6 +1794,12 @@ export default function ArchitectureWorkspace({
       whatIfResultsRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
     }
   }, [whatIfPreview]);
+
+  useEffect(() => {
+    if (regeneratePreview && regeneratePreviewRef.current) {
+      regeneratePreviewRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [regeneratePreview]);
 
   const runWhatIfSimulation = async () => {
     if (!architecture) return;
@@ -4018,6 +4119,55 @@ export default function ArchitectureWorkspace({
                       </span>
                     </div>
 
+                    {/* Draft-vs-saved comparison (Workstream X) -- a running tally of everything
+                        that would change if "Save Changes" above is clicked, so the confirm step
+                        isn't a leap of faith. Same Added/Modified/Removed shape as the What-If and
+                        Regenerate preview diffs elsewhere on this page. */}
+                    {draftDiffSummary && (
+                      <div className="border-b border-line px-4 py-3 bg-paper/40">
+                        <span className="flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-wide text-ink-faint">
+                          Changes So Far (vs. Saved Version)
+                          <InfoTooltip text="Everything currently different in this draft compared to what's actually saved. Nothing here is permanent until you click 'Save Changes' above." />
+                        </span>
+                        {!draftDiffSummary.hasChanges ? (
+                          <p className="mt-1.5 text-xs italic text-ink-faint">No changes yet.</p>
+                        ) : (
+                          <div className="mt-1.5 flex flex-wrap gap-1.5">
+                            {draftDiffSummary.added.map((c) => (
+                              <span
+                                key={`added-${c.id}`}
+                                className="rounded-full border border-success/25 bg-success-soft px-2 py-0.5 text-[10px] font-bold text-success"
+                              >
+                                + {c.name}
+                              </span>
+                            ))}
+                            {draftDiffSummary.modified.map((m) => (
+                              <span
+                                key={`mod-${m.id}`}
+                                title={m.changes.map((ch) => `${ch.parameter}: ${ch.oldVal} → ${ch.newVal}`).join("; ")}
+                                className="rounded-full border border-warning/25 bg-warning-soft px-2 py-0.5 text-[10px] font-bold text-warning"
+                              >
+                                ~ {m.name}
+                              </span>
+                            ))}
+                            {draftDiffSummary.removed.map((c) => (
+                              <span
+                                key={`rem-${c.id}`}
+                                className="rounded-full border border-danger/25 bg-danger-soft px-2 py-0.5 text-[10px] font-bold text-danger line-through"
+                              >
+                                {c.name}
+                              </span>
+                            ))}
+                            {draftDiffSummary.connectionsChanged && (
+                              <span className="rounded-full border border-line-strong bg-paper px-2 py-0.5 text-[10px] font-bold text-ink-muted">
+                                Connections changed
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     <div className="space-y-6 px-4 py-4">
                       {/* Form 1: Add Component -- fields stacked full-width rather than squeezed
                           two-up: this column is narrow enough (diagram + drawer share the page)
@@ -4258,16 +4408,132 @@ export default function ArchitectureWorkspace({
                   Active Provider view: <strong className="uppercase">{activeProvider}</strong>
                 </span>
                 <span className="inline-flex items-center gap-1.5">
-                  <InfoTooltip text="Creates a new version (e.g. v0.1.0 → v0.1.1) from your current requirements — it does not overwrite this one. Past versions stay browsable from the Version dropdown above, with a full What-Changed diff." />
+                  <InfoTooltip text="Previews what regenerating from your current requirements would produce -- a new version (e.g. v0.1.0 → v0.1.1) compared against this one. Nothing is created until you review the preview and explicitly apply it. Past versions stay browsable from the Version dropdown above." />
                   <button
-                    onClick={handleGenerate}
-                    disabled={isGenerationBlocked}
+                    onClick={handlePreviewRegenerate}
+                    disabled={isGenerationBlocked || regeneratePreviewLoading}
                     className="rounded-xl bg-ink hover:bg-ink/90 text-white px-4 py-2 text-xs font-bold transition shadow-sm active:scale-95 disabled:opacity-50"
                   >
-                    Regenerate Design
+                    {regeneratePreviewLoading ? "Generating Preview..." : "Regenerate Design"}
                   </button>
                 </span>
               </div>
+
+              {/* Regenerate preview panel (Workstream X) -- reuses the exact same diff/cost
+                  rendering shape as the What-If preview above (both are compute_architecture_diff
+                  output), since "regenerate" is really just "what if nothing changed", run through
+                  the same preview-then-confirm pattern every other edit pathway here follows. */}
+              {regenerateError && <p className="mt-3 text-xs font-semibold text-danger">{regenerateError}</p>}
+              {regeneratePreview && (
+                <div ref={regeneratePreviewRef} className="mt-4 rounded-2xl border border-line bg-white shadow-sm animate-fadeIn scroll-mt-4">
+                  <div className="px-4 py-4 space-y-3">
+                    <span className="inline-flex items-center gap-1 rounded-full bg-ink px-2.5 py-1 text-[9px] font-extrabold uppercase tracking-wide text-white">
+                      <Icon icon="mdi:eye-outline" width={11} height={11} />
+                      Preview only — not saved
+                    </span>
+
+                    {(() => {
+                      const costPreview = regenerateCostPreview();
+                      if (!costPreview) return null;
+                      const wentUp = costPreview.after.min + costPreview.after.max > costPreview.before.min + costPreview.before.max;
+                      return (
+                        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                          <span className="text-ink-muted">Projected cost for {PROVIDER_LABELS[activeProvider]}:</span>
+                          <span className="font-bold text-ink">
+                            ${costPreview.before.min} - ${costPreview.before.max}/mo
+                          </span>
+                          <Icon icon="mdi:arrow-right" width={12} height={12} className="text-ink-faint" />
+                          <span className={`font-bold ${wentUp ? "text-warning" : "text-success"}`}>
+                            ${costPreview.after.min} - ${costPreview.after.max}/mo
+                          </span>
+                        </div>
+                      );
+                    })()}
+
+                    {regeneratePreview.recommendation && (
+                      <p className="mt-2 text-[11px] text-ink-muted">
+                        <span className="font-bold text-ink">Recommended provider: </span>
+                        {regeneratePreview.recommendation.recommendedProvider.toUpperCase()} — {regeneratePreview.recommendation.rationale}
+                      </p>
+                    )}
+
+                    {regeneratePreview.diff &&
+                    (regeneratePreview.diff.added?.length || regeneratePreview.diff.modified?.length || regeneratePreview.diff.removed?.length) ? (
+                      <div className="mt-3 grid gap-3 sm:grid-cols-3 border-t border-line pt-3">
+                        {regeneratePreview.diff.added?.length > 0 && (
+                          <div className="space-y-1.5">
+                            <span className="text-[9px] font-black text-success uppercase tracking-widest block bg-success-soft/60 border border-success/25 px-2 py-0.5 rounded w-max">
+                              + Added
+                            </span>
+                            <ul className="text-xs space-y-1.5 text-ink-muted">
+                              {regeneratePreview.diff.added.map((item, idx) => (
+                                <li key={idx}>
+                                  <span className="font-bold text-ink block">{item.name}</span>
+                                  <span className="block text-[10.5px] italic">{item.reasoning}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                        {regeneratePreview.diff.modified?.length > 0 && (
+                          <div className="space-y-1.5">
+                            <span className="text-[9px] font-black text-warning uppercase tracking-widest block bg-warning-soft/60 border border-warning/25 px-2 py-0.5 rounded w-max">
+                              ~ Modified
+                            </span>
+                            <ul className="text-xs space-y-2 text-ink-muted">
+                              {regeneratePreview.diff.modified.map((item, idx) => (
+                                <li key={idx}>
+                                  <span className="font-bold text-ink block">{item.name}</span>
+                                  {item.changes.map((ch, cIdx) => (
+                                    <div key={cIdx} className="mt-0.5 pl-2 border-l-2 border-line text-[10.5px]">
+                                      <span className="text-ink-faint line-through">{ch.oldVal}</span> ➜{" "}
+                                      <span className="font-bold text-ink">{ch.newVal}</span>
+                                    </div>
+                                  ))}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                        {regeneratePreview.diff.removed?.length > 0 && (
+                          <div className="space-y-1.5">
+                            <span className="text-[9px] font-black text-danger uppercase tracking-widest block bg-danger-soft/60 border border-danger/25 px-2 py-0.5 rounded w-max">
+                              − Removed
+                            </span>
+                            <ul className="text-xs space-y-1.5 text-ink-muted">
+                              {regeneratePreview.diff.removed.map((item, idx) => (
+                                <li key={idx}>
+                                  <span className="font-bold text-ink line-through block">{item.name}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="mt-2 text-xs text-ink-muted">
+                        No architecture changes detected -- regenerating would create an identical new version.
+                      </p>
+                    )}
+
+                    <div className="mt-3 flex items-center gap-2">
+                      <button
+                        onClick={handleGenerate}
+                        disabled={generating}
+                        className="rounded-xl bg-success px-3 py-1.5 text-xs font-bold uppercase text-white shadow-sm transition hover:opacity-90 active:scale-95 disabled:opacity-40"
+                      >
+                        {generating ? "Saving..." : "✓ Apply as New Version"}
+                      </button>
+                      <button
+                        onClick={() => setRegeneratePreview(null)}
+                        className="rounded-xl bg-ink-muted px-3 py-1.5 text-xs font-bold uppercase text-white shadow-sm transition hover:bg-ink active:scale-95"
+                      >
+                        Discard
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Topology Drawer (Right) */}
