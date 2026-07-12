@@ -1219,6 +1219,7 @@ export default function ArchitectureWorkspace({
   const [journeyVerificationCache, setJourneyVerificationCache] = useState<Record<string, JourneyVerification>>({});
   const [journeyLoading, setJourneyLoading] = useState(false);
   const [showFlowSteps, setShowFlowSteps] = useState(false);
+  const [flowStepsExpanded, setFlowStepsExpanded] = useState(false);
   const journeyKey = architecture ? `${architecture.id}:${activeProvider}` : null;
   const currentJourney = journeyKey ? journeyCache[journeyKey] : undefined;
   const currentJourneyVerification = journeyKey ? journeyVerificationCache[journeyKey] : undefined;
@@ -1271,7 +1272,7 @@ export default function ArchitectureWorkspace({
   // an edge wholly within one step, or bridging step i to step i+1, is colored accordingly.
   // Not memoized -- cheap pure function over a handful of connections, consistent with
   // diagramComponents/diagramConnections above, which are also plain recomputed consts.
-  const stepEdgeColors = showFlowSteps && currentJourney ? buildStepEdgeColors(currentJourney, diagramConnections) : {};
+  const stepEdgeInfo = showFlowSteps && currentJourney ? buildStepEdgeColors(currentJourney, diagramConnections) : {};
 
   const handleJourneyComponentClick = (componentId: string) => {
     setViewMode("diagram");
@@ -2346,16 +2347,54 @@ export default function ArchitectureWorkspace({
                             <span className="text-[9px] font-bold uppercase tracking-wide">Flow steps</span>
                           </button>
                           {showFlowSteps && currentJourney && currentJourney.length > 0 && (
-                            <div className="flex flex-col gap-1 rounded-lg border border-line-strong bg-panel px-2 py-1.5 shadow-sm">
+                            <div
+                              className={`flex flex-col gap-1.5 rounded-lg border border-line-strong bg-panel px-2.5 py-2 shadow-sm ${
+                                flowStepsExpanded ? "w-[340px]" : "w-[220px]"
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-[9px] font-extrabold uppercase tracking-wide text-ink-faint">
+                                  {currentJourney.length} step flow
+                                </span>
+                                <button
+                                  onClick={() => setFlowStepsExpanded((v) => !v)}
+                                  className="flex items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-bold uppercase tracking-wide text-accent-ink hover:bg-accent-soft"
+                                >
+                                  {flowStepsExpanded ? "Collapse" : "Expand"}
+                                  <Icon icon={flowStepsExpanded ? "mdi:chevron-up" : "mdi:chevron-down"} width={12} height={12} />
+                                </button>
+                              </div>
                               {currentJourney.map((step, idx) => (
-                                <div key={idx} className="flex items-center gap-1.5">
+                                <div key={idx} className="flex items-start gap-1.5">
                                   <span
-                                    className="h-2 w-2 flex-none rounded-full"
+                                    className="mt-0.5 flex h-3.5 w-3.5 flex-none items-center justify-center rounded-full text-[7px] font-extrabold text-white"
                                     style={{ backgroundColor: getStepColor(idx) }}
-                                  />
-                                  <span className="max-w-[160px] truncate text-[9px] font-semibold text-ink-muted">
-                                    {idx + 1}. {step.userAction}
+                                  >
+                                    {idx + 1}
                                   </span>
+                                  {flowStepsExpanded ? (
+                                    <div className="min-w-0 flex-1">
+                                      <p className="text-[10.5px] font-bold leading-snug text-ink">{step.userAction}</p>
+                                      <p className="mt-0.5 text-[9.5px] leading-relaxed text-ink-muted">{step.systemResponse}</p>
+                                      {step.componentIds.length > 0 && (
+                                        <div className="mt-1 flex flex-wrap gap-1">
+                                          {step.componentIds.map((cid) => (
+                                            <button
+                                              key={cid}
+                                              onClick={() => setSelectedNodeId(cid)}
+                                              className="rounded-full border border-line-strong bg-paper px-1.5 py-0.5 text-[8.5px] font-semibold text-ink-muted transition hover:border-accent hover:text-accent-ink"
+                                            >
+                                              {nodeNameById(cid)}
+                                            </button>
+                                          ))}
+                                        </div>
+                                      )}
+                                    </div>
+                                  ) : (
+                                    <span className="min-w-0 flex-1 text-[9.5px] font-semibold leading-snug text-ink-muted">
+                                      {step.userAction}
+                                    </span>
+                                  )}
                                 </div>
                               ))}
                               {currentJourneyVerification && (
@@ -2463,7 +2502,12 @@ export default function ArchitectureWorkspace({
                               // Flow-step color is a stroke override only -- `d` above came from
                               // the exact same ELK/elbow geometry every other edge uses, never a
                               // different, simpler line for colored edges.
-                              const stepColor = stepEdgeColors[`${conn.from}->${conn.to}`];
+                              const edgeInfo = stepEdgeInfo[`${conn.from}->${conn.to}`];
+                              const stepColor = edgeInfo?.color;
+                              // Badge placed at the polyline's middle vertex -- good enough to sit
+                              // ON the route (per the ask to mark steps directly on the diagram,
+                              // not only in the side legend) without full arc-length math.
+                              const midPoint = points[Math.floor((points.length - 1) / 2)];
                               return (
                                 <g key={idx}>
                                   <path
@@ -2484,6 +2528,21 @@ export default function ArchitectureWorkspace({
                                   >
                                     <animate attributeName="stroke-dashoffset" values="56;0" dur="3s" repeatCount="indefinite" />
                                   </path>
+                                  {edgeInfo && midPoint && (
+                                    <g>
+                                      <circle cx={midPoint.x} cy={midPoint.y} r={8} fill={edgeInfo.color} stroke="white" strokeWidth={1.5} />
+                                      <text
+                                        x={midPoint.x}
+                                        y={midPoint.y + 3}
+                                        textAnchor="middle"
+                                        fontSize={9}
+                                        fontWeight={800}
+                                        fill="white"
+                                      >
+                                        {edgeInfo.stepIndex + 1}
+                                      </text>
+                                    </g>
+                                  )}
                                 </g>
                               );
                             })}

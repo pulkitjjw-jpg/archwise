@@ -69,37 +69,36 @@ export function getStepColor(index: number): string {
   return STEP_COLORS[index % STEP_COLORS.length];
 }
 
+export type StepEdgeInfo = { color: string; stepIndex: number };
+
 // Maps each real connection (keyed "from->to", matching how edges are keyed elsewhere in the
-// diagram code) to the color of the step that traverses it -- either an edge wholly WITHIN one
-// step's components, or the transition edge bridging step i to step i+1. If two steps would claim
-// the same edge, the later step wins (last write), since journey steps are already ordered by the
-// sequence a user experiences them.
+// diagram code) to the step that "completes" it. Every component is assigned to the step it FIRST
+// appears in; an edge is then owned by whichever of its two endpoints appears LATER in the
+// sequence, since that's the step where the edge actually becomes part of the story being walked
+// through. This intentionally covers every edge between any two journey-touched components, not
+// only edges strictly within one step or between immediately-adjacent steps -- an earlier version
+// only colored those narrower cases and left most of a real diagram's edges an undifferentiated
+// default blue, which defeats the entire point of a multi-colored flow. A component untouched by
+// any step (truly outside the journey) leaves its edges uncolored, which is the one case where
+// falling back to the default color is correct.
 export function buildStepEdgeColors(
   steps: JourneyStep[],
   connections: VerificationConnection[]
-): Record<string, string> {
-  const edgeColors: Record<string, string> = {};
-
-  const colorEdgesBetween = (idsA: string[], idsB: string[], color: string) => {
-    for (const conn of connections) {
-      const key = `${conn.from}->${conn.to}`;
-      if (
-        (idsA.includes(conn.from) && idsB.includes(conn.to)) ||
-        (idsB.includes(conn.from) && idsA.includes(conn.to))
-      ) {
-        edgeColors[key] = color;
-      }
-    }
-  };
-
+): Record<string, StepEdgeInfo> {
+  const firstStepForComponent = new Map<string, number>();
   steps.forEach((step, idx) => {
-    const color = getStepColor(idx);
-    const ids = step.componentIds || [];
-    colorEdgesBetween(ids, ids, color);
-    if (idx < steps.length - 1) {
-      colorEdgesBetween(ids, steps[idx + 1].componentIds || [], color);
+    for (const cid of step.componentIds || []) {
+      if (!firstStepForComponent.has(cid)) firstStepForComponent.set(cid, idx);
     }
   });
 
-  return edgeColors;
+  const edgeInfo: Record<string, StepEdgeInfo> = {};
+  for (const conn of connections) {
+    const fromStep = firstStepForComponent.get(conn.from);
+    const toStep = firstStepForComponent.get(conn.to);
+    if (fromStep === undefined || toStep === undefined) continue;
+    const stepIndex = Math.max(fromStep, toStep);
+    edgeInfo[`${conn.from}->${conn.to}`] = { color: getStepColor(stepIndex), stepIndex };
+  }
+  return edgeInfo;
 }
