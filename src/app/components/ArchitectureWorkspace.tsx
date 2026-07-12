@@ -333,6 +333,15 @@ type JourneyStep = {
   componentIds: string[];
 };
 
+type SecurityFinding = {
+  severity: "high" | "medium" | "low";
+  title: string;
+  description: string;
+  componentId: string | null;
+  componentName: string | null;
+  recommendation: string;
+};
+
 type ArchitectureData = {
   id: string;
   version: string;
@@ -343,6 +352,7 @@ type ArchitectureData = {
   flowStory?: Record<string, string>;
   journeySteps?: Record<string, JourneyStep[]>;
   layoutOverrides?: Record<string, { x: number; y: number }>;
+  securityFindings?: Record<string, SecurityFinding[]>;
   reasoning: {
     decisions: any[];
     assumptions: string[];
@@ -1739,6 +1749,18 @@ export default function ArchitectureWorkspace({
   const totalMinCost = calculateTotalCost(activeProvider).min;
   const totalMaxCost = calculateTotalCost(activeProvider).max;
 
+  // Security Findings (Workstream T4) -- computed server-side, deterministically, at
+  // generate/manual-save time (see run_security_rules), stored per-provider since LLD config
+  // (and therefore findings) genuinely differs per provider. Older architecture versions saved
+  // before this feature existed simply have an empty findings list, not an error.
+  const currentSecurityFindings: SecurityFinding[] = architecture?.securityFindings?.[activeProvider] || [];
+  const [securityFindingsExpanded, setSecurityFindingsExpanded] = useState(false);
+  const SEVERITY_ORDER: Record<SecurityFinding["severity"], number> = { high: 0, medium: 1, low: 2 };
+  const sortedSecurityFindings = [...currentSecurityFindings].sort(
+    (a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]
+  );
+  const highSeverityCount = currentSecurityFindings.filter((f) => f.severity === "high").length;
+
   const getProviderCostDeltaString = (prov: CloudProviderKey) => {
     // costDelta is only ever computed for aws/azure/gcp (see architectures/route.ts) — cloud
     // spend deltas don't map cleanly onto Kubernetes/private cloud's hardware-amortized costs.
@@ -2622,6 +2644,100 @@ export default function ArchitectureWorkspace({
                   </div>
                 )}
 
+
+                {/* Security Findings (Workstream T4) -- a deterministic, rule-based audit (no
+                    LLM), collapsed by default so a clean design doesn't read as alarming, but the
+                    header always shows a severity-colored summary so a real problem is never
+                    hidden behind a click. */}
+                {architecture.securityFindings && (
+                  <div className="mt-4 rounded-2xl border border-line bg-white shadow-sm overflow-hidden">
+                    {/* InfoTooltip renders its own <button> internally, so it must be a SIBLING
+                        of the expand/collapse button below, never a descendant -- a <button>
+                        nested inside a <button> is invalid HTML and breaks hydration. */}
+                    <div className="flex w-full items-center justify-between gap-2 px-4 py-3">
+                      <button
+                        onClick={() => setSecurityFindingsExpanded((v) => !v)}
+                        className="flex flex-1 items-center gap-2 text-left"
+                      >
+                        <span className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-ink">
+                          <Icon icon="mdi:shield-search-outline" width={15} height={15} />
+                          Security Findings
+                          {currentSecurityFindings.length === 0 ? (
+                            <span className="rounded-full bg-success-soft border border-success/25 px-2 py-0.5 text-[9px] font-extrabold text-success">
+                              No issues found
+                            </span>
+                          ) : (
+                            <span
+                              className={`rounded-full border px-2 py-0.5 text-[9px] font-extrabold ${
+                                highSeverityCount > 0
+                                  ? "bg-danger-soft border-danger/25 text-danger"
+                                  : "bg-warning-soft border-warning/25 text-warning"
+                              }`}
+                            >
+                              {currentSecurityFindings.length} finding{currentSecurityFindings.length === 1 ? "" : "s"}
+                              {highSeverityCount > 0 ? ` — ${highSeverityCount} high` : ""}
+                            </span>
+                          )}
+                        </span>
+                        <Icon icon={securityFindingsExpanded ? "mdi:chevron-up" : "mdi:chevron-down"} width={16} height={16} className="ml-auto text-ink-faint" />
+                      </button>
+                      <InfoTooltip text="An automated, deterministic audit (not an LLM guess) checking for common gaps: missing encryption, public components connecting straight to a data store, missing authentication, missing audit logging, missing database failover/backups. Scoped to the currently selected provider, since the underlying configuration differs per provider." />
+                    </div>
+                    {securityFindingsExpanded && (
+                      <div className="border-t border-line px-4 py-3">
+                        {sortedSecurityFindings.length === 0 ? (
+                          <p className="text-xs text-ink-muted">
+                            No security gaps detected by this design&apos;s automated checks for {PROVIDER_LABELS[activeProvider]}.
+                          </p>
+                        ) : (
+                          <div className="space-y-2">
+                            {sortedSecurityFindings.map((f, idx) => (
+                              <div
+                                key={idx}
+                                className={`rounded-xl border p-3 text-xs ${
+                                  f.severity === "high"
+                                    ? "border-danger/25 bg-danger-soft/40"
+                                    : f.severity === "medium"
+                                      ? "border-warning/25 bg-warning-soft/40"
+                                      : "border-line bg-paper/60"
+                                }`}
+                              >
+                                <div className="flex items-start justify-between gap-2">
+                                  <span className="font-bold text-ink">{f.title}</span>
+                                  <span
+                                    className={`flex-none rounded-full px-2 py-0.5 text-[9px] font-extrabold uppercase ${
+                                      f.severity === "high"
+                                        ? "bg-danger text-white"
+                                        : f.severity === "medium"
+                                          ? "bg-warning text-white"
+                                          : "bg-line-strong text-ink-muted"
+                                    }`}
+                                  >
+                                    {f.severity}
+                                  </span>
+                                </div>
+                                <p className="mt-1 text-ink-muted">{f.description}</p>
+                                {f.componentName && (
+                                  <button
+                                    onClick={() => f.componentId && setSelectedNodeId(f.componentId)}
+                                    className="mt-1.5 inline-flex items-center gap-1 rounded-full border border-line-strong bg-white px-2 py-0.5 text-[10px] font-semibold text-ink-muted hover:border-accent hover:text-accent-ink"
+                                  >
+                                    <Icon icon="mdi:cube-outline" width={11} height={11} />
+                                    {f.componentName}
+                                  </button>
+                                )}
+                                <p className="mt-1.5 flex items-start gap-1 text-[11px] text-ink">
+                                  <Icon icon="mdi:wrench-outline" width={12} height={12} className="mt-0.5 flex-none text-ink-faint" />
+                                  {f.recommendation}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {/* What Changed Diff Panel */}
                 {architecture.reasoning.diff && (

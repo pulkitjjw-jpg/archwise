@@ -48,5 +48,6 @@ def serialize_architecture(a: Architecture) -> dict:
         "flowStory": a.flow_story,
         "journeySteps": a.journey_steps,
         "layoutOverrides": a.layout_overrides,
+        "securityFindings": a.security_findings,
         "createdAt": a.created_at,
     }

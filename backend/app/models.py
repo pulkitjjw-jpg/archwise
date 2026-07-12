@@ -124,6 +124,14 @@ class Architecture(Base):
     layout_overrides: Mapped[dict[str, dict[str, float]]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
+    # Keyed by provider, each value a list of finding dicts from the deterministic security-rules
+    # audit (Workstream T4, app/services/security_rules.py). Unlike flow_story/journey_steps
+    # above, this is NOT a lazy cache -- it's cheap, deterministic, no LLM call -- so all 5
+    # providers are computed and stored up front at generation/manual-save time, the same moment
+    # hld/reasoning are set, rather than lazily per-provider on first view.
+    security_findings: Mapped[dict[str, list[dict]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
     )

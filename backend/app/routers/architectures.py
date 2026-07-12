@@ -23,6 +23,7 @@ from app.services.llm import (
 )
 from app.services.path_verification import verify_journey_path
 from app.services.rules_engine import run_rules_engine
+from app.services.security_rules import run_security_rules
 from app.services.validation import validate_architecture_layout
 
 router = APIRouter()
@@ -498,6 +499,14 @@ async def generate_architecture(project_id: uuid.UUID, db: AsyncSession = Depend
             },
         )
 
+    # 8b. Deterministic security-posture audit (Workstream T4) -- cheap enough (no LLM) to compute
+    # for all 5 providers up front rather than lazily, since LLD config (and therefore findings)
+    # genuinely differs per provider.
+    security_findings = {
+        prov: run_security_rules(enriched["components"], enriched["connections"], industry_context, prov)
+        for prov in ("aws", "azure", "gcp", "kubernetes", "private")
+    }
+
     # 9. Save new architecture version with all three cloud mappings, recommendations, and LLD specs
     record = Architecture(
         project_id=project_id,
@@ -520,6 +529,7 @@ async def generate_architecture(project_id: uuid.UUID, db: AsyncSession = Depend
             "diff": diff,
         },
         cloud_provider="aws",
+        security_findings=security_findings,
     )
     db.add(record)
     await db.flush()
@@ -612,6 +622,14 @@ async def save_manual_architecture(
         {"defaultAddedReasoning": "Manually added by user.", "defaultChangeReasoning": "Manually changed by user."},
     )
 
+    # 6b. Same deterministic security-posture audit as auto-generate -- must be recomputed here
+    # too since manual edits (add/remove/rewire components) can change findings just as much as
+    # a fresh generation can.
+    security_findings = {
+        prov: run_security_rules(compiled_components, connections, industry_context, prov)
+        for prov in ("aws", "azure", "gcp", "kubernetes", "private")
+    }
+
     # 7. Save manual architecture version
     record = Architecture(
         project_id=project_id,
@@ -633,6 +651,7 @@ async def save_manual_architecture(
             "diff": diff,
         },
         cloud_provider=(latest_arch.cloud_provider if latest_arch else "aws"),
+        security_findings=security_findings,
     )
     db.add(record)
     await db.flush()
