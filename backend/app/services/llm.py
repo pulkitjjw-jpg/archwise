@@ -321,11 +321,23 @@ Do not include markdown code block formatting (like ```json) in your response, r
     return await _call_llm_with_retry(api_key, messages_for_api, "Requirement extraction")
 
 
-async def generate_conversation_summary(history: list[dict[str, str]], requirements: dict, api_key: str) -> str:
+async def generate_conversation_summary(
+    history: list[dict[str, str]], requirements: dict, api_key: str, knowledge_context: list[dict] | None = None
+) -> dict:
     """Generates the Conversation Summary section's brief -- a short readable narrative of the
     discovery conversation, not a transcript restatement. Called lazily (not on every requirements
-    save) and cached by the caller on the requirements row it was generated for."""
-    system_instruction = """
+    save) and cached by the caller on the requirements row it was generated for. Returns
+    {"summary": str, "sources": list[dict]} -- sources is a whole-summary-level citation list
+    (this is one paragraph of prose, not per-component output), empty when nothing retrieved was
+    genuinely relevant."""
+    knowledge_instruction = ""
+    if knowledge_context:
+        knowledge_instruction = """
+- You are also given "referenceExcerpts" -- passages from real software-engineering reference books, retrieved because they were judged relevant to this product's requirements. If a passage genuinely helps explain WHY a decision in this summary makes sense (not just topically related), you may ground a sentence in it. Add a top-level "sources" array: [{"book": string, "chapterOrSection": string, "page": string}], using the exact bookTitle/chapterTitle/pageStart-pageEnd values given, ONLY for excerpts you genuinely drew on. If nothing given is genuinely relevant to what you wrote, return an empty "sources" array -- do not force one.
+"""
+
+    system_instruction = (
+        """
 You are a senior systems analyst writing a short, readable brief that summarizes a product discovery conversation for someone who wasn't in the room -- a teammate skimming the project later, or the user themselves reviewing what was decided.
 
 Write 3 to 5 sentences of flowing prose covering: what the user described building, what the AI asked or clarified along the way, what was ultimately decided (functional scope, scale, budget, compliance posture), and briefly why -- tie conclusions to specific things the user actually said.
@@ -334,30 +346,60 @@ Rules:
 - Prose, not a bullet list or a blow-by-blow transcript restatement ("The user said X, then the AI asked Y...").
 - Be concrete: use the real numbers and details from the conversation and requirements, not vague generalities like "a scalable solution".
 - Do not editorialize or add caveats that aren't grounded in the conversation.
-
+"""
+        + knowledge_instruction
+        + """
 You MUST respond with a raw JSON object matching this structure:
-{ "summary": string }
+{ "summary": string, "sources": [{"book": string, "chapterOrSection": string, "page": string}] }
 Do not include markdown code block formatting (like ```json) in your response, return only the raw JSON.
 """
+    )
 
     input_context = {"conversationHistory": history, "finalRequirements": requirements}
+    if knowledge_context:
+        input_context["referenceExcerpts"] = [
+            {
+                "bookTitle": c["bookTitle"],
+                "author": c["author"],
+                "chapterTitle": c.get("chapterTitle"),
+                "pageStart": c["pageStart"],
+                "pageEnd": c["pageEnd"],
+                "text": c["text"],
+            }
+            for c in knowledge_context
+        ]
+
     messages_for_api = [
         {"role": "system", "content": system_instruction},
         {"role": "user", "content": json.dumps(input_context)},
     ]
     result = await _call_llm_with_retry(api_key, messages_for_api, "Conversation summary generation")
-    return result["summary"]
+    return {"summary": result["summary"], "sources": result.get("sources") or []}
 
 
 async def generate_flow_story(
-    provider: str, components: list[dict], connections: list[dict], functional: list[str], api_key: str
-) -> str:
+    provider: str,
+    components: list[dict],
+    connections: list[dict],
+    functional: list[str],
+    api_key: str,
+    knowledge_context: list[dict] | None = None,
+) -> dict:
     """Generates the Architecture Flow Story section for one provider -- a plain-language,
     step-by-step walkthrough of request/data flow, synthesized from the real per-provider service
     names and each component's already-computed reasoning (not regenerated from scratch, and not
     generic per-service boilerplate). Called lazily per provider and cached by the caller on the
-    architecture row's flow_story[provider] key."""
-    system_instruction = """
+    architecture row's flow_story[provider] key. Returns {"story": str, "sources": list[dict]} --
+    sources is a whole-narrative-level citation list, empty when nothing retrieved was genuinely
+    relevant."""
+    knowledge_instruction = ""
+    if knowledge_context:
+        knowledge_instruction = """
+- You are also given "referenceExcerpts" -- passages from real software-architecture reference books, retrieved because they were judged relevant to this architecture's component makeup. If a passage genuinely helps explain WHY the flow works the way it does (not just topically related), you may ground a sentence in it. Add a top-level "sources" array: [{"book": string, "chapterOrSection": string, "page": string}], using the exact bookTitle/chapterTitle/pageStart-pageEnd values given, ONLY for excerpts you genuinely drew on. If nothing given is genuinely relevant, return an empty "sources" array -- do not force one.
+"""
+
+    system_instruction = (
+        """
 You are a senior cloud systems architect writing a plain-language, step-by-step walkthrough of how a request actually flows through a generated architecture, for someone with zero architecture background.
 
 You are given the component list (each with the REAL cloud service chosen for it on this specific provider, and the genuine architect reasoning for why it exists), the connections between components, and the product's functional requirements.
@@ -369,11 +411,14 @@ Rules:
 - Ground every claim in the provided components/connections/reasoning -- do not invent behavior not present in the data.
 - Tie specific steps back to the actual functional requirements where relevant (e.g. "since the product needs SMS reminders, the notification worker sends to...").
 - Write for a total beginner: explain WHY a step happens, not just that it happens.
-
+"""
+        + knowledge_instruction
+        + """
 You MUST respond with a raw JSON object matching this structure:
-{ "story": string }
+{ "story": string, "sources": [{"book": string, "chapterOrSection": string, "page": string}] }
 Do not include markdown code block formatting (like ```json) in your response, return only the raw JSON.
 """
+    )
 
     input_context = {
         "provider": provider,
@@ -381,12 +426,24 @@ Do not include markdown code block formatting (like ```json) in your response, r
         "connections": connections,
         "functionalRequirements": functional,
     }
+    if knowledge_context:
+        input_context["referenceExcerpts"] = [
+            {
+                "bookTitle": c["bookTitle"],
+                "author": c["author"],
+                "chapterTitle": c.get("chapterTitle"),
+                "pageStart": c["pageStart"],
+                "pageEnd": c["pageEnd"],
+                "text": c["text"],
+            }
+            for c in knowledge_context
+        ]
     messages_for_api = [
         {"role": "system", "content": system_instruction},
         {"role": "user", "content": json.dumps(input_context)},
     ]
     result = await _call_llm_with_retry(api_key, messages_for_api, "Flow story generation")
-    return result["story"]
+    return {"story": result["story"], "sources": result.get("sources") or []}
 
 
 async def generate_user_journey(
@@ -780,12 +837,21 @@ Do not include markdown code block formatting (like ```json) in your raw respons
     return {"assistantReply": result.get("assistantReply") or "", "proposal": result["proposal"]}
 
 
-async def generate_requirement_suggestions(functional: list[str], non_functional: dict, api_key: str) -> dict:
+async def generate_requirement_suggestions(
+    functional: list[str], non_functional: dict, api_key: str, knowledge_context: list[dict] | None = None
+) -> dict:
     """Generates clickable-chip candidate values for the Requirements panel's editable fields, so
     the user can select instead of typing. Called on-demand (not persisted) whenever the panel
     needs fresh suggestions -- functional/non_functional reflect whatever the user has typed or
     selected so far, so suggestions stay relevant as the user edits."""
-    system_instruction = """
+    knowledge_instruction = ""
+    if knowledge_context:
+        knowledge_instruction = """
+- You are also given "referenceExcerpts" -- passages from real requirements-engineering / software-architecture reference books, retrieved because they were judged relevant to this product's requirements. Where a passage genuinely informs why a specific suggested value is a sound non-functional requirement (e.g. it should be measurable, testable, tied to a real business driver), you may add a "sources" array to that SAME suggestion object: [{"book": string, "chapterOrSection": string, "page": string}], using the exact bookTitle/chapterTitle/pageStart-pageEnd values given. Only add it where genuinely used -- most suggestions will have none, and that's correct. Never fabricate a title, chapter, or page number.
+"""
+
+    system_instruction = (
+        """
 You are a senior cloud systems architect helping a user fill in system requirements for their product. Given their described functional capabilities and current non-functional requirement values (some may be "not_specified"), suggest realistic, concrete candidate values the user can pick with one click instead of typing.
 
 Rules:
@@ -794,10 +860,12 @@ Rules:
 - For each suggestion, also write "why": one short clause (under 15 words) tying it back to a SPECIFIC detail from the product description or requirements given — e.g. "since you mentioned live booking, spikes are likely at peak hours", not a generic restatement like "a common choice for this field". If nothing in the input justifies a suggestion, don't include a "why" that pretends otherwise — ground it in what's actually there.
 - Do this for every field even if it already has a specified value — the user may want a different concrete option; don't just restate their current value.
 - Also suggest 3 to 5 additional FUNCTIONAL capabilities this product likely needs that are NOT already in the provided list — concrete and product-specific, not generic boilerplate (avoid vague items like "user authentication"; prefer specific ones like "customers can reschedule a booking without calling the salon"). Each also gets a "why" clause.
-
-You MUST respond with a raw JSON object matching this structure (every array entry is an object with "value" and "why", not a bare string):
+"""
+        + knowledge_instruction
+        + """
+You MUST respond with a raw JSON object matching this structure (every array entry is an object with "value" and "why", not a bare string; "sources" is optional and only present when genuinely grounded):
 {
-  "expectedScale": [{"value": string, "why": string}],
+  "expectedScale": [{"value": string, "why": string, "sources": [{"book": string, "chapterOrSection": string, "page": string}]}],
   "readWritePattern": [{"value": string, "why": string}],
   "dataNature": [{"value": string, "why": string}],
   "latencySensitivity": [{"value": string, "why": string}],
@@ -808,8 +876,21 @@ You MUST respond with a raw JSON object matching this structure (every array ent
 }
 Do not include markdown code block formatting (like ```json) in your response, return only the raw JSON.
 """
+    )
 
     input_context = {"functional": functional, "nonFunctional": non_functional}
+    if knowledge_context:
+        input_context["referenceExcerpts"] = [
+            {
+                "bookTitle": c["bookTitle"],
+                "author": c["author"],
+                "chapterTitle": c.get("chapterTitle"),
+                "pageStart": c["pageStart"],
+                "pageEnd": c["pageEnd"],
+                "text": c["text"],
+            }
+            for c in knowledge_context
+        ]
 
     messages_for_api = [
         {"role": "system", "content": system_instruction},
@@ -826,8 +907,18 @@ async def validate_and_generate_architecture(
     provider_costs: dict,
     api_key: str,
     prev_hld_components: list[dict] | None = None,
+    knowledge_context: list[dict] | None = None,
 ) -> dict:
-    system_instruction = """
+    knowledge_instruction = ""
+    if knowledge_context:
+        knowledge_instruction = """
+5. You are also given "referenceExcerpts" -- passages retrieved from real architecture/software-engineering reference books because they were judged relevant to this specific design (e.g. monolith-vs-microservices trade-offs, layering, component boundaries). Where a passage genuinely informs a component's reasoning or the provider recommendation, you may ground that reasoning in it and cite it naturally in the prose (e.g. "as [Book Title] notes, ..."), and add a "sources" array to that SAME component (or to "recommendation") listing which excerpt(s) you actually drew on: [{"book": string, "chapterOrSection": string, "page": string}], using the exact bookTitle/chapterTitle/pageStart-pageEnd values from that excerpt.
+   - Only add a "sources" entry where you genuinely used that excerpt's content -- never cite an excerpt you didn't actually draw on just because it was provided. Most components will have NO sources array at all; that's expected and correct when nothing retrieved was actually relevant to that specific component.
+   - Never fabricate a book title, chapter, or page number -- only use the exact values given in referenceExcerpts.
+"""
+
+    system_instruction = (
+        """
 You are a senior cloud systems architect. You are given a product name, the extracted requirements, a baseline High-Level Design (HLD) architecture containing multi-cloud service mappings and low-level design (LLD) baseline configurations, the aggregated monthly cost estimates, and optionally the previous version's architecture components list.
 
 Your task is to:
@@ -840,7 +931,9 @@ Your task is to:
 3. List any 'assumptions' or 'risks' that are present in the design due to requirements being marked as "not_specified".
 4. Determine the Recommended Cloud Provider ('aws', 'azure', or 'gcp') and write a short paragraph rationale explaining why it is recommended over the others, along with a list of key trade-offs.
    - If the previous version's components list is provided, that's for your context only (e.g. to avoid contradicting a prior decision) — the server computes the version-to-version diff itself; do not attempt to summarize or list changes yourself.
-
+"""
+        + knowledge_instruction
+        + """
 You MUST respond with a raw JSON object matching this structure:
 {
   "components": [
@@ -851,6 +944,7 @@ You MUST respond with a raw JSON object matching this structure:
       "description": string,
       "reasoning": string,
       "rulesFired": string[],
+      "sources": [ { "book": string, "chapterOrSection": string, "page": string } ],
       "cloudMappings": {
         "aws": {
           "serviceName": string,
@@ -890,11 +984,13 @@ You MUST respond with a raw JSON object matching this structure:
   "recommendation": {
     "recommendedProvider": "aws" | "azure" | "gcp",
     "rationale": string,
-    "keyTradeoffs": [string, string, ...]
+    "keyTradeoffs": [string, string, ...],
+    "sources": [ { "book": string, "chapterOrSection": string, "page": string } ]
   }
 }
 Do not use markdown code block formatting (like ```json) in your response, return only the raw JSON.
 """
+    )
 
     input_context = {
         "projectName": project_name,
@@ -903,6 +999,18 @@ Do not use markdown code block formatting (like ```json) in your response, retur
         "providerCosts": provider_costs,
         "previousArchitectureComponents": prev_hld_components or None,
     }
+    if knowledge_context:
+        input_context["referenceExcerpts"] = [
+            {
+                "bookTitle": c["bookTitle"],
+                "author": c["author"],
+                "chapterTitle": c.get("chapterTitle"),
+                "pageStart": c["pageStart"],
+                "pageEnd": c["pageEnd"],
+                "text": c["text"],
+            }
+            for c in knowledge_context
+        ]
 
     messages_for_api = [
         {"role": "system", "content": system_instruction},
@@ -910,3 +1018,29 @@ Do not use markdown code block formatting (like ```json) in your response, retur
     ]
 
     return await _call_llm_with_retry(api_key, messages_for_api, "Architecture generation")
+
+
+async def tag_knowledge_chunk_topics(chunk_text: str, book_title: str, api_key: str) -> list[str]:
+    """Knowledge-base ingestion (RAG) -- one LLM pass per chunk (called from the offline ingestion
+    script, never from a request handler), generating short topic-tag slugs like "monolith-vs-
+    microservices" for human-readable inspection of the ingested corpus. Retrieval itself
+    (knowledge_retrieval.py) is purely embedding-similarity based and never filters on these tags
+    -- they're metadata for a human skimming what got ingested, not a search index."""
+    system_instruction = """
+You are tagging a chunk of text from a software architecture / software engineering reference book with short topic slugs, for a searchable knowledge base.
+
+Given the chunk of text, return 2 to 5 short kebab-case topic tags describing what architectural/software-engineering topics this SPECIFIC passage covers -- e.g. "monolith-vs-microservices", "layered-architecture", "non-functional-requirements", "component-design", "event-driven-architecture", "coupling-cohesion", "api-design", "database-design", "testing-strategy". Be specific to what this passage actually discusses, not the book's overall subject.
+
+If the passage is front matter, a table of contents, an acknowledgment, a dedication, or otherwise doesn't cover a real architectural/engineering topic, return an empty array rather than forcing a tag.
+
+You MUST respond with a raw JSON object matching this structure:
+{"tags": [string, string, ...]}
+Do not include markdown code block formatting (like ```json) in your response, return only the raw JSON.
+"""
+    input_context = {"bookTitle": book_title, "text": chunk_text}
+    messages_for_api = [
+        {"role": "system", "content": system_instruction},
+        {"role": "user", "content": json.dumps(input_context)},
+    ]
+    result = await _call_llm_with_retry(api_key, messages_for_api, "Knowledge chunk tagging")
+    return result.get("tags", [])

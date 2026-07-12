@@ -19,6 +19,13 @@ from app.schemas import (
 from app.serializers import serialize_architecture
 from app.services.architecture_diff import calculate_total_cost, compute_architecture_diff
 from app.services.architecture_generation import build_cloud_mapping, generate_architecture_bundle
+from app.services.knowledge_retrieval import (
+    build_flow_story_query,
+    build_requirements_context_query,
+    chunk_to_prompt_dict,
+    enrich_citations,
+    retrieve_relevant_knowledge,
+)
 from app.services.llm import (
     generate_component_suggestions,
     generate_flow_story,
@@ -179,14 +186,23 @@ async def _get_or_generate_flow_story(db: AsyncSession, record: Architecture, pr
     provider_components = _provider_components(record.hld.get("components", []), provider)
     connections = record.hld.get("connections", [])
 
-    story = await generate_flow_story(provider, provider_components, connections, functional, settings.openrouter_api_key)
+    # Knowledge-base RAG (Step 4 priority 2). Grounded in the actual component makeup of this
+    # architecture, not the raw requirements -- see build_flow_story_query's docstring.
+    knowledge_chunks = await retrieve_relevant_knowledge(db, build_flow_story_query(provider_components, functional))
+    knowledge_context = [chunk_to_prompt_dict(c) for c in knowledge_chunks]
+
+    result = await generate_flow_story(
+        provider, provider_components, connections, functional, settings.openrouter_api_key, knowledge_context
+    )
+    sources = enrich_citations(result["sources"], knowledge_context)
 
     # Cache-only UPDATE on an otherwise-immutable versioned row -- see Architecture.flow_story's
     # docstring in models.py. SQLAlchemy won't detect a plain in-place dict mutation on a JSONB
     # column as a change, so reassign the whole dict rather than record.flow_story[provider] = ...
-    record.flow_story = {**record.flow_story, provider: story}
+    record.flow_story = {**record.flow_story, provider: result["story"]}
+    record.flow_story_sources = {**record.flow_story_sources, provider: sources}
     await db.commit()
-    return story
+    return result["story"]
 
 
 @router.post("/projects/{project_id}/architectures/{architecture_id}/flow-story")
@@ -205,7 +221,7 @@ async def get_flow_story(
         raise HTTPException(status_code=404, detail="Architecture version not found")
 
     story = await _get_or_generate_flow_story(db, record, project_id, provider)
-    return {"story": story}
+    return {"story": story, "sources": record.flow_story_sources.get(provider, [])}
 
 
 @router.post("/projects/{project_id}/architectures/{architecture_id}/journey")
@@ -562,6 +578,16 @@ async def generate_architecture(project_id: uuid.UUID, db: AsyncSession = Depend
     latest_arch = await _latest_architecture(db, project_id)
     next_version = _next_version(latest_arch)
 
+    # 3b. Knowledge-base RAG (highest-value touchpoint per the rollout plan: monolith-vs-
+    # microservices, layering, component-boundary reasoning). Retrieval happens HERE, not inside
+    # generate_architecture_bundle, since that module deliberately has no database access -- this
+    # is the one place in the whole pipeline with both a DB session and the requirements context
+    # available before the LLM call. An empty list (nothing cleared the similarity threshold) is
+    # passed through unchanged; validate_and_generate_architecture treats that as "no grounding
+    # available" and never fabricates a citation.
+    knowledge_chunks = await retrieve_relevant_knowledge(db, build_requirements_context_query(reqs_context, industry_context))
+    knowledge_context = [chunk_to_prompt_dict(c) for c in knowledge_chunks]
+
     # 4. The shared rules-engine + LLM-validation + cloud-mapping pipeline (architecture_
     # generation.py) -- identical to what the What-If preview endpoint below calls, just against
     # this project's real saved requirements instead of hypothetical ones.
@@ -571,7 +597,21 @@ async def generate_architecture(project_id: uuid.UUID, db: AsyncSession = Depend
         industry_context,
         settings.openrouter_api_key,
         latest_arch.hld["components"] if latest_arch else None,
+        knowledge_context,
     )
+
+    # Attach the real stored excerpt text to whichever citations the LLM actually cited -- see
+    # enrich_citations' docstring. A citation with no matching retrieved chunk is dropped rather
+    # than shown without backing content.
+    for c in bundle["components"]:
+        if c.get("sources"):
+            c["sources"] = enrich_citations(c["sources"], knowledge_context)
+            if not c["sources"]:
+                del c["sources"]
+    if bundle.get("recommendation", {}).get("sources"):
+        bundle["recommendation"]["sources"] = enrich_citations(bundle["recommendation"]["sources"], knowledge_context)
+        if not bundle["recommendation"]["sources"]:
+            del bundle["recommendation"]["sources"]
 
     # 5. Save new architecture version with all five cloud mappings, recommendations, LLD specs,
     # and security findings.

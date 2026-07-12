@@ -33,11 +33,19 @@ async def generate_architecture_bundle(
     industry_context: dict,
     api_key: str,
     prev_components: list[dict] | None = None,
+    knowledge_context: list[dict] | None = None,
 ) -> dict:
     """Runs the full pipeline: deterministic rules -> industry compliance layer -> cloud mapping
     for all 5 providers -> LLM validation/enrichment -> diff against prev_components (if given) ->
     security audit. Returns everything a caller needs to either persist a new Architecture row or
-    show an unsaved preview -- the caller decides which, this function never touches a database."""
+    show an unsaved preview -- the caller decides which, this function never touches a database.
+
+    knowledge_context (Workstream: knowledge-base RAG) -- pre-retrieved chunks from the
+    architecture/software-engineering book corpus, each {bookTitle, author, chapterTitle,
+    pageStart, pageEnd, text, similarity}, or None/empty if nothing cleared the relevance
+    threshold. Retrieval itself happens in the ROUTER (which has the DB session), not here -- this
+    module's "no database access" invariant stays intact; it only ever receives already-resolved
+    plain data, same as reqs_context/industry_context/prev_components."""
     # 1. Deterministic rules baseline, then industry-specific compliance components layered on top
     # (audit log, tokenization, PHI vault, de-identification -- see industry_rules.py). A generic
     # project (industry: "none") gets nothing extra here.
@@ -90,6 +98,7 @@ async def generate_architecture_bundle(
         provider_costs,
         api_key,
         prev_components,
+        knowledge_context,
     )
 
     # Merge deterministic industry-rule risks in alongside whatever the LLM itself surfaced.

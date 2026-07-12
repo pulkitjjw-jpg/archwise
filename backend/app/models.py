@@ -2,10 +2,12 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import Boolean, ForeignKey, Integer, Text, text
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.constants import KNOWLEDGE_EMBEDDING_DIM
 from app.db import Base
 
 # Mirrors drizzle/0003_vengeful_zaran.sql's server_default exactly (verified against the live
@@ -123,6 +125,13 @@ class Requirement(Base):
     # never a change to the requirements content itself, so it doesn't violate the "insert new
     # version, never mutate" pattern the rest of this table follows.
     conversation_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Knowledge-base RAG citations for conversation_summary, set together with it (same lazy-
+    # generate-once-then-cache lifecycle) -- a SEPARATE sidecar column rather than folding into
+    # conversation_summary itself, since that's a plain Text column already read as a bare string
+    # everywhere on the frontend; adding this alongside avoids reshaping every existing reader.
+    # NULL until conversation_summary is generated; [] (not NULL) once generated with no genuine
+    # citations found, so the UI can distinguish "not generated yet" from "generated, nothing to cite".
+    conversation_summary_sources: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
     )
@@ -149,6 +158,14 @@ class Architecture(Base):
     # that already takes ~30-45s. Same "derived cache, not content" reasoning as
     # Requirement.conversation_summary applies to updating this after insert.
     flow_story: Mapped[dict[str, str]] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    # Knowledge-base RAG citations for flow_story, keyed by the same provider key -- a SEPARATE
+    # sidecar column (not folded into flow_story[provider] itself) since flow_story's value is a
+    # plain string read directly as narrative text everywhere on the frontend today; changing that
+    # to an object would mean updating every existing reader. A provider key with no entry here
+    # means "not generated yet or nothing to cite", same semantics as flow_story itself.
+    flow_story_sources: Mapped[dict[str, list[dict[str, Any]]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
     # Keyed by provider, each value a list of {userAction, systemResponse, componentIds} step
     # objects -- the "User Journey Architecture" view's step-by-step breakdown. Synthesized FROM
     # flow_story[provider] (never generated independently of it -- see get_user_journey in
@@ -184,3 +201,33 @@ class Architecture(Base):
     )
 
     project: Mapped["Project"] = relationship(back_populates="architectures")
+
+
+class KnowledgeChunk(Base):
+    """A chunk of text from one of the ingested architecture/software-engineering reference books
+    (see app/services/knowledge_ingestion.py), plus its embedding for similarity search. Not tied
+    to any project -- this is a single shared, global corpus every project's reasoning can draw
+    from. Populated by the offline ingestion script (backend/scripts/ingest_knowledge_base.py),
+    never written to from a request handler."""
+
+    __tablename__ = "knowledge_chunks"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    book_title: Mapped[str] = mapped_column(Text, nullable=False)
+    author: Mapped[str] = mapped_column(Text, nullable=False)
+    # Best-effort, regex-heuristic section-heading detection at ingestion time -- "Unknown
+    # section" when no heading could be confidently detected above this chunk, never a guess.
+    chapter_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    page_start: Mapped[int] = mapped_column(Integer, nullable=False)
+    page_end: Mapped[int] = mapped_column(Integer, nullable=False)
+    chunk_text: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding: Mapped[list[float]] = mapped_column(Vector(KNOWLEDGE_EMBEDDING_DIM), nullable=False)
+    # LLM-generated during ingestion (one pass per chunk) -- short topic slugs like
+    # "monolith-vs-microservices", used only for human-readable inspection/debugging right now;
+    # retrieval itself is purely embedding-similarity-based, not a tag filter.
+    topic_tags: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
+    )

@@ -10,6 +10,12 @@ from app.db import get_db
 from app.models import Conversation, Requirement
 from app.schemas import RequirementsPutRequest
 from app.serializers import serialize_requirement
+from app.services.knowledge_retrieval import (
+    build_requirements_context_query,
+    chunk_to_prompt_dict,
+    enrich_citations,
+    retrieve_relevant_knowledge,
+)
 from app.services.llm import (
     extract_requirements_from_history,
     generate_conversation_summary,
@@ -88,11 +94,33 @@ async def get_requirement_suggestions(
     # Stateless and not persisted -- recomputed on demand from whatever the client currently has
     # (saved values, or the user's in-progress edit-mode draft), so suggestions stay relevant as
     # the user types/selects rather than freezing at whatever was last saved.
+    functional = payload.functional if isinstance(payload.functional, list) else []
+    industry_context = payload.industryContext or DEFAULT_INDUSTRY_CONTEXT
+
+    # Knowledge-base RAG (Step 4 priority 3: NFR reasoning, Sommerville's requirements-engineering
+    # chapters in particular). Same pattern as HLD generation -- retrieve here (router has the DB
+    # session), pass plain dicts into the LLM layer.
+    knowledge_chunks = await retrieve_relevant_knowledge(
+        db, build_requirements_context_query({"functional": functional, "nonFunctional": payload.nonFunctional}, industry_context)
+    )
+    knowledge_context = [chunk_to_prompt_dict(c) for c in knowledge_chunks]
+
     suggestions = await generate_requirement_suggestions(
-        payload.functional if isinstance(payload.functional, list) else [],
+        functional,
         payload.nonFunctional,
         settings.openrouter_api_key,
+        knowledge_context,
     )
+    # Attach real stored excerpt text to whichever suggestions the LLM actually cited -- most
+    # suggestions have no "sources" key at all, which is expected (see enrich_citations).
+    for field_suggestions in suggestions.values():
+        if not isinstance(field_suggestions, list):
+            continue
+        for s in field_suggestions:
+            if isinstance(s, dict) and s.get("sources"):
+                s["sources"] = enrich_citations(s["sources"], knowledge_context)
+                if not s["sources"]:
+                    del s["sources"]
     return {"suggestions": suggestions}
 
 
@@ -106,7 +134,7 @@ async def get_conversation_summary(project_id: uuid.UUID, db: AsyncSession = Dep
     # requirements version is created (a fresh row with conversation_summary NULL), never on
     # repeat views of the same version.
     if latest.conversation_summary:
-        return {"summary": latest.conversation_summary}
+        return {"summary": latest.conversation_summary, "sources": latest.conversation_summary_sources or []}
 
     history = (
         (
@@ -120,16 +148,28 @@ async def get_conversation_summary(project_id: uuid.UUID, db: AsyncSession = Dep
         .all()
     )
 
-    summary = await generate_conversation_summary(
+    industry_context = latest.industry_context or DEFAULT_INDUSTRY_CONTEXT
+    knowledge_chunks = await retrieve_relevant_knowledge(
+        db,
+        build_requirements_context_query(
+            {"functional": latest.functional, "nonFunctional": latest.non_functional}, industry_context
+        ),
+    )
+    knowledge_context = [chunk_to_prompt_dict(c) for c in knowledge_chunks]
+
+    result = await generate_conversation_summary(
         [{"role": h.role, "message": h.message} for h in history],
         {"functional": latest.functional, "nonFunctional": latest.non_functional},
         settings.openrouter_api_key,
+        knowledge_context,
     )
+    sources = enrich_citations(result["sources"], knowledge_context)
 
-    latest.conversation_summary = summary
+    latest.conversation_summary = result["summary"]
+    latest.conversation_summary_sources = sources
     await db.commit()
 
-    return {"summary": summary}
+    return {"summary": result["summary"], "sources": sources}
 
 
 @router.put("/projects/{project_id}/requirements")

@@ -1,6 +1,10 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    # pgvector/pgvector:pg16 is postgres:16 plus the pgvector extension pre-built in -- needed for
+    # the knowledge-base RAG feature's similarity search. Same Postgres major version/data format
+    # as the previous postgres:16-alpine image, so the existing backend_postgres_data volume is
+    # compatible; this is a drop-in swap, not a migration.
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres

@@ -35,6 +35,7 @@ def serialize_requirement(r: Requirement) -> dict:
         "existingSystem": r.existing_system,
         "version": r.version,
         "conversationSummary": r.conversation_summary,
+        "conversationSummarySources": r.conversation_summary_sources,
         "createdAt": r.created_at,
     }
 
@@ -48,6 +49,7 @@ def serialize_architecture(a: Architecture) -> dict:
         "reasoning": a.reasoning,
         "cloudProvider": a.cloud_provider,
         "flowStory": a.flow_story,
+        "flowStorySources": a.flow_story_sources,
         "journeySteps": a.journey_steps,
         "layoutOverrides": a.layout_overrides,
         "securityFindings": a.security_findings,
