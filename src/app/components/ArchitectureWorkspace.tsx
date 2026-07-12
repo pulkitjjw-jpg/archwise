@@ -3810,148 +3810,162 @@ export default function ArchitectureWorkspace({
                   </div>
                 )}
 
-                {/* Manual Editing Controls Toolbar */}
+                {/* Manual Editing Controls Toolbar -- container/header/card treatment matches the
+                    Security Findings panel above (rounded-2xl border border-line bg-white
+                    shadow-sm, px-4 py-3 header row) rather than its own ad-hoc styling, per the
+                    established pattern for a bordered white content card in this column. */}
                 {isEditing && draftHld && (
-                  <div className="mt-4 border border-line bg-paper/50 rounded-[1.5rem] p-4 space-y-4 animate-fadeIn">
-                    {/* Panel Title */}
-                    <div className="flex items-center justify-between border-b border-line pb-2">
-                      <span className="text-[10px] font-black text-ink-muted uppercase tracking-widest">
-                        🔧 Manual Editor Controls
+                  <div className="mt-4 rounded-2xl border border-line bg-white shadow-sm animate-fadeIn">
+                    <div className="flex items-center justify-between gap-2 border-b border-line px-4 py-3">
+                      <span className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-ink">
+                        <Icon icon="mdi:wrench-outline" width={15} height={15} />
+                        Manual Editor Controls
                       </span>
-                      <span className="text-[9px] font-bold text-ink-faint bg-paper px-1.5 py-0.5 rounded">
+                      <span className="rounded-full border border-line-strong bg-paper px-2 py-0.5 text-[9px] font-extrabold uppercase tracking-wide text-ink-faint">
                         Draft Mode
                       </span>
                     </div>
 
-                    <div className="grid gap-4 md:grid-cols-2">
-                      {/* Form 1: Add Component */}
-                      <form onSubmit={handleAddComponent} className="space-y-3">
-                        <div className="text-[10px] font-bold text-ink-muted">➕ Add Generic Component</div>
-                        <div className="flex flex-col gap-2">
-                          <div className="flex gap-2">
-                            <select
-                              value={newNodeType}
-                              onChange={(e) => setNewNodeType(e.target.value)}
-                              className="bg-white border border-line rounded-xl px-2.5 py-1.5 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-accent animate-fadeIn"
-                            >
-                              <option value="compute">Compute</option>
-                              <option value="db">Database</option>
-                              <option value="cache">Cache</option>
-                              <option value="queue">Queue</option>
-                              <option value="cdn">CDN</option>
-                              <option value="storage">Object Storage</option>
-                              <option value="auth">Auth</option>
-                              <option value="lb">Load Balancer</option>
-                              <option value="tokenization">Tokenization Layer</option>
-                              <option value="audit-log">Audit Log Store</option>
-                              <option value="phi-vault">PHI Data Vault</option>
-                              <option value="deidentification">De-identification Pipeline</option>
-                            </select>
-                            <input
-                              type="text"
-                              value={newNodeName}
-                              onChange={(e) => setNewNodeName(e.target.value)}
-                              placeholder="Component Name (e.g. MemoryDB)"
-                              className="flex-1 bg-white border border-line rounded-xl px-3 py-1.5 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-accent"
-                            />
-                          </div>
+                    <div className="space-y-6 px-4 py-4">
+                      {/* Form 1: Add Component -- fields stacked full-width rather than squeezed
+                          two-up: this column is narrow enough (diagram + drawer share the page)
+                          that a side-by-side select+input pair left every field too cramped to
+                          read at normal viewport widths, regardless of breakpoint. */}
+                      <form onSubmit={handleAddComponent}>
+                        <div className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-ink">
+                          <Icon icon="mdi:cube-plus-outline" width={14} height={14} />
+                          Add Component
+                        </div>
+                        <div className="mt-3 space-y-2.5">
+                          <select
+                            value={newNodeType}
+                            onChange={(e) => setNewNodeType(e.target.value)}
+                            className="w-full bg-white border border-line rounded-xl px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-accent"
+                          >
+                            <option value="compute">Compute</option>
+                            <option value="db">Database</option>
+                            <option value="cache">Cache</option>
+                            <option value="queue">Queue</option>
+                            <option value="cdn">CDN</option>
+                            <option value="storage">Object Storage</option>
+                            <option value="auth">Auth</option>
+                            <option value="lb">Load Balancer</option>
+                            <option value="tokenization">Tokenization Layer</option>
+                            <option value="audit-log">Audit Log Store</option>
+                            <option value="phi-vault">PHI Data Vault</option>
+                            <option value="deidentification">De-identification Pipeline</option>
+                          </select>
+                          <input
+                            type="text"
+                            value={newNodeName}
+                            onChange={(e) => setNewNodeName(e.target.value)}
+                            placeholder="Component name (e.g. MemoryDB)"
+                            className="w-full bg-white border border-line rounded-xl px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-accent"
+                          />
                           <input
                             type="text"
                             value={newNodeReasoning}
                             onChange={(e) => setNewNodeReasoning(e.target.value)}
-                            placeholder="Optional: Rationale / Reason for adding..."
-                            className="bg-white border border-line rounded-xl px-3 py-1.5 text-xs font-medium focus:outline-none focus:ring-1 focus:ring-accent"
+                            placeholder="Optional: rationale / reason for adding..."
+                            className="w-full bg-white border border-line rounded-xl px-3 py-2 text-xs font-medium focus:outline-none focus:ring-1 focus:ring-accent"
                           />
                           <button
                             type="submit"
-                            className="w-full bg-accent hover:bg-accent-ink text-white rounded-xl py-1.5 text-[10px] font-extrabold uppercase tracking-wide transition shadow-sm"
+                            className="w-full rounded-xl bg-accent hover:bg-accent-ink text-white px-4 py-2 text-xs font-bold uppercase transition shadow-sm active:scale-95"
                           >
                             Add Component Node
                           </button>
                         </div>
                       </form>
 
-                      {/* Form 2: Add Connection */}
-                      <form onSubmit={handleAddConnection} className="space-y-3">
-                        <div className="text-[10px] font-bold text-ink-muted">🔗 Add Connection Link</div>
-                        <div className="flex flex-col gap-2">
-                          <div className="flex gap-2">
-                            <select
-                              value={newEdgeFrom}
-                              onChange={(e) => setNewEdgeFrom(e.target.value)}
-                              className="flex-1 bg-white border border-line rounded-xl px-2.5 py-1.5 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-accent"
-                            >
-                              <option value="">Select From...</option>
-                              {draftHld.components.map((c) => (
-                                <option key={c.id} value={c.id}>
-                                  {c.name} ({c.type})
-                                </option>
-                              ))}
-                            </select>
-                            <select
-                              value={newEdgeTo}
-                              onChange={(e) => setNewEdgeTo(e.target.value)}
-                              className="flex-1 bg-white border border-line rounded-xl px-2.5 py-1.5 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-accent"
-                            >
-                              <option value="">Select To...</option>
-                              {draftHld.components.map((c) => (
-                                <option key={c.id} value={c.id}>
-                                  {c.name} ({c.type})
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                          <div className="flex gap-2">
+                      {/* Form 2: Add Connection -- separated from Add Component by a visible
+                          divider, not just column position, since both now stack vertically. */}
+                      <form onSubmit={handleAddConnection} className="border-t border-line pt-6">
+                        <div className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-ink">
+                          <Icon icon="mdi:transit-connection-variant" width={14} height={14} />
+                          Add Connection
+                        </div>
+                        <div className="mt-3 space-y-2.5">
+                          <select
+                            value={newEdgeFrom}
+                            onChange={(e) => setNewEdgeFrom(e.target.value)}
+                            className="w-full bg-white border border-line rounded-xl px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-accent"
+                          >
+                            <option value="">Select from...</option>
+                            {draftHld.components.map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.name} ({c.type})
+                              </option>
+                            ))}
+                          </select>
+                          <select
+                            value={newEdgeTo}
+                            onChange={(e) => setNewEdgeTo(e.target.value)}
+                            className="w-full bg-white border border-line rounded-xl px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-accent"
+                          >
+                            <option value="">Select to...</option>
+                            {draftHld.components.map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.name} ({c.type})
+                              </option>
+                            ))}
+                          </select>
+                          <div className="flex gap-2.5">
                             <input
                               type="text"
                               value={newEdgeProtocol}
                               onChange={(e) => setNewEdgeProtocol(e.target.value)}
                               placeholder="Protocol (e.g. HTTPS, TCP)"
-                              className="flex-1 bg-white border border-line rounded-xl px-3 py-1.5 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-accent"
+                              className="flex-1 min-w-0 bg-white border border-line rounded-xl px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-accent"
                             />
                             <button
                               type="submit"
-                              className="bg-ink hover:bg-ink/90 text-white rounded-xl px-4 py-1.5 text-[10px] font-extrabold uppercase tracking-wide transition shadow-sm"
+                              className="flex-none rounded-xl bg-ink hover:bg-ink/90 text-white px-4 py-2 text-xs font-bold uppercase transition shadow-sm active:scale-95"
                             >
                               Connect
                             </button>
                           </div>
                         </div>
                       </form>
-                    </div>
 
-                    {/* Active Connections List (for simple deletion) */}
-                    <div className="border-t border-line pt-3">
-                      <span className="text-[9px] font-black text-ink-faint uppercase tracking-widest block mb-2">
-                        Active Connection Links
-                      </span>
-                      <div className="flex flex-wrap gap-2 max-h-[100px] overflow-y-auto pr-1">
-                        {draftHld.connections.length === 0 ? (
-                          <span className="text-[10px] text-ink-faint italic">No active connections.</span>
-                        ) : (
-                          draftHld.connections.map((conn, idx) => {
-                            const fromNode = draftHld.components.find((c) => c.id === conn.from);
-                            const toNode = draftHld.components.find((c) => c.id === conn.to);
-                            return (
-                              <div
-                                key={idx}
-                                className="flex items-center gap-1.5 bg-white border border-line rounded-xl px-2.5 py-1 text-[10px] font-bold text-ink-muted shadow-sm"
-                              >
-                                <span>{fromNode?.name || conn.from}</span>
-                                <span className="text-ink-faint font-normal">➜</span>
-                                <span>{toNode?.name || conn.to}</span>
-                                <span className="text-ink-faint">({conn.protocol})</span>
-                                <button
-                                  type="button"
-                                  onClick={() => handleRemoveConnection(conn.from, conn.to)}
-                                  className="text-danger transition hover:opacity-70 font-black ml-1 scale-110"
+                      {/* Active Connections List (for simple deletion) -- one connection per row
+                          rather than wrapped chips, so long component names never crowd two
+                          entries onto the same visual line. */}
+                      <div className="border-t border-line pt-6">
+                        <span className="mb-2.5 block text-xs font-bold uppercase tracking-wider text-ink">
+                          Active Connection Links
+                        </span>
+                        <div className="flex flex-col gap-2 max-h-[180px] overflow-y-auto pr-1">
+                          {draftHld.connections.length === 0 ? (
+                            <span className="text-xs italic text-ink-faint">No active connections.</span>
+                          ) : (
+                            draftHld.connections.map((conn, idx) => {
+                              const fromNode = draftHld.components.find((c) => c.id === conn.from);
+                              const toNode = draftHld.components.find((c) => c.id === conn.to);
+                              return (
+                                <div
+                                  key={idx}
+                                  className="flex items-center justify-between gap-2 rounded-xl border border-line bg-paper/60 px-3 py-2 text-xs font-semibold text-ink-muted"
                                 >
-                                  ×
-                                </button>
-                              </div>
-                            );
-                          })
-                        )}
+                                  <span className="min-w-0 truncate">
+                                    <span className="text-ink">{fromNode?.name || conn.from}</span>
+                                    <span className="mx-1.5 text-ink-faint font-normal">➜</span>
+                                    <span className="text-ink">{toNode?.name || conn.to}</span>
+                                    <span className="ml-1.5 text-ink-faint">({conn.protocol})</span>
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRemoveConnection(conn.from, conn.to)}
+                                    className="flex-none rounded-lg px-1.5 py-0.5 font-black text-danger transition hover:bg-danger-soft"
+                                    aria-label={`Remove connection from ${fromNode?.name || conn.from} to ${toNode?.name || conn.to}`}
+                                  >
+                                    ×
+                                  </button>
+                                </div>
+                              );
+                            })
+                          )}
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -3995,9 +4009,14 @@ export default function ArchitectureWorkspace({
                     {validationResults.isValid &&
                       validationResults.errors.length === 0 &&
                       validationResults.warnings.length === 0 && (
-                        <div className="flex items-center gap-2 rounded-2xl border border-success/25 bg-success-soft/50 px-3 py-2.5 text-xs text-success shadow-sm">
+                        <div className="flex items-start gap-2.5 rounded-2xl border border-success/25 bg-success-soft p-3 text-xs text-success shadow-sm animate-fadeIn">
                           <span className="text-sm">✅</span>
-                          <span className="font-semibold">All structural validation checks passed. Ready to save!</span>
+                          <div className="leading-relaxed">
+                            <span className="font-extrabold uppercase text-[9px] tracking-wider text-success block">
+                              All Clear
+                            </span>
+                            All structural validation checks passed. Ready to save!
+                          </div>
                         </div>
                       )}
                   </div>
