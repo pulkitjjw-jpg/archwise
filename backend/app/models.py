@@ -1,9 +1,10 @@
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Boolean, ForeignKey, Integer, Text, text
+from sqlalchemy import Boolean, ForeignKey, Integer, Numeric, Text, text
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -267,6 +268,69 @@ class KnowledgeChunk(Base):
     # The public URL a reference-architecture chunk was sourced from, for HTML/Markdown sources
     # with no page concept (NULL for PDF-based sources, which cite by page instead).
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class LlmUsageLog(Base):
+    """One row per individual model ATTEMPT within a _call_llm_with_fallback_chain invocation
+    (Workstream Z1 admin panel) -- a single cascaded call produces several rows (one per tier
+    tried, plus one more if the Gemma validation tier's auto-fix pass ran), all sharing the same
+    call_group_id. This granularity (rather than one row per logical call) is what makes genuine
+    per-model stats possible: "average latency for Nemotron" or "Qwen's success rate" need to see
+    every attempt Qwen was actually part of, not just the rows where it happened to win.
+
+    Written from a SEPARATE, independent DB session opened inside the chain function itself (see
+    app/services/llm.py) rather than threaded through every LLM function's signature and the
+    caller's own request-scoped session -- usage logging is a pure audit side-effect that must
+    never fail or roll back the actual LLM call it's describing, so it commits on its own."""
+
+    __tablename__ = "llm_usage_logs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    # Shared by every attempt row belonging to the same logical fallback-chain call -- generated
+    # once per _call_llm_with_fallback_chain invocation, not per-attempt. Lets the "recent calls"
+    # table and time-series view group attempts back into the single user-facing request they
+    # were part of, instead of showing 3 confusing rows for what was really one brainstorm turn.
+    call_group_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    # The `label` already passed to _call_llm_with_fallback_chain at every call site (e.g.
+    # "Architecture generation", "Brainstorm turn generation") -- reused as-is rather than
+    # inventing a second taxonomy, since it already uniquely names the feature/endpoint.
+    endpoint: Mapped[str] = mapped_column(Text, nullable=False)
+    # The model THIS specific attempt targeted (not necessarily the one that ultimately served
+    # the call -- see is_served).
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    # True only for the Gemma-validation-tier auto-fix repair call (app/services/llm.py's
+    # _attempt_fix) -- a real, separate API call worth its own cost/latency row, but not a "real"
+    # chain tier in its own right, so per-model dashboard stats exclude these rows by default
+    # (they'd otherwise inflate the fix model's own call count with repair work that was never a
+    # first-class attempt at serving the request).
+    is_fix_pass: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    # Did THIS attempt produce output the app could actually use -- "success" for a validated
+    # tier means it passed validation (or was rescued by the fix pass), not just that the HTTP
+    # call itself returned 200.
+    status: Mapped[str] = mapped_column(Text, nullable=False)  # "success" | "failure"
+    # True for the exactly-one row per call_group_id whose content was actually returned to the
+    # caller (false for every other row in the group; no row is true if the whole call failed).
+    # For a validated tier rescued by the fix pass, this marks the ORIGINAL tier's row, not the
+    # fix-pass row -- the content is fundamentally that model's output, just repaired.
+    is_served: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    # This attempt's own duration -- NOT the whole call_group's total wall-clock time, which is
+    # SUM(latency_ms) across the group (attempts are sequential, never parallel).
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    # From the OpenRouter response's "usage" field when present -- not every provider/model
+    # reports this, hence nullable rather than defaulting to 0 (0 would misrepresent "unknown" as
+    # "used no tokens").
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Numeric (not float) for exact cents/fractions-of-a-cent arithmetic when summed across many
+    # rows for the dashboard's total-cost stat. NULL when token counts are unknown, not 0 --
+    # distinct from a genuinely free-tier call, which is a real, known $0.
+    estimated_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 8), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
     )

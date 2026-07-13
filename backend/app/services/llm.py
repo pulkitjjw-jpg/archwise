@@ -2,11 +2,17 @@ import asyncio
 import json
 import logging
 import re
+import time
+import uuid
+from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 import httpx
 
 from app.config import settings
+from app.db import AsyncSessionLocal
+from app.models import LlmUsageLog
 
 logger = logging.getLogger("app.services.llm")
 
@@ -16,6 +22,30 @@ _LEAKED_APOLOGY_RE = re.compile(r"^\s*(apolog|i apologize|i'm sorry|my apologies
 _FENCE_OPEN_JSON_RE = re.compile(r"^```json\s*", re.IGNORECASE)
 _FENCE_OPEN_RE = re.compile(r"^```\s*", re.IGNORECASE)
 _FENCE_CLOSE_RE = re.compile(r"\s*```$")
+
+# USD price per token (prompt, completion), from https://openrouter.ai/api/v1/models -- re-verify
+# against that endpoint if LLM_MODEL_CHAIN changes, these are not guessable/derivable. Every
+# ":free" slug is genuinely $0/$0; an unlisted model falls back to (0.0, 0.0) in _model_pricing
+# below, which under-reports cost for a paid model that isn't in this table -- acceptable for now
+# since the chain's only paid tier (Gemini) is listed, but keep this in sync if that changes.
+MODEL_PRICING: dict[str, tuple[float, float]] = {
+    "openai/gpt-oss-120b:free": (0.0, 0.0),
+    "google/gemma-4-31b-it:free": (0.0, 0.0),
+    "nvidia/nemotron-3-ultra-550b-a55b:free": (0.0, 0.0),
+    "qwen/qwen3-coder:free": (0.0, 0.0),
+    "google/gemini-2.5-flash": (0.0000003, 0.0000025),
+}
+
+
+def _model_pricing(model: str) -> tuple[float, float]:
+    return MODEL_PRICING.get(model, (0.0, 0.0))
+
+
+@dataclass
+class _ModelCallResult:
+    content: str
+    prompt_tokens: int | None
+    completion_tokens: int | None
 
 
 def _looks_like_leaked_apology(message: str) -> bool:
@@ -32,10 +62,12 @@ async def _call_single_model(
     messages: list[dict[str, str]],
     model: str,
     timeout_seconds: float,
-) -> str:
+) -> _ModelCallResult:
     """Makes exactly ONE attempt against ONE model -- no retry, no backoff. Raises on any failure
     (non-2xx, timeout, missing/null content) so the fallback chain can move to the next tier
-    immediately. Returns the raw (stripped) response text, not yet parsed as JSON.
+    immediately. Returns the raw (stripped) response text plus token usage (Workstream Z1 admin
+    panel) when OpenRouter's response includes a "usage" field -- not every provider reports it,
+    so both counts may be None.
 
     Uses asyncio.wait_for for the actual deadline rather than relying on httpx's own `timeout`
     alone -- httpx's read timeout resets on every byte received, so a connection that trickles
@@ -72,7 +104,13 @@ async def _call_single_model(
     content = choices[0].get("message", {}).get("content")
     if not isinstance(content, str) or not content.strip():
         raise Exception("response content was empty or null")
-    return content.strip()
+
+    usage = data.get("usage") or {}
+    return _ModelCallResult(
+        content=content.strip(),
+        prompt_tokens=usage.get("prompt_tokens"),
+        completion_tokens=usage.get("completion_tokens"),
+    )
 
 
 def _try_parse_json(raw: str) -> Any | None:
@@ -131,12 +169,21 @@ def _classify_output_issue(raw: str, parsed: Any, expected_keys: list[str] | Non
 _FIX_SYSTEM_INSTRUCTION = """You are given a response that was supposed to be a single valid JSON object but has a formatting problem (e.g. a missing quote, a trailing comma, markdown fences around it, an unescaped control character) or is missing one or two expected top-level fields. Fix ONLY the formatting/structure -- do not invent new content, do not summarize, do not regenerate from scratch, preserve every value that is already present as closely as possible. Return ONLY the corrected, valid JSON object -- no markdown fences, no commentary, no explanation."""
 
 
+@dataclass
+class _FixResult:
+    parsed: Any
+    prompt_tokens: int | None
+    completion_tokens: int | None
+
+
 async def _attempt_fix(
     client: httpx.AsyncClient, api_key: str, raw: str, expected_keys: list[str] | None, label: str
-) -> Any | None:
+) -> _FixResult | None:
     """One lightweight repair attempt via settings.llm_validation_fix_model -- reformats/patches
-    the given broken output, never regenerates it from scratch. Returns the parsed, fixed result,
-    or None if the fix attempt itself fails (caller then skips this tier entirely)."""
+    the given broken output, never regenerates it from scratch. Returns the parsed, fixed result
+    (plus this repair call's own token usage, for cost accounting -- it's a real API call even
+    though it's cheap), or None if the fix attempt itself fails (caller then skips this tier
+    entirely)."""
     fix_messages = [
         {"role": "system", "content": _FIX_SYSTEM_INSTRUCTION},
         {
@@ -148,18 +195,61 @@ async def _attempt_fix(
         },
     ]
     try:
-        fixed_raw = await _call_single_model(
+        fix_result = await _call_single_model(
             client, api_key, fix_messages, settings.llm_validation_fix_model, settings.llm_validation_fix_timeout_seconds
         )
     except Exception as err:
         logger.error("[%s] Fix pass via %s failed to respond: %s", label, settings.llm_validation_fix_model, err)
         return None
 
-    fixed_parsed = _try_parse_json(fixed_raw)
+    fixed_parsed = _try_parse_json(fix_result.content)
     if fixed_parsed is None or _keys_coverage(fixed_parsed, expected_keys) < 1.0:
         logger.error("[%s] Fix pass via %s did not produce valid/complete JSON", label, settings.llm_validation_fix_model)
         return None
-    return fixed_parsed
+    return _FixResult(
+        parsed=fixed_parsed, prompt_tokens=fix_result.prompt_tokens, completion_tokens=fix_result.completion_tokens
+    )
+
+
+async def _record_attempt(
+    *,
+    call_group_id: uuid.UUID,
+    endpoint: str,
+    model: str,
+    is_fix_pass: bool,
+    status: str,
+    is_served: bool,
+    latency_ms: int,
+    prompt_tokens: int | None,
+    completion_tokens: int | None,
+    estimated_cost_usd: Decimal | None,
+    error_message: str | None,
+) -> None:
+    """Persists one llm_usage_logs row for a SINGLE model attempt (Workstream Z1 admin panel) via
+    its OWN independent DB session, never the caller's request-scoped one -- usage logging is a
+    pure audit side-effect that must never fail or roll back the actual LLM call it's describing.
+    Swallows its own errors for the same reason: a DB hiccup here should never surface as a
+    user-facing failure."""
+    try:
+        async with AsyncSessionLocal() as db:
+            db.add(
+                LlmUsageLog(
+                    call_group_id=call_group_id,
+                    endpoint=endpoint,
+                    model=model,
+                    is_fix_pass=is_fix_pass,
+                    status=status,
+                    is_served=is_served,
+                    latency_ms=latency_ms,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    estimated_cost_usd=estimated_cost_usd,
+                    error_message=error_message[:2000] if error_message else None,
+                )
+            )
+            await db.commit()
+    except Exception as err:
+        logger.error("[%s] Failed to record llm_usage_logs row (non-fatal): %s", endpoint, err)
 
 
 async def _call_llm_with_fallback_chain(
@@ -181,6 +271,10 @@ async def _call_llm_with_fallback_chain(
     chain is the paid last-resort tier and is logged at WARNING when reached, so how often the
     free tier is insufficient is visible in monitoring without being exposed to the end user.
 
+    Records one llm_usage_logs row per model attempt (Workstream Z1 admin panel), all sharing one
+    call_group_id -- see _record_attempt. This is what makes genuine per-model stats possible
+    (latency/success-rate for a specific tier, not just "whichever tier happened to win").
+
     Raises a clear, human-readable error (never a raw exception) if every tier is exhausted.
     Deliberately returns loosely-typed Any, not a strict Pydantic model, to match the pre-split
     behavior where LLM output was never runtime-validated either."""
@@ -188,6 +282,13 @@ async def _call_llm_with_fallback_chain(
     chain = settings.llm_chain
     validated = settings.llm_validated_model_set
     last_error: Exception | None = None
+    call_group_id = uuid.uuid4()
+
+    def cost_for(model: str, prompt_tokens: int | None, completion_tokens: int | None) -> Decimal:
+        prompt_price, completion_price = _model_pricing(model)
+        return Decimal(str(prompt_tokens or 0)) * Decimal(str(prompt_price)) + Decimal(str(completion_tokens or 0)) * Decimal(
+            str(completion_price)
+        )
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         for i, model in enumerate(chain):
@@ -197,19 +298,50 @@ async def _call_llm_with_fallback_chain(
                     "[%s] All free-tier models in the chain failed -- falling back to paid tier: %s", label, model
                 )
 
+            attempt_start = time.monotonic()
             try:
-                raw = await _call_single_model(client, api_key, messages, model, timeout)
+                call_result = await _call_single_model(client, api_key, messages, model, timeout)
             except Exception as err:
+                latency_ms = int((time.monotonic() - attempt_start) * 1000)
                 logger.error("[%s] %s failed/timed out, moving to next tier: %s", label, model, err)
                 last_error = err
+                await _record_attempt(
+                    call_group_id=call_group_id,
+                    endpoint=label,
+                    model=model,
+                    is_fix_pass=False,
+                    status="failure",
+                    is_served=False,
+                    latency_ms=latency_ms,
+                    prompt_tokens=None,
+                    completion_tokens=None,
+                    estimated_cost_usd=None,
+                    error_message=str(err),
+                )
                 continue
 
+            attempt_latency_ms = int((time.monotonic() - attempt_start) * 1000)
+            raw = call_result.content
             parsed = _try_parse_json(raw)
+            attempt_cost = cost_for(model, call_result.prompt_tokens, call_result.completion_tokens)
 
             if model in validated:
                 issue = _classify_output_issue(raw, parsed, expected_keys)
                 if issue == "ok":
                     logger.info("[%s] served by %s (validated, no issues)", label, model)
+                    await _record_attempt(
+                        call_group_id=call_group_id,
+                        endpoint=label,
+                        model=model,
+                        is_fix_pass=False,
+                        status="success",
+                        is_served=True,
+                        latency_ms=attempt_latency_ms,
+                        prompt_tokens=call_result.prompt_tokens,
+                        completion_tokens=call_result.completion_tokens,
+                        estimated_cost_usd=attempt_cost,
+                        error_message=None,
+                    )
                     return parsed
                 if issue == "minor":
                     logger.error(
@@ -218,14 +350,73 @@ async def _call_llm_with_fallback_chain(
                         model,
                         settings.llm_validation_fix_model,
                     )
+                    fix_start = time.monotonic()
                     fixed = await _attempt_fix(client, api_key, raw, expected_keys, label)
+                    fix_latency_ms = int((time.monotonic() - fix_start) * 1000)
                     if fixed is not None:
                         logger.info("[%s] served by %s (auto-fixed by %s)", label, model, settings.llm_validation_fix_model)
-                        return fixed
+                        # The ORIGINAL tier's row is marked served -- the content is fundamentally
+                        # its output, just repaired. The fix pass gets its own row for cost/
+                        # latency accounting but is excluded from per-model dashboard stats.
+                        await _record_attempt(
+                            call_group_id=call_group_id,
+                            endpoint=label,
+                            model=model,
+                            is_fix_pass=False,
+                            status="success",
+                            is_served=True,
+                            latency_ms=attempt_latency_ms,
+                            prompt_tokens=call_result.prompt_tokens,
+                            completion_tokens=call_result.completion_tokens,
+                            estimated_cost_usd=attempt_cost,
+                            error_message="minor validation issue, auto-fixed",
+                        )
+                        await _record_attempt(
+                            call_group_id=call_group_id,
+                            endpoint=label,
+                            model=settings.llm_validation_fix_model,
+                            is_fix_pass=True,
+                            status="success",
+                            is_served=False,
+                            latency_ms=fix_latency_ms,
+                            prompt_tokens=fixed.prompt_tokens,
+                            completion_tokens=fixed.completion_tokens,
+                            estimated_cost_usd=cost_for(
+                                settings.llm_validation_fix_model, fixed.prompt_tokens, fixed.completion_tokens
+                            ),
+                            error_message=None,
+                        )
+                        return fixed.parsed
                     logger.error("[%s] %s auto-fix failed, moving to next tier", label, model)
+                    await _record_attempt(
+                        call_group_id=call_group_id,
+                        endpoint=label,
+                        model=model,
+                        is_fix_pass=False,
+                        status="failure",
+                        is_served=False,
+                        latency_ms=attempt_latency_ms,
+                        prompt_tokens=call_result.prompt_tokens,
+                        completion_tokens=call_result.completion_tokens,
+                        estimated_cost_usd=attempt_cost,
+                        error_message="minor validation issue, auto-fix also failed",
+                    )
                 else:
                     logger.error(
                         "[%s] %s output had major validation issues (unsalvageable), moving to next tier", label, model
+                    )
+                    await _record_attempt(
+                        call_group_id=call_group_id,
+                        endpoint=label,
+                        model=model,
+                        is_fix_pass=False,
+                        status="failure",
+                        is_served=False,
+                        latency_ms=attempt_latency_ms,
+                        prompt_tokens=call_result.prompt_tokens,
+                        completion_tokens=call_result.completion_tokens,
+                        estimated_cost_usd=attempt_cost,
+                        error_message="major validation issue (unsalvageable)",
                     )
                 last_error = Exception(f"{model} failed validation")
                 continue
@@ -237,9 +428,35 @@ async def _call_llm_with_fallback_chain(
             # response just as readily as it would reject genuine garbage.
             if parsed is not None:
                 logger.info("[%s] served by %s", label, model)
+                await _record_attempt(
+                    call_group_id=call_group_id,
+                    endpoint=label,
+                    model=model,
+                    is_fix_pass=False,
+                    status="success",
+                    is_served=True,
+                    latency_ms=attempt_latency_ms,
+                    prompt_tokens=call_result.prompt_tokens,
+                    completion_tokens=call_result.completion_tokens,
+                    estimated_cost_usd=attempt_cost,
+                    error_message=None,
+                )
                 return parsed
 
             logger.error("[%s] %s returned unparseable output, moving to next tier", label, model)
+            await _record_attempt(
+                call_group_id=call_group_id,
+                endpoint=label,
+                model=model,
+                is_fix_pass=False,
+                status="failure",
+                is_served=False,
+                latency_ms=attempt_latency_ms,
+                prompt_tokens=call_result.prompt_tokens,
+                completion_tokens=call_result.completion_tokens,
+                estimated_cost_usd=attempt_cost,
+                error_message="unparseable output",
+            )
             last_error = Exception(f"{model} returned unparseable output")
 
     reason = str(last_error) if last_error is not None else "no model in the fallback chain returned a valid response"

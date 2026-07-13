@@ -5,7 +5,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.config import settings
-from app.routers import architectures, conversations, export, health, projects, requirements, share
+from app.routers import admin, architectures, conversations, export, health, projects, requirements, share
 
 # Root logger defaults to WARNING with no handler configured, which would silently drop the
 # INFO-level "served by <model>" logs app/services/llm.py emits on every successful fallback-chain
@@ -60,3 +60,4 @@ app.include_router(requirements.router, prefix="/api")
 app.include_router(architectures.router, prefix="/api")
 app.include_router(export.router, prefix="/api")
 app.include_router(share.router, prefix="/api")
+app.include_router(admin.router, prefix="/api")
