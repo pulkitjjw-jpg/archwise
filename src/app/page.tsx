@@ -54,7 +54,9 @@ function StatusBadge({ status }: { status: ProjectStatus }) {
 }
 
 function formatDate(value: string) {
-  return new Date(value).toLocaleDateString([], {
+  // Locale pinned explicitly -- an unspecified locale can resolve differently between the Node
+  // SSR pass and the browser, causing a hydration mismatch even with the same format options.
+  return new Date(value).toLocaleDateString("en-US", {
     year: "numeric",
     month: "short",
     day: "numeric",

@@ -2532,7 +2532,10 @@ export default function ArchitectureWorkspace({
                               {link.isActive ? "Active" : "Revoked"}
                             </span>
                             <span className="text-[9.5px] text-ink-faint">
-                              {new Date(link.createdAt).toLocaleDateString()}
+                              {/* Locale pinned explicitly to avoid a server/client hydration
+                                  mismatch -- an unspecified locale/format is the runtime default,
+                                  which can differ between the Node SSR pass and the browser. */}
+                              {new Date(link.createdAt).toLocaleDateString("en-US")}
                             </span>
                           </div>
                           {link.isActive && (
@@ -4071,7 +4074,7 @@ export default function ArchitectureWorkspace({
                                 {phase.isInitial ? "Initial" : `Enhancement ${idx}`} (v{phase.version})
                               </h5>
                               <span className="text-[10px] font-semibold text-ink-faint">
-                                {new Date(phase.createdAt).toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" })}
+                                {new Date(phase.createdAt).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" })}
                               </span>
                             </div>
 

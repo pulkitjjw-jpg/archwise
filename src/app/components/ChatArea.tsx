@@ -1,8 +1,30 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
 import InfoTooltip from "./InfoTooltip";
 import { useStagedLoadingMessage } from "@/app/hooks/useStagedLoadingMessage";
+
+// The assistant sometimes writes structured replies (bold labels, bullet lists) using markdown
+// syntax -- rendered here instead of left as raw "**text**"/"- item" characters, which otherwise
+// reads like an unprocessed model response pasted directly into the chat. User-typed messages are
+// NOT run through this -- a user typing a literal "*" or "-" shouldn't have it reinterpreted.
+const ASSISTANT_MARKDOWN_COMPONENTS = {
+  p: ({ children }: { children?: React.ReactNode }) => <p className="mb-2 whitespace-pre-wrap last:mb-0">{children}</p>,
+  ul: ({ children }: { children?: React.ReactNode }) => <ul className="mb-2 list-disc space-y-0.5 pl-4 last:mb-0">{children}</ul>,
+  ol: ({ children }: { children?: React.ReactNode }) => <ol className="mb-2 list-decimal space-y-0.5 pl-4 last:mb-0">{children}</ol>,
+  li: ({ children }: { children?: React.ReactNode }) => <li>{children}</li>,
+  strong: ({ children }: { children?: React.ReactNode }) => <strong className="font-bold">{children}</strong>,
+  em: ({ children }: { children?: React.ReactNode }) => <em className="italic">{children}</em>,
+  a: ({ children, href }: { children?: React.ReactNode; href?: string }) => (
+    <a href={href} target="_blank" rel="noopener noreferrer" className="underline">
+      {children}
+    </a>
+  ),
+  code: ({ children }: { children?: React.ReactNode }) => (
+    <code className="rounded bg-ink/10 px-1 py-0.5 text-[0.85em]">{children}</code>
+  ),
+};
 
 // Short, natural-feeling phrases shown while a brainstorm reply is in flight -- the backend may
 // be walking a multi-model fallback chain under the hood if the primary model is unavailable,
@@ -221,11 +243,20 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
                 <div className="font-bold text-[10px] uppercase tracking-wider mb-1 opacity-75">
                   {isUser ? "You" : "Assistant"}
                 </div>
-                <p className="whitespace-pre-wrap">{msg.message}</p>
+                {isUser ? (
+                  <p className="whitespace-pre-wrap">{msg.message}</p>
+                ) : (
+                  <ReactMarkdown components={ASSISTANT_MARKDOWN_COMPONENTS}>{msg.message}</ReactMarkdown>
+                )}
                 <div className="text-[9px] text-right mt-1 opacity-60">
-                  {new Date(msg.createdAt).toLocaleTimeString([], {
+                  {/* Locale pinned explicitly (not the runtime default) so the SSR pass and the
+                      browser always format this identically -- an unspecified locale/hour12 can
+                      resolve differently between Node and the browser even for the same wall-clock
+                      time, which is a hydration mismatch. */}
+                  {new Date(msg.createdAt).toLocaleTimeString("en-US", {
                     hour: "2-digit",
                     minute: "2-digit",
+                    hour12: true,
                   })}
                 </div>
               </div>
