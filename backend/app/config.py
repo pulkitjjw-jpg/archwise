@@ -6,18 +6,47 @@ class Settings(BaseSettings):
 
     database_url: str
     openrouter_api_key: str
-    # The OpenRouter model slug every LLM call in the backend uses (see app/services/llm.py's
-    # _call_llm_with_retry, the single shared call site every brainstorm/extraction/generation/
-    # RAG-citation function routes through) -- one env var, so switching models is a config change,
-    # never a code change. Confirm the exact slug against OpenRouter's own model list
-    # (https://openrouter.ai/api/v1/models) before changing this -- provider model strings are not
-    # guessable and a wrong slug fails every LLM call in the app.
-    # openai/gpt-oss-120b:free was evaluated for the ~100-user free-tier test and reverted: it
-    # failed architecture generation (the app's most JSON-structurally-complex call) in all 3
-    # end-to-end attempts, even with 5-attempt/backoff retry hardening -- a mix of malformed JSON
-    # syntax, shared-pool 429s, and null/malformed response bodies. See git history for details.
-    llm_model: str = "google/gemini-2.5-flash"
+    # Ordered, comma-separated OpenRouter model slugs every LLM call in the backend falls back
+    # through (see app/services/llm.py's _call_llm_with_fallback_chain, the single shared call
+    # site every brainstorm/extraction/generation/RAG-citation function routes through). Each
+    # model gets exactly ONE attempt -- on any failure (network error, timeout, unparseable
+    # output) the chain moves to the next slug immediately, never retrying the same model. The
+    # last entry is treated as the paid "last resort" tier and its use is logged at WARNING so
+    # free-tier insufficiency is visible in monitoring. One env var, so re-ordering/swapping
+    # models is a config change, never a code change -- confirm every slug against OpenRouter's
+    # own model list (https://openrouter.ai/api/v1/models) before changing this, provider model
+    # strings are not guessable and a wrong slug silently drops that whole tier.
+    llm_model_chain: str = (
+        "openai/gpt-oss-120b:free,"
+        "google/gemma-4-31b-it:free,"
+        "nvidia/nemotron-3-ultra-550b-a55b:free,"
+        "qwen/qwen3-coder:free,"
+        "google/gemini-2.5-flash"
+    )
+    # Subset of the chain above (comma-separated, must match slugs exactly) that gets an extra
+    # validation + auto-fix pass before its output is trusted, instead of being accepted or
+    # rejected outright like every other tier. Evaluated against openai/gpt-oss-120b:free and
+    # confirmed as the free-tier model most prone to subtly malformed JSON in practice.
+    llm_validated_models: str = "google/gemma-4-31b-it:free"
+    # Fast/free model used ONLY to reformat/repair a validated tier's malformed output (fix small
+    # JSON syntax problems or fill 1-2 missing fields) -- never asked to regenerate content from
+    # scratch, so it can be small and quick rather than matching the primary call's capability.
+    llm_validation_fix_model: str = "openai/gpt-oss-120b:free"
+    # Per-model-attempt timeout. Deliberately NOT "a few seconds" flat: real successful calls
+    # (e.g. architecture generation on Gemini) have taken ~15s even when working correctly, and a
+    # too-aggressive timeout would falsely cascade away from a model that was simply still
+    # generating a large response. Individual call sites may override this for known-heavy calls.
+    llm_per_model_timeout_seconds: float = 15.0
+    llm_validation_fix_timeout_seconds: float = 10.0
     redis_url: str = "redis://localhost:6379/0"
+
+    @property
+    def llm_chain(self) -> list[str]:
+        return [m.strip() for m in self.llm_model_chain.split(",") if m.strip()]
+
+    @property
+    def llm_validated_model_set(self) -> set[str]:
+        return {m.strip() for m in self.llm_validated_models.split(",") if m.strip()}
 
     @property
     def async_database_url(self) -> str:

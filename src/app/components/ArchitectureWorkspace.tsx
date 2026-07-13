@@ -18,6 +18,7 @@ import {
   type JourneyVerification,
 } from "@/lib/journey-verification";
 import { computeHealthScore, type HealthScore } from "@/lib/health-score";
+import { useStagedLoadingMessage } from "@/app/hooks/useStagedLoadingMessage";
 import { FIELD_EXPLANATIONS } from "@/lib/field-explanations";
 import {
   computeDiagramLayoutAsync,
@@ -447,7 +448,7 @@ export default function ArchitectureWorkspace({
   const [architecture, setArchitecture] = useState<ArchitectureData | null>(null);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
-  const [generationStageIndex, setGenerationStageIndex] = useState(0);
+  const generationStage = useStagedLoadingMessage(generating, GENERATION_STAGES, GENERATION_STAGE_INTERVAL_MS);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [activeProvider, setActiveProvider] = useState<CloudProviderKey>("aws");
   const [viewMode, setViewMode] = useState<"diagram" | "comparison" | "journey" | "migration">("diagram");
@@ -541,20 +542,6 @@ export default function ArchitectureWorkspace({
     setIsLldExpanded(explanationMode === "technical");
     setIsLearnExpanded(false);
   }, [selectedNodeId, explanationMode]);
-
-  // Advance the staged loading message every few seconds while a generation call is
-  // in-flight. These stages are honest labels for what the server is doing during the call,
-  // not real progress events — they just make the long single-request wait legible.
-  useEffect(() => {
-    if (!generating) {
-      setGenerationStageIndex(0);
-      return;
-    }
-    const interval = setInterval(() => {
-      setGenerationStageIndex((prev) => Math.min(prev + 1, GENERATION_STAGES.length - 1));
-    }, GENERATION_STAGE_INTERVAL_MS);
-    return () => clearInterval(interval);
-  }, [generating]);
 
   // Determine if critical fields are specified
   const isScaleUnspecified =
@@ -2220,9 +2207,7 @@ export default function ArchitectureWorkspace({
         <div className="h-10 w-10 animate-spin rounded-full border-4 border-accent border-t-transparent flex items-center justify-center shadow-md">
           🌀
         </div>
-        <span className="mt-4 text-base font-semibold text-ink font-bold">
-          {GENERATION_STAGES[generationStageIndex]}
-        </span>
+        <span className="mt-4 text-base font-semibold text-ink font-bold">{generationStage}</span>
         <span className="mt-2 text-xs text-ink-muted max-w-sm">
           Generating cost metrics and resolving senior architect cloud recommendations across AWS, Azure, and GCP.
         </span>

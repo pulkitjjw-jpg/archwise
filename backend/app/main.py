@@ -7,6 +7,12 @@ from fastapi.responses import JSONResponse
 from app.config import settings
 from app.routers import architectures, conversations, export, health, projects, requirements, share
 
+# Root logger defaults to WARNING with no handler configured, which would silently drop the
+# INFO-level "served by <model>" logs app/services/llm.py emits on every successful fallback-chain
+# call -- the only visibility into which model actually served a request. INFO is the right
+# floor: routine per-request model selection is operationally useful, DEBUG would be noisy.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
 logger = logging.getLogger("app")
 
 app = FastAPI(title="AI Cloud Architecture Generator — Backend")

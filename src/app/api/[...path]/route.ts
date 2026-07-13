@@ -57,11 +57,12 @@ async function proxy(req: NextRequest, { params }: { params: Promise<{ path: str
       // @ts-expect-error -- required by undici when streaming a request body
       duplex: ["GET", "HEAD"].includes(req.method) ? undefined : "half",
       redirect: "manual",
-      // The backend's own LLM-call retry (_call_llm_with_retry) can take up to ~45s worst-case
-      // on its own (5 attempts, exponential backoff up to 8s between attempts) before it even
-      // falls back -- this must stay comfortably above that so the proxy doesn't abort a request
-      // the backend would have recovered from.
-      signal: AbortSignal.timeout(120_000),
+      // The backend's own LLM call walks a 5-model fallback chain (_call_llm_with_fallback_chain),
+      // one attempt per model, up to ~30s each for the heaviest call (architecture generation)
+      // plus a validation auto-fix pass on the Gemma tier -- worst case (every free tier fails,
+      // falls through to the paid Gemini tier) is ~160s. This must stay comfortably above that so
+      // the proxy doesn't abort a request the backend would have recovered from.
+      signal: AbortSignal.timeout(180_000),
     });
   } catch (err) {
     console.error("Backend proxy request failed:", err);

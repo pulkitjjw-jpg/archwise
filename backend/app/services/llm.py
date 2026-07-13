@@ -26,110 +26,224 @@ def _looks_like_leaked_apology(message: str) -> bool:
     return bool(_LEAKED_APOLOGY_RE.match(message))
 
 
-def _is_rate_limit_error(err: Exception) -> bool:
-    """OpenRouter free-tier models (":free" slugs) are routed through a shared upstream pool that
-    returns HTTP 429 under contention -- distinct from a genuine request failure, and common
-    enough on free tiers that it needs its own, longer backoff rather than the flat inter-attempt
-    delay used for other errors."""
-    return "429" in str(err)
+async def _call_single_model(
+    client: httpx.AsyncClient,
+    api_key: str,
+    messages: list[dict[str, str]],
+    model: str,
+    timeout_seconds: float,
+) -> str:
+    """Makes exactly ONE attempt against ONE model -- no retry, no backoff. Raises on any failure
+    (non-2xx, timeout, missing/null content) so the fallback chain can move to the next tier
+    immediately. Returns the raw (stripped) response text, not yet parsed as JSON.
+
+    Uses asyncio.wait_for for the actual deadline rather than relying on httpx's own `timeout`
+    alone -- httpx's read timeout resets on every byte received, so a connection that trickles
+    occasional keep-alive/partial data (observed with OpenRouter under load) can run for minutes
+    without ever tripping it. wait_for enforces a true wall-clock cap regardless."""
+    try:
+        response = await asyncio.wait_for(
+            client.post(
+                OPENROUTER_URL,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "X-Title": "AI Cloud Architecture Generator",
+                },
+                json={
+                    "model": model,
+                    "messages": messages,
+                    "response_format": {"type": "json_object"},
+                },
+                timeout=timeout_seconds,
+            ),
+            timeout=timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        raise Exception(f"timed out after {timeout_seconds}s")
+
+    if not response.is_success:
+        raise Exception(f"OpenRouter API error: {response.status_code} - {response.text}")
+
+    data = response.json()
+    choices = data.get("choices")
+    if not choices:
+        raise Exception("response had no 'choices'")
+    content = choices[0].get("message", {}).get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise Exception("response content was empty or null")
+    return content.strip()
 
 
-async def _call_llm_with_retry(
+def _try_parse_json(raw: str) -> Any | None:
+    """Direct json.loads, then a lenient markdown-fence-stripped retry. Returns None (never
+    raises) if both fail -- callers decide what "unparseable" means for their tier."""
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    cleaned = _FENCE_OPEN_JSON_RE.sub("", raw)
+    cleaned = _FENCE_OPEN_RE.sub("", cleaned)
+    cleaned = _FENCE_CLOSE_RE.sub("", cleaned)
+    cleaned = cleaned.strip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        return None
+
+
+def _keys_coverage(parsed: Any, expected_keys: list[str] | None) -> float:
+    """Fraction of expected top-level keys actually present in parsed. 1.0 if no expected_keys
+    were given (nothing to check), 0.0 if parsed isn't even a dict."""
+    if not expected_keys:
+        return 1.0
+    if not isinstance(parsed, dict):
+        return 0.0
+    present = sum(1 for k in expected_keys if k in parsed)
+    return present / len(expected_keys)
+
+
+def _classify_output_issue(raw: str, parsed: Any, expected_keys: list[str] | None) -> str:
+    """For a validated-tier model only: classifies its output as "ok" (use as-is), "minor" (a
+    likely-fixable formatting slip or a couple of missing fields -- worth an auto-fix pass), or
+    "major" (fundamentally broken/incomplete -- a reformat pass can't invent missing content, so
+    skip straight to the next tier rather than spend time on an unsalvageable response)."""
+    coverage = _keys_coverage(parsed, expected_keys)
+    if parsed is not None and coverage == 1.0:
+        return "ok"
+
+    if parsed is None:
+        # Content that never got a chance to close out (cut off mid-word/mid-sentence, no
+        # trailing structural character) is genuinely missing data, not a formatting slip -- a
+        # reformat pass can't invent the rest of the response, so don't waste one on it. A small
+        # brace/bracket count mismatch on an otherwise well-terminated response (e.g. one
+        # stray/missing character) is the actual "fixable" case.
+        trimmed = raw.rstrip()
+        looks_truncated = not trimmed.endswith(("}", "]", '"'))
+        brace_imbalance = abs(raw.count("{") - raw.count("}")) + abs(raw.count("[") - raw.count("]"))
+        if "{" not in raw or looks_truncated or brace_imbalance > 2:
+            return "major"
+        return "minor"
+
+    return "major" if coverage < 0.5 else "minor"
+
+
+_FIX_SYSTEM_INSTRUCTION = """You are given a response that was supposed to be a single valid JSON object but has a formatting problem (e.g. a missing quote, a trailing comma, markdown fences around it, an unescaped control character) or is missing one or two expected top-level fields. Fix ONLY the formatting/structure -- do not invent new content, do not summarize, do not regenerate from scratch, preserve every value that is already present as closely as possible. Return ONLY the corrected, valid JSON object -- no markdown fences, no commentary, no explanation."""
+
+
+async def _attempt_fix(
+    client: httpx.AsyncClient, api_key: str, raw: str, expected_keys: list[str] | None, label: str
+) -> Any | None:
+    """One lightweight repair attempt via settings.llm_validation_fix_model -- reformats/patches
+    the given broken output, never regenerates it from scratch. Returns the parsed, fixed result,
+    or None if the fix attempt itself fails (caller then skips this tier entirely)."""
+    fix_messages = [
+        {"role": "system", "content": _FIX_SYSTEM_INSTRUCTION},
+        {
+            "role": "user",
+            "content": (
+                f"Expected top-level JSON fields: {expected_keys or 'unspecified'}\n\n"
+                f"Broken response to fix:\n{raw}"
+            ),
+        },
+    ]
+    try:
+        fixed_raw = await _call_single_model(
+            client, api_key, fix_messages, settings.llm_validation_fix_model, settings.llm_validation_fix_timeout_seconds
+        )
+    except Exception as err:
+        logger.error("[%s] Fix pass via %s failed to respond: %s", label, settings.llm_validation_fix_model, err)
+        return None
+
+    fixed_parsed = _try_parse_json(fixed_raw)
+    if fixed_parsed is None or _keys_coverage(fixed_parsed, expected_keys) < 1.0:
+        logger.error("[%s] Fix pass via %s did not produce valid/complete JSON", label, settings.llm_validation_fix_model)
+        return None
+    return fixed_parsed
+
+
+async def _call_llm_with_fallback_chain(
     api_key: str,
     messages: list[dict[str, str]],
     label: str,
-    max_attempts: int = 5,
-    retry_delay_ms: int = 500,
+    expected_keys: list[str] | None = None,
+    timeout_seconds: float | None = None,
 ) -> Any:
-    """Calls OpenRouter (model set by the single LLM_MODEL env var -- settings.llm_model, see
-    app/config.py -- never hardcoded here or anywhere else) with the given messages and parses
-    the response as JSON, retrying on both request failures and JSON parse failures (some models
-    occasionally return a stray character that breaks json.loads despite response_format:
-    json_object -- originally observed with Gemini 2.5 Flash, but the retry is model-agnostic).
-    On a parse failure specifically, the retry re-sends the conversation with the model's bad
-    output plus a corrective note, rather than just repeating the original request. On a 429
-    (rate-limited upstream, common on free-tier model slugs), backs off exponentially (1s, 2s,
-    4s, 8s, ...) instead of the flat retry_delay_ms, since a fixed short delay was observed to
-    consistently burn the whole attempt budget without giving the shared free pool time to clear.
+    """Walks settings.llm_chain in order (see app/config.py -- LLM_MODEL_CHAIN env var), giving
+    each model exactly ONE attempt. Any failure -- request error, timeout, or unparseable/
+    incomplete output -- moves to the next tier immediately; a model is never retried against
+    itself (a different model's shared free-tier pool usually isn't contended at the same moment
+    a rate-limited one is, so cross-model fallback recovers faster than same-model backoff did).
 
-    Raises a clear, human-readable error (never a raw exception) if all attempts are
-    exhausted. Deliberately returns loosely-typed Any, not a strict Pydantic model, to match
-    the pre-split behavior where LLM output was never runtime-validated either."""
-    current_messages = messages
+    Models in settings.llm_validated_model_set get an extra validation + auto-fix pass before
+    their output is trusted or discarded (see _classify_output_issue/_attempt_fix); every other
+    tier is judged purely on "did it parse and cover the expected schema". The last model in the
+    chain is the paid last-resort tier and is logged at WARNING when reached, so how often the
+    free tier is insufficient is visible in monitoring without being exposed to the end user.
+
+    Raises a clear, human-readable error (never a raw exception) if every tier is exhausted.
+    Deliberately returns loosely-typed Any, not a strict Pydantic model, to match the pre-split
+    behavior where LLM output was never runtime-validated either."""
+    timeout = timeout_seconds or settings.llm_per_model_timeout_seconds
+    chain = settings.llm_chain
+    validated = settings.llm_validated_model_set
     last_error: Exception | None = None
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        for attempt in range(1, max_attempts + 1):
-            content_str: str | None = None
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        for i, model in enumerate(chain):
+            is_last = i == len(chain) - 1
+            if is_last:
+                logger.warning(
+                    "[%s] All free-tier models in the chain failed -- falling back to paid tier: %s", label, model
+                )
+
             try:
-                response = await client.post(
-                    OPENROUTER_URL,
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                        "X-Title": "AI Cloud Architecture Generator",
-                    },
-                    json={
-                        "model": settings.llm_model,
-                        "messages": current_messages,
-                        "response_format": {"type": "json_object"},
-                    },
-                )
-
-                if not response.is_success:
-                    err_body = response.text
-                    raise Exception(f"OpenRouter API error: {response.status_code} - {err_body}")
-
-                data = response.json()
-                raw = data["choices"][0]["message"]["content"].strip()
-                content_str = raw
-
-                try:
-                    return json.loads(raw)
-                except json.JSONDecodeError:
-                    cleaned = _FENCE_OPEN_JSON_RE.sub("", raw)
-                    cleaned = _FENCE_OPEN_RE.sub("", cleaned)
-                    cleaned = _FENCE_CLOSE_RE.sub("", cleaned)
-                    cleaned = cleaned.strip()
-                    return json.loads(cleaned)
+                raw = await _call_single_model(client, api_key, messages, model, timeout)
             except Exception as err:
+                logger.error("[%s] %s failed/timed out, moving to next tier: %s", label, model, err)
                 last_error = err
-                is_parse_failure = content_str is not None
-                is_rate_limit = not is_parse_failure and _is_rate_limit_error(err)
-                logger.error(
-                    "[%s] Attempt %d/%d failed (%s): %s",
-                    label,
-                    attempt,
-                    max_attempts,
-                    "rate limited" if is_rate_limit else ("JSON parse error" if is_parse_failure else "request error"),
-                    err,
-                )
+                continue
 
-                if attempt < max_attempts:
-                    if is_parse_failure:
-                        # Show the model its own bad output plus a corrective note, rather than
-                        # just blindly repeating the same prompt and risking the same mistake
-                        # again.
-                        current_messages = [
-                            *messages,
-                            {"role": "assistant", "content": content_str},
-                            {
-                                "role": "user",
-                                "content": "Your previous response could not be parsed as valid JSON. Return ONLY a single valid JSON object — no markdown code fences, no commentary, and no extra characters before or after the JSON.",
-                            },
-                        ]
-                    else:
-                        current_messages = messages
+            parsed = _try_parse_json(raw)
 
-                    if is_rate_limit:
-                        # 2^(attempt-1) seconds: 1s, 2s, 4s, 8s, ... A free-tier shared pool needs
-                        # real time to clear, not a flat 500ms that just re-hits the same limit.
-                        await asyncio.sleep(2 ** (attempt - 1))
-                    else:
-                        await asyncio.sleep(retry_delay_ms / 1000)
+            if model in validated:
+                issue = _classify_output_issue(raw, parsed, expected_keys)
+                if issue == "ok":
+                    logger.info("[%s] served by %s (validated, no issues)", label, model)
+                    return parsed
+                if issue == "minor":
+                    logger.error(
+                        "[%s] %s output had minor validation issues, attempting auto-fix via %s",
+                        label,
+                        model,
+                        settings.llm_validation_fix_model,
+                    )
+                    fixed = await _attempt_fix(client, api_key, raw, expected_keys, label)
+                    if fixed is not None:
+                        logger.info("[%s] served by %s (auto-fixed by %s)", label, model, settings.llm_validation_fix_model)
+                        return fixed
+                    logger.error("[%s] %s auto-fix failed, moving to next tier", label, model)
+                else:
+                    logger.error(
+                        "[%s] %s output had major validation issues (unsalvageable), moving to next tier", label, model
+                    )
+                last_error = Exception(f"{model} failed validation")
+                continue
 
-    reason = str(last_error) if last_error is not None else "the AI model did not return a valid response"
-    raise Exception(f"{label} failed after {max_attempts} attempts: {reason}. Please try again.")
+            # Non-validated tiers only need to produce valid JSON (matching the original,
+            # pre-chain behavior) -- the stricter "does it match the expected schema" bar is
+            # deliberately reserved for the validated tier(s) only, per spec. Requiring full key
+            # coverage here would reject a capable model's slightly-differently-shaped-but-usable
+            # response just as readily as it would reject genuine garbage.
+            if parsed is not None:
+                logger.info("[%s] served by %s", label, model)
+                return parsed
+
+            logger.error("[%s] %s returned unparseable output, moving to next tier", label, model)
+            last_error = Exception(f"{model} returned unparseable output")
+
+    reason = str(last_error) if last_error is not None else "no model in the fallback chain returned a valid response"
+    raise Exception(f"{label} failed across the entire model fallback chain: {reason}. Please try again.")
 
 
 async def get_next_brainstorm_turn(
@@ -270,20 +384,39 @@ Do not include markdown code block formatting (like ```json) in your raw respons
         *[{"role": "user" if h["role"] == "user" else "assistant", "content": h["message"]} for h in history],
     ]
 
+    expected_keys = (
+        ["message", "isComplete", "stage", "detectedIndustry", "industryRationale", "suggestedReplies"]
+        if is_growth_phase
+        else [
+            "message",
+            "isComplete",
+            "stage",
+            "detectedIndustry",
+            "industryRationale",
+            "detectedDomain",
+            "domainRationale",
+            "referenceSystem",
+            "knowledgeLevel",
+            "suggestedReplies",
+        ]
+    )
+
     try:
-        result = await _call_llm_with_retry(api_key, messages_for_api, "Brainstorm turn generation")
+        result = await _call_llm_with_fallback_chain(
+            api_key, messages_for_api, "Brainstorm turn generation", expected_keys=expected_keys
+        )
 
         if _looks_like_leaked_apology(result["message"]):
             logger.error(
                 "[Brainstorm turn generation] Detected leaked apology text in response, re-requesting with a clean prompt"
             )
-            result = await _call_llm_with_retry(
-                api_key, messages_for_api, "Brainstorm turn generation (apology cleanup)"
+            result = await _call_llm_with_fallback_chain(
+                api_key, messages_for_api, "Brainstorm turn generation (apology cleanup)", expected_keys=expected_keys
             )
 
         return result
     except Exception as err:
-        logger.error("Brainstorm turn generation exhausted all retries, falling back to a generic question: %s", err)
+        logger.error("Brainstorm turn generation exhausted the whole model fallback chain, falling back to a generic question: %s", err)
         return {
             "message": "Thank you for the details. Could you share a bit more about your scaling or compliance requirements?",
             "isComplete": len(history) >= 6,
@@ -363,7 +496,12 @@ Do not include markdown code block formatting (like ```json) in your response, r
         *[{"role": "user" if h["role"] == "user" else "assistant", "content": h["message"]} for h in history],
     ]
 
-    return await _call_llm_with_retry(api_key, messages_for_api, "Requirement extraction")
+    return await _call_llm_with_fallback_chain(
+        api_key,
+        messages_for_api,
+        "Requirement extraction",
+        expected_keys=["functional", "nonFunctional", "industryContext", "productDomain", "existingSystem"],
+    )
 
 
 async def generate_conversation_summary(
@@ -419,7 +557,9 @@ Do not include markdown code block formatting (like ```json) in your response, r
         {"role": "system", "content": system_instruction},
         {"role": "user", "content": json.dumps(input_context)},
     ]
-    result = await _call_llm_with_retry(api_key, messages_for_api, "Conversation summary generation")
+    result = await _call_llm_with_fallback_chain(
+        api_key, messages_for_api, "Conversation summary generation", expected_keys=["summary", "sources"]
+    )
     return {"summary": result["summary"], "sources": result.get("sources") or []}
 
 
@@ -489,7 +629,9 @@ Do not include markdown code block formatting (like ```json) in your response, r
         {"role": "system", "content": system_instruction},
         {"role": "user", "content": json.dumps(input_context)},
     ]
-    result = await _call_llm_with_retry(api_key, messages_for_api, "Flow story generation")
+    result = await _call_llm_with_fallback_chain(
+        api_key, messages_for_api, "Flow story generation", expected_keys=["story", "sources"]
+    )
     return {"story": result["story"], "sources": result.get("sources") or []}
 
 
@@ -539,7 +681,9 @@ Do not include markdown code block formatting (like ```json) in your response, r
         {"role": "system", "content": system_instruction},
         {"role": "user", "content": json.dumps(input_context)},
     ]
-    result = await _call_llm_with_retry(api_key, messages_for_api, "User journey generation")
+    result = await _call_llm_with_fallback_chain(
+        api_key, messages_for_api, "User journey generation", expected_keys=["journeySteps"]
+    )
     return result.get("journeySteps") or []
 
 
@@ -598,7 +742,12 @@ Do not include markdown code block formatting (like ```json) in your response, r
         {"role": "system", "content": system_instruction},
         {"role": "user", "content": json.dumps(input_context)},
     ]
-    return await _call_llm_with_retry(api_key, messages_for_api, "Executive summary generation")
+    return await _call_llm_with_fallback_chain(
+        api_key,
+        messages_for_api,
+        "Executive summary generation",
+        expected_keys=["overview", "scalabilityReadiness", "compliancePosture", "keyRisks"],
+    )
 
 
 async def generate_migration_roadmap(
@@ -672,7 +821,9 @@ Do not include markdown code block formatting (like ```json) in your response, r
         {"role": "system", "content": system_instruction},
         {"role": "user", "content": json.dumps(input_context)},
     ]
-    result = await _call_llm_with_retry(api_key, messages_for_api, "Migration roadmap generation")
+    result = await _call_llm_with_fallback_chain(
+        api_key, messages_for_api, "Migration roadmap generation", expected_keys=["phases"]
+    )
     return result.get("phases") or []
 
 
@@ -721,7 +872,22 @@ Do not include markdown code block formatting (like ```json) in your response, r
         {"role": "system", "content": system_instruction},
         {"role": "user", "content": json.dumps(input_context)},
     ]
-    return await _call_llm_with_retry(api_key, messages_for_api, "What-If suggestions generation")
+    return await _call_llm_with_fallback_chain(
+        api_key,
+        messages_for_api,
+        "What-If suggestions generation",
+        expected_keys=[
+            "expectedScale",
+            "readWritePattern",
+            "dataNature",
+            "latencySensitivity",
+            "budget",
+            "teamMaturity",
+            "compliance",
+            "functional",
+            "industry",
+        ],
+    )
 
 
 KNOWN_COMPONENT_TYPES = (
@@ -774,7 +940,9 @@ Do not include markdown code block formatting (like ```json) in your response, r
         {"role": "system", "content": system_instruction},
         {"role": "user", "content": json.dumps(input_context)},
     ]
-    return await _call_llm_with_retry(api_key, messages_for_api, "Component suggestions generation")
+    return await _call_llm_with_fallback_chain(
+        api_key, messages_for_api, "Component suggestions generation", expected_keys=["suggestions"]
+    )
 
 
 async def propose_component_changes(
@@ -848,7 +1016,9 @@ Do not include markdown code block formatting (like ```json) in your raw respons
         {"role": "system", "content": system_instruction},
         {"role": "user", "content": json.dumps(input_context)},
     ]
-    result = await _call_llm_with_retry(api_key, messages_for_api, "Component change proposal generation")
+    result = await _call_llm_with_fallback_chain(
+        api_key, messages_for_api, "Component change proposal generation", expected_keys=["proposals"]
+    )
     return result.get("proposals") or []
 
 
@@ -909,7 +1079,9 @@ Do not include markdown code block formatting (like ```json) in your raw respons
         {"role": "system", "content": system_instruction},
         {"role": "user", "content": json.dumps(input_context)},
     ]
-    result = await _call_llm_with_retry(api_key, messages_for_api, "Proposal refinement")
+    result = await _call_llm_with_fallback_chain(
+        api_key, messages_for_api, "Proposal refinement", expected_keys=["assistantReply", "proposal"]
+    )
     return {"assistantReply": result.get("assistantReply") or "", "proposal": result["proposal"]}
 
 
@@ -974,7 +1146,21 @@ Do not include markdown code block formatting (like ```json) in your response, r
         {"role": "user", "content": json.dumps(input_context)},
     ]
 
-    return await _call_llm_with_retry(api_key, messages_for_api, "Requirement suggestions")
+    return await _call_llm_with_fallback_chain(
+        api_key,
+        messages_for_api,
+        "Requirement suggestions",
+        expected_keys=[
+            "expectedScale",
+            "readWritePattern",
+            "dataNature",
+            "latencySensitivity",
+            "budget",
+            "teamMaturity",
+            "compliance",
+            "functional",
+        ],
+    )
 
 
 async def validate_and_generate_architecture(
@@ -1116,7 +1302,16 @@ Do not use markdown code block formatting (like ```json) in your response, retur
         {"role": "user", "content": json.dumps(input_context)},
     ]
 
-    return await _call_llm_with_retry(api_key, messages_for_api, "Architecture generation")
+    # Deeply-nested output (per-component cloudMappings for 3 providers each) is the largest and
+    # slowest-to-generate response of any call site -- give each chain tier double the default
+    # timeout so a legitimately-still-generating model isn't mistaken for a hung one.
+    return await _call_llm_with_fallback_chain(
+        api_key,
+        messages_for_api,
+        "Architecture generation",
+        expected_keys=["components", "connections", "assumptions", "risks", "recommendation"],
+        timeout_seconds=30.0,
+    )
 
 
 async def tag_knowledge_chunk_topics(chunk_text: str, book_title: str, api_key: str) -> list[str]:
@@ -1141,5 +1336,7 @@ Do not include markdown code block formatting (like ```json) in your response, r
         {"role": "system", "content": system_instruction},
         {"role": "user", "content": json.dumps(input_context)},
     ]
-    result = await _call_llm_with_retry(api_key, messages_for_api, "Knowledge chunk tagging")
+    result = await _call_llm_with_fallback_chain(
+        api_key, messages_for_api, "Knowledge chunk tagging", expected_keys=["tags"]
+    )
     return result.get("tags", [])

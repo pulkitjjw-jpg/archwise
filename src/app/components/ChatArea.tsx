@@ -2,6 +2,20 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import InfoTooltip from "./InfoTooltip";
+import { useStagedLoadingMessage } from "@/app/hooks/useStagedLoadingMessage";
+
+// Short, natural-feeling phrases shown while a brainstorm reply is in flight -- the backend may
+// be walking a multi-model fallback chain under the hood if the primary model is unavailable,
+// but that mechanic is never surfaced here; these just make the wait feel like normal "thinking"
+// time instead of an unmoving typing indicator. Brainstorm turns are normally fast (a few
+// seconds), so this cycles faster than the ~30-45s architecture-generation wait.
+const THINKING_STAGES = [
+  "Reading through what you've shared...",
+  "Thinking through the details...",
+  "Considering what to ask next...",
+  "Almost there...",
+];
+const THINKING_STAGE_INTERVAL_MS = 3000;
 
 type ConversationTurn = {
   id: string;
@@ -21,6 +35,7 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
   const [messages, setMessages] = useState<ConversationTurn[]>(initialConversations);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const thinkingStage = useStagedLoadingMessage(sending, THINKING_STAGES, THINKING_STAGE_INTERVAL_MS);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   // Scroll to bottom on new messages or typing indicator
@@ -225,10 +240,13 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
               <div className="font-bold text-[10px] uppercase tracking-wider mb-1 opacity-75">
                 Assistant
               </div>
-              <div className="flex items-center gap-1 py-1">
-                <span className="h-2 w-2 animate-bounce rounded-full bg-ink-faint [animation-delay:-0.3s]" />
-                <span className="h-2 w-2 animate-bounce rounded-full bg-ink-faint [animation-delay:-0.15s]" />
-                <span className="h-2 w-2 animate-bounce rounded-full bg-ink-faint" />
+              <div className="flex items-center gap-2 py-1">
+                <div className="flex items-center gap-1">
+                  <span className="h-2 w-2 animate-bounce rounded-full bg-ink-faint [animation-delay:-0.3s]" />
+                  <span className="h-2 w-2 animate-bounce rounded-full bg-ink-faint [animation-delay:-0.15s]" />
+                  <span className="h-2 w-2 animate-bounce rounded-full bg-ink-faint" />
+                </div>
+                <span className="text-xs text-ink-muted italic">{thinkingStage}</span>
               </div>
             </div>
           </div>

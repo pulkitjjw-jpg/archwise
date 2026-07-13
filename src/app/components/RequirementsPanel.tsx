@@ -4,6 +4,15 @@ import { useEffect, useState } from "react";
 import InfoTooltip from "./InfoTooltip";
 import SourceCitations, { type Citation } from "./SourceCitations";
 import { FIELD_EXPLANATIONS } from "@/lib/field-explanations";
+import { useStagedLoadingMessage } from "@/app/hooks/useStagedLoadingMessage";
+
+const EXTRACTION_STAGES = [
+  "Reading through the discovery conversation...",
+  "Structuring functional capabilities...",
+  "Weighing non-functional constraints...",
+  "Almost done...",
+];
+const EXTRACTION_STAGE_INTERVAL_MS = 4000;
 
 type RequirementsData = {
   functional: string[];
@@ -51,6 +60,7 @@ export default function RequirementsPanel({
   const [requirements, setRequirements] = useState<RequirementsData | null>(null);
   const [loading, setLoading] = useState(true);
   const [extracting, setExtracting] = useState(false);
+  const extractionStage = useStagedLoadingMessage(extracting, EXTRACTION_STAGES, EXTRACTION_STAGE_INTERVAL_MS);
   const [editMode, setEditMode] = useState(false);
   const [error, setError] = useState("");
 
@@ -365,10 +375,7 @@ export default function RequirementsPanel({
         <div className="h-10 w-10 animate-bounce rounded-full bg-accent flex items-center justify-center text-white font-bold text-xl shadow-md">
           ⚙️
         </div>
-        <span className="mt-4 text-base font-semibold text-ink">Synthesizing requirements...</span>
-        <span className="mt-2 text-xs text-ink-muted max-w-sm">
-          Analyzing the chat transcript to structure functional features and non-functional constraints.
-        </span>
+        <span className="mt-4 text-base font-semibold text-ink">{extractionStage}</span>
       </div>
     );
   }
