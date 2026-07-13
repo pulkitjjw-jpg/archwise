@@ -6,10 +6,11 @@ from typing import Any
 
 import httpx
 
+from app.config import settings
+
 logger = logging.getLogger("app.services.llm")
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "google/gemini-2.5-flash"
 
 _LEAKED_APOLOGY_RE = re.compile(r"^\s*(apolog|i apologize|i'm sorry|my apologies|sorry[,!]? )", re.IGNORECASE)
 _FENCE_OPEN_JSON_RE = re.compile(r"^```json\s*", re.IGNORECASE)
@@ -18,24 +19,38 @@ _FENCE_CLOSE_RE = re.compile(r"\s*```$")
 
 
 def _looks_like_leaked_apology(message: str) -> bool:
-    """Gemini occasionally apologizes for a previous malformed-JSON attempt even after a
-    successful retry, since the corrective note lives earlier in the same conversation. That
-    apology has no business reaching the user-facing chat message."""
+    """Some models apologize for a previous malformed-JSON attempt even after a successful
+    retry, since the corrective note lives earlier in the same conversation (originally observed
+    with Gemini 2.5 Flash; kept as a general safety net since it's cheap and model-agnostic).
+    That apology has no business reaching the user-facing chat message."""
     return bool(_LEAKED_APOLOGY_RE.match(message))
+
+
+def _is_rate_limit_error(err: Exception) -> bool:
+    """OpenRouter free-tier models (":free" slugs) are routed through a shared upstream pool that
+    returns HTTP 429 under contention -- distinct from a genuine request failure, and common
+    enough on free tiers that it needs its own, longer backoff rather than the flat inter-attempt
+    delay used for other errors."""
+    return "429" in str(err)
 
 
 async def _call_llm_with_retry(
     api_key: str,
     messages: list[dict[str, str]],
     label: str,
-    max_attempts: int = 3,
+    max_attempts: int = 5,
     retry_delay_ms: int = 500,
 ) -> Any:
-    """Calls OpenRouter with the given messages and parses the response as JSON, retrying on
-    both request failures and JSON parse failures (Gemini 2.5 Flash occasionally returns a
-    stray character that breaks json.loads despite response_format: json_object). On a parse
-    failure specifically, the retry re-sends the conversation with the model's bad output plus
-    a corrective note, rather than just repeating the original request.
+    """Calls OpenRouter (model set by the single LLM_MODEL env var -- settings.llm_model, see
+    app/config.py -- never hardcoded here or anywhere else) with the given messages and parses
+    the response as JSON, retrying on both request failures and JSON parse failures (some models
+    occasionally return a stray character that breaks json.loads despite response_format:
+    json_object -- originally observed with Gemini 2.5 Flash, but the retry is model-agnostic).
+    On a parse failure specifically, the retry re-sends the conversation with the model's bad
+    output plus a corrective note, rather than just repeating the original request. On a 429
+    (rate-limited upstream, common on free-tier model slugs), backs off exponentially (1s, 2s,
+    4s, 8s, ...) instead of the flat retry_delay_ms, since a fixed short delay was observed to
+    consistently burn the whole attempt budget without giving the shared free pool time to clear.
 
     Raises a clear, human-readable error (never a raw exception) if all attempts are
     exhausted. Deliberately returns loosely-typed Any, not a strict Pydantic model, to match
@@ -55,7 +70,7 @@ async def _call_llm_with_retry(
                         "X-Title": "AI Cloud Architecture Generator",
                     },
                     json={
-                        "model": MODEL,
+                        "model": settings.llm_model,
                         "messages": current_messages,
                         "response_format": {"type": "json_object"},
                     },
@@ -80,12 +95,13 @@ async def _call_llm_with_retry(
             except Exception as err:
                 last_error = err
                 is_parse_failure = content_str is not None
+                is_rate_limit = not is_parse_failure and _is_rate_limit_error(err)
                 logger.error(
                     "[%s] Attempt %d/%d failed (%s): %s",
                     label,
                     attempt,
                     max_attempts,
-                    "JSON parse error" if is_parse_failure else "request error",
+                    "rate limited" if is_rate_limit else ("JSON parse error" if is_parse_failure else "request error"),
                     err,
                 )
 
@@ -104,7 +120,13 @@ async def _call_llm_with_retry(
                         ]
                     else:
                         current_messages = messages
-                    await asyncio.sleep(retry_delay_ms / 1000)
+
+                    if is_rate_limit:
+                        # 2^(attempt-1) seconds: 1s, 2s, 4s, 8s, ... A free-tier shared pool needs
+                        # real time to clear, not a flat 500ms that just re-hits the same limit.
+                        await asyncio.sleep(2 ** (attempt - 1))
+                    else:
+                        await asyncio.sleep(retry_delay_ms / 1000)
 
     reason = str(last_error) if last_error is not None else "the AI model did not return a valid response"
     raise Exception(f"{label} failed after {max_attempts} attempts: {reason}. Please try again.")

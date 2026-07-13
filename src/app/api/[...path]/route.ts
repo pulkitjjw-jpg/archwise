@@ -57,9 +57,14 @@ async function proxy(req: NextRequest, { params }: { params: Promise<{ path: str
       // @ts-expect-error -- required by undici when streaming a request body
       duplex: ["GET", "HEAD"].includes(req.method) ? undefined : "half",
       redirect: "manual",
-      signal: AbortSignal.timeout(60_000),
+      // The backend's own LLM-call retry (_call_llm_with_retry) can take up to ~45s worst-case
+      // on its own (5 attempts, exponential backoff up to 8s between attempts) before it even
+      // falls back -- this must stay comfortably above that so the proxy doesn't abort a request
+      // the backend would have recovered from.
+      signal: AbortSignal.timeout(120_000),
     });
-  } catch {
+  } catch (err) {
+    console.error("Backend proxy request failed:", err);
     return NextResponse.json({ error: "Backend is unreachable" }, { status: 502 });
   }
 
