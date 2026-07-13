@@ -34,6 +34,8 @@ import {
 } from "@/lib/diagram-layout";
 import InfoTooltip from "./InfoTooltip";
 import SourceCitations, { type Citation } from "./SourceCitations";
+import BudgetInput from "./BudgetInput";
+import NumericInput from "./NumericInput";
 
 type CloudProviderKey = "aws" | "azure" | "gcp" | "kubernetes" | "private";
 
@@ -2941,15 +2943,26 @@ export default function ArchitectureWorkspace({
                         Current: {currentValue}
                       </p>
                     )}
-                    <input
-                      type="text"
-                      value={whatIfNFR[field]}
-                      onChange={(e) => setWhatIfNFR((prev) => ({ ...prev, [field]: e.target.value }))}
-                      placeholder="Leave blank to keep the current value"
-                      className={`mt-1.5 w-full rounded-xl border bg-white px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-accent/30 ${
-                        changed ? "border-accent ring-1 ring-accent/30" : "border-line"
-                      }`}
-                    />
+                    {field === "budget" ? (
+                      <BudgetInput
+                        value={whatIfNFR.budget}
+                        onChange={(next) => setWhatIfNFR((prev) => ({ ...prev, budget: next }))}
+                        className="mt-1.5"
+                      />
+                    ) : (
+                      <input
+                        type="text"
+                        value={whatIfNFR[field]}
+                        onChange={(e) => setWhatIfNFR((prev) => ({ ...prev, [field]: e.target.value }))}
+                        placeholder="Leave blank to keep the current value"
+                        // A generous limit for descriptive prose, not a short categorical value --
+                        // matches the same fields' limit on the Requirements tab.
+                        maxLength={300}
+                        className={`mt-1.5 w-full rounded-xl border bg-white px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-accent/30 ${
+                          changed ? "border-accent ring-1 ring-accent/30" : "border-line"
+                        }`}
+                      />
+                    )}
                     {suggestions.length > 0 && (
                       <div className="mt-1.5 flex flex-wrap gap-1">
                         {suggestions.map((s, idx) => (
@@ -4799,14 +4812,32 @@ export default function ArchitectureWorkspace({
                                     {key}
                                   </span>
                                   {isEditing ? (
-                                    <input
-                                      type="text"
-                                      value={val}
-                                      onChange={(e) =>
-                                        handleUpdateLldConfig(selectedNode.id, activeProvider, key, e.target.value)
-                                      }
-                                      className="font-mono text-[10px] font-bold text-ink bg-paper border border-line px-1.5 py-0.5 rounded text-right focus:outline-none focus:ring-1 focus:ring-accent w-32"
-                                    />
+                                    // LLD config values are a mix of genuinely numeric settings
+                                    // (replica counts, storage sizes) and categorical strings
+                                    // (instance types, region names, "true"/"false") sharing one
+                                    // generic key/value editor -- inferred from the CURRENT
+                                    // value's shape (not a hardcoded key-name allowlist, which
+                                    // would go stale) rather than restricting every field.
+                                    /^-?\d+(\.\d+)?$/.test(val) ? (
+                                      <NumericInput
+                                        value={val}
+                                        onChange={(next) =>
+                                          handleUpdateLldConfig(selectedNode.id, activeProvider, key, next)
+                                        }
+                                        maxLength={12}
+                                        className="font-mono text-[10px] font-bold text-ink bg-paper border border-line px-1.5 py-0.5 rounded text-right focus:outline-none focus:ring-1 focus:ring-accent w-32"
+                                      />
+                                    ) : (
+                                      <input
+                                        type="text"
+                                        value={val}
+                                        onChange={(e) =>
+                                          handleUpdateLldConfig(selectedNode.id, activeProvider, key, e.target.value)
+                                        }
+                                        maxLength={100}
+                                        className="font-mono text-[10px] font-bold text-ink bg-paper border border-line px-1.5 py-0.5 rounded text-right focus:outline-none focus:ring-1 focus:ring-accent w-32"
+                                      />
+                                    )
                                   ) : (
                                     <span className="font-mono text-[10px] font-bold text-ink bg-paper px-1.5 py-0.5 rounded text-right">
                                       {val}

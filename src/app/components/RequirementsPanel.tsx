@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import InfoTooltip from "./InfoTooltip";
 import SourceCitations, { type Citation } from "./SourceCitations";
+import BudgetInput from "./BudgetInput";
 import { FIELD_EXPLANATIONS } from "@/lib/field-explanations";
 import { useStagedLoadingMessage } from "@/app/hooks/useStagedLoadingMessage";
 
@@ -293,15 +294,28 @@ export default function RequirementsPanel({
             {label}
             {FIELD_EXPLANATIONS[fieldName] && <InfoTooltip text={FIELD_EXPLANATIONS[fieldName]} />}
           </label>
-          <input
-            id={`nfr-input-${fieldName}`}
-            type="text"
-            value={editedNFR[fieldName]}
-            onChange={(e) =>
-              setEditedNFR((prev) => ({ ...prev, [fieldName]: e.target.value }))
-            }
-            className="w-full rounded-xl border border-line bg-white px-3 py-2 text-xs text-ink shadow-sm focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent transition-all duration-200"
-          />
+          {fieldName === "budget" ? (
+            <BudgetInput
+              id={`nfr-input-${fieldName}`}
+              value={editedNFR.budget}
+              onChange={(next) => setEditedNFR((prev) => ({ ...prev, budget: next }))}
+            />
+          ) : (
+            <input
+              id={`nfr-input-${fieldName}`}
+              type="text"
+              value={editedNFR[fieldName]}
+              onChange={(e) =>
+                setEditedNFR((prev) => ({ ...prev, [fieldName]: e.target.value }))
+              }
+              // A generous limit for a descriptive sentence or two -- these fields (scale,
+              // read/write pattern, data types, etc.) are intentionally free text, often
+              // LLM-populated with prose like "500-1000 concurrent riders, 200-400 drivers at
+              // peak", not restricted to short categorical values.
+              maxLength={300}
+              className="w-full rounded-xl border border-line bg-white px-3 py-2 text-xs text-ink shadow-sm focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent transition-all duration-200"
+            />
+          )}
           {suggestionsLoading ? (
             <div className="flex items-center gap-1.5 text-[10px] text-ink-faint italic">
               <span className="h-2.5 w-2.5 animate-spin rounded-full border-2 border-accent border-t-transparent" />

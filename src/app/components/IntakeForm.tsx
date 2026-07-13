@@ -197,6 +197,9 @@ export default function IntakeForm() {
             value={name}
             onChange={(e) => setName(e.target.value)}
             disabled={loading}
+            // A short label, not a description -- the idea text field below (kept unlimited,
+            // full context matters there) is where the actual detail belongs.
+            maxLength={120}
             className="mt-2 w-full rounded-2xl border border-line bg-white px-4 py-3 text-sm text-ink shadow-sm focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
             required
           />
