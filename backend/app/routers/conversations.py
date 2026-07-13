@@ -1,13 +1,15 @@
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db import get_db
+from app.dependencies import get_owned_project
 from app.models import Conversation, Project
+from app.rate_limit import limiter
 from app.schemas import ConversationCreateRequest
 from app.serializers import serialize_conversation
 from app.services.llm import get_next_brainstorm_turn
@@ -25,31 +27,34 @@ async def _load_history(db: AsyncSession, project_id: uuid.UUID) -> list[Convers
 
 
 @router.get("/projects/{project_id}/conversations")
-async def list_conversations(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> dict:
-    history = await _load_history(db, project_id)
+async def list_conversations(project: Project = Depends(get_owned_project), db: AsyncSession = Depends(get_db)) -> dict:
+    history = await _load_history(db, project.id)
     return {"conversations": [serialize_conversation(c) for c in history]}
 
 
 @router.post("/projects/{project_id}/conversations", status_code=201)
+@limiter.limit("60/hour")
 async def create_conversation_turn(
-    project_id: uuid.UUID, payload: ConversationCreateRequest, db: AsyncSession = Depends(get_db)
+    request: Request,
+    payload: ConversationCreateRequest,
+    project: Project = Depends(get_owned_project),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     if not payload.role or not payload.message or not payload.stage:
         raise HTTPException(status_code=400, detail="role, message, and stage are required")
 
     # 1. Insert user message
-    user_turn = Conversation(project_id=project_id, role=payload.role, message=payload.message, stage=payload.stage)
+    user_turn = Conversation(project_id=project.id, role=payload.role, message=payload.message, stage=payload.stage)
     db.add(user_turn)
     await db.flush()
 
     # 2. Load conversation history
-    history = await _load_history(db, project_id)
+    history = await _load_history(db, project.id)
 
-    # 3. Load project context
-    project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
-    project_name = (project.name if project else None) or "Cloud Project"
-    known_knowledge_level = (project.knowledge_level if project else None) or "unknown"
-    has_existing_system = bool(project.has_existing_system) if project else False
+    # 3. Project context (already loaded and ownership-checked by get_owned_project)
+    project_name = project.name or "Cloud Project"
+    known_knowledge_level = project.knowledge_level or "unknown"
+    has_existing_system = bool(project.has_existing_system)
 
     # 4. Generate AI follow-up
     assistant_turn_data = {
@@ -72,14 +77,14 @@ async def create_conversation_turn(
             "suggestedReplies": next_turn.get("suggestedReplies") or [],
         }
         detected_level = next_turn.get("knowledgeLevel")
-        if project is not None and known_knowledge_level == "unknown" and detected_level in ("technical", "beginner"):
+        if known_knowledge_level == "unknown" and detected_level in ("technical", "beginner"):
             project.knowledge_level = detected_level
     except Exception as llm_err:
         logger.error("Failed to generate assistant response: %s", llm_err)
 
     # 5. Insert assistant message
     assistant_turn = Conversation(
-        project_id=project_id,
+        project_id=project.id,
         role="assistant",
         message=assistant_turn_data["message"],
         stage=assistant_turn_data["stage"],

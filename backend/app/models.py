@@ -28,6 +28,28 @@ INDUSTRY_CONTEXT_DEFAULT = text(
 PRODUCT_DOMAIN_DEFAULT = text(r"""'{"category":"other","rationale":"","referenceSystem"\:null}'::jsonb""")
 
 
+class User(Base):
+    """Added when per-user auth was introduced (Phase B, Milestone 1) -- until then the app had no
+    concept of a user at all (see the now-stale comment on ShareLink below). Sessions are NOT
+    stored here -- they live in Redis as opaque secrets.token_urlsafe tokens (see app/security.py),
+    the same proven pattern as ShareLink.token, so a session can be revoked instantly by deleting
+    its Redis key without touching this table."""
+
+    __tablename__ = "users"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    email: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("clock_timestamp()")
+    )
+
+    projects: Mapped[list["Project"]] = relationship(back_populates="user", passive_deletes=True)
+
+
 class Project(Base):
     __tablename__ = "projects"
 
@@ -36,6 +58,13 @@ class Project(Base):
     )
     name: Mapped[str] = mapped_column(Text, nullable=False)
     owner: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Nullable: added after the app already had projects with no concept of a user (see User
+    # above). Existing pre-auth rows keep user_id=NULL and become invisible once every router
+    # filters on ownership -- there's no real owner to backfill them to. Every project created
+    # from here on always sets this at creation time.
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
     )
@@ -51,6 +80,7 @@ class Project(Base):
     # deployment/pain points instead of (or alongside) the usual greenfield checklist.
     has_existing_system: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
 
+    user: Mapped["User | None"] = relationship(back_populates="projects")
     conversations: Mapped[list["Conversation"]] = relationship(back_populates="project", passive_deletes=True)
     requirements: Mapped[list["Requirement"]] = relationship(back_populates="project", passive_deletes=True)
     architectures: Mapped[list["Architecture"]] = relationship(back_populates="project", passive_deletes=True)
@@ -60,10 +90,9 @@ class Project(Base):
 class ShareLink(Base):
     """Workstream T7 -- an unguessable token granting read-only, no-login access to a project's
     latest architecture. Deliberately its own table (not a column on Project) so a project can
-    have several links with independent lifetimes, and revoking one never affects another. The
-    app has no per-user auth anywhere (see main.py's single shared internal-auth secret, which
-    only gates Next's server talking to FastAPI, never an end user) -- this token is the first and
-    only thing in the app that gates access to a specific project's data at all."""
+    have several links with independent lifetimes, and revoking one never affects another.
+    Deliberately stays anonymous/unauthenticated even after per-user auth was added (see User
+    above) -- that's the entire point of a shareable link: the recipient never needs an account."""
 
     __tablename__ = "share_links"
 

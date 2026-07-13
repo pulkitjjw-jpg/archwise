@@ -485,6 +485,14 @@ export default function ArchitectureWorkspace({
   // zero architecture background. Technical is one click away, not buried.
   const [explanationMode, setExplanationMode] = useState<"simple" | "technical">("simple");
   const [error, setError] = useState("");
+  // Paired with `error` so the Retry button always re-attempts whatever actually failed. Six
+  // different handlers write to the shared `error` state above (generate, both exports, docs
+  // export, manual save, apply-proposals) -- without this, the render-site Retry button was
+  // hard-wired to handleGenerate regardless of which of those six actually threw, so clicking
+  // Retry after e.g. a failed export silently kicked off a full architecture regeneration
+  // instead. Wrapped in `() => fn` when set, since useState would otherwise call a bare function
+  // value immediately as an updater.
+  const [errorRetryAction, setErrorRetryAction] = useState<(() => void) | null>(null);
   const [versionList, setVersionList] = useState<ArchitectureData[]>([]);
   // Evolution History -- collapsed by default, a supplementary deep-dive next to the always-
   // visible Flow Story, not a replacement for it.
@@ -594,6 +602,7 @@ export default function ArchitectureWorkspace({
     try {
       setGenerating(true);
       setError("");
+      setErrorRetryAction(null);
       const res = await fetch(`/api/projects/${projectId}/architectures`, {
         method: "POST",
       });
@@ -613,6 +622,7 @@ export default function ArchitectureWorkspace({
       setRegeneratePreview(null);
     } catch (err: any) {
       setError(err.message || "An unexpected error occurred during generation.");
+      setErrorRetryAction(() => handleGenerate);
     } finally {
       setGenerating(false);
     }
@@ -682,6 +692,8 @@ export default function ArchitectureWorkspace({
     const filenameBase = `architecture-diagram-v${architecture.version}`;
     try {
       setImageExportBusy(true);
+      setError("");
+      setErrorRetryAction(null);
       if (format === "svg") {
         const svgEl = diagramSvgRef.current;
         if (!svgEl) return;
@@ -750,6 +762,7 @@ export default function ArchitectureWorkspace({
     } catch (err) {
       console.error("Diagram image export failed:", err);
       setError("Failed to export diagram image. Please try again.");
+      setErrorRetryAction(() => () => handleExportDiagramImage(format));
     } finally {
       setImageExportBusy(false);
     }
@@ -764,6 +777,8 @@ export default function ArchitectureWorkspace({
     setImageExportOpen(false);
     try {
       setDocsExportBusy(true);
+      setError("");
+      setErrorRetryAction(null);
 
       const [projectRes, summaryRes] = await Promise.all([
         fetch(`/api/projects/${projectId}`),
@@ -798,6 +813,7 @@ export default function ArchitectureWorkspace({
     } catch (err) {
       console.error("Flow documentation export failed:", err);
       setError("Failed to export architecture documentation. Please try again.");
+      setErrorRetryAction(() => handleExportFlowDocs);
     } finally {
       setDocsExportBusy(false);
     }
@@ -815,6 +831,7 @@ export default function ArchitectureWorkspace({
     try {
       setExecSummaryExportBusy(true);
       setError("");
+      setErrorRetryAction(null);
       const res = await fetch(`/api/projects/${projectId}/export/executive-summary?provider=${activeProvider}`);
       if (!res.ok) throw new Error("Failed to generate the executive summary");
       const blob = await res.blob();
@@ -829,6 +846,7 @@ export default function ArchitectureWorkspace({
     } catch (err) {
       console.error("Executive summary export failed:", err);
       setError("Failed to generate the executive summary. Please try again.");
+      setErrorRetryAction(() => handleExportExecutiveSummary);
     } finally {
       setExecSummaryExportBusy(false);
     }
@@ -1117,6 +1135,7 @@ export default function ArchitectureWorkspace({
     try {
       setSavingManualChanges(true);
       setError("");
+      setErrorRetryAction(null);
       const res = await fetch(`/api/projects/${projectId}/architectures/manual`, {
         method: "POST",
         headers: {
@@ -1139,6 +1158,7 @@ export default function ArchitectureWorkspace({
       await loadArchitecture(data.architecture.version);
     } catch (err: any) {
       setError(err.message || "An error occurred while saving overrides.");
+      setErrorRetryAction(() => handleSaveManualChanges);
     } finally {
       setSavingManualChanges(false);
     }
@@ -2077,6 +2097,7 @@ export default function ArchitectureWorkspace({
       setApplyingProposals(true);
       growthTrigger.markApplying();
       setError("");
+      setErrorRetryAction(null);
       const res = await fetch(`/api/projects/${projectId}/architectures/manual`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2096,6 +2117,7 @@ export default function ArchitectureWorkspace({
     } catch (err: any) {
       const message = err.message || "An error occurred while applying approved changes.";
       setError(message);
+      setErrorRetryAction(() => handleApplyProposals);
       growthTrigger.markApplyFailed(message);
     } finally {
       setApplyingProposals(false);
@@ -2295,7 +2317,10 @@ export default function ArchitectureWorkspace({
                   Retry
                 </button>
                 <button
-                  onClick={() => setError("")}
+                  onClick={() => {
+                    setError("");
+                    setErrorRetryAction(null);
+                  }}
                   className="text-danger transition hover:opacity-70 font-extrabold text-xs px-2 py-1"
                 >
                   Dismiss
@@ -2623,13 +2648,16 @@ export default function ArchitectureWorkspace({
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={handleGenerate}
+              onClick={() => (errorRetryAction ?? handleGenerate)()}
               className="rounded-lg bg-danger-soft hover:bg-danger/15 text-danger px-2 py-1 text-xs font-bold transition"
             >
               Retry
             </button>
             <button
-              onClick={() => setError("")}
+              onClick={() => {
+                setError("");
+                setErrorRetryAction(null);
+              }}
               className="text-danger transition hover:opacity-70 font-extrabold text-xs px-2 py-1"
             >
               Dismiss

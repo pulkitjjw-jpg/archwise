@@ -1,13 +1,14 @@
 import logging
-import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db import get_db
-from app.models import Conversation, Project
+from app.dependencies import get_current_user, get_owned_project
+from app.models import Conversation, Project, User
+from app.rate_limit import limiter
 from app.schemas import ProjectCreateRequest
 from app.serializers import serialize_project
 from app.services.llm import get_next_brainstorm_turn
@@ -28,7 +29,7 @@ def _derive_status(conversation_count: int, requirement_count: int, architecture
 
 
 @router.get("/projects")
-async def list_projects(db: AsyncSession = Depends(get_db)) -> dict:
+async def list_projects(db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> dict:
     # Single aggregated query (no N+1): each child table is pre-aggregated per project_id in
     # its own subquery before joining, so the join itself never fans out across tables.
     result = await db.execute(
@@ -57,9 +58,11 @@ async def list_projects(db: AsyncSession = Depends(get_db)) -> dict:
                 SELECT project_id, COUNT(*) AS cnt, MAX(created_at) AS last
                 FROM architectures GROUP BY project_id
             ) arch ON arch.project_id = p.id
+            WHERE p.user_id = :user_id
             ORDER BY "lastUpdated" DESC NULLS LAST
             """
-        )
+        ),
+        {"user_id": current_user.id},
     )
 
     projects_with_status = []
@@ -86,11 +89,22 @@ async def list_projects(db: AsyncSession = Depends(get_db)) -> dict:
 
 
 @router.post("/projects", status_code=201)
-async def create_project(payload: ProjectCreateRequest, db: AsyncSession = Depends(get_db)) -> dict:
+@limiter.limit("60/hour")
+async def create_project(
+    request: Request,
+    payload: ProjectCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
     if not payload.name or not payload.ideaText:
         raise HTTPException(status_code=400, detail="name and ideaText are required")
 
-    project = Project(name=payload.name, current_version="0.1.0", has_existing_system=payload.hasExistingSystem)
+    project = Project(
+        name=payload.name,
+        current_version="0.1.0",
+        has_existing_system=payload.hasExistingSystem,
+        user_id=current_user.id,
+    )
     db.add(project)
     await db.flush()
 
@@ -142,10 +156,5 @@ async def create_project(payload: ProjectCreateRequest, db: AsyncSession = Depen
 
 
 @router.get("/projects/{project_id}")
-async def get_project(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> dict:
-    project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
-
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
+async def get_project(project: Project = Depends(get_owned_project)) -> dict:
     return {"project": serialize_project(project)}

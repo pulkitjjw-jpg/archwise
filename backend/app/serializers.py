@@ -1,4 +1,14 @@
-from app.models import Architecture, Conversation, Project, Requirement
+from app.models import Architecture, Conversation, Project, Requirement, User
+
+
+def serialize_user(u: User) -> dict:
+    # Deliberately excludes password_hash -- never let it flow into a response, even indirectly.
+    return {
+        "id": str(u.id),
+        "email": u.email,
+        "isAdmin": u.is_admin,
+        "createdAt": u.created_at,
+    }
 
 
 def serialize_project(p: Project) -> dict:

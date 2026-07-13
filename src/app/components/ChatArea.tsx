@@ -60,6 +60,10 @@ type ConversationTurn = {
   stage: string;
   suggestedReplies?: string[];
   createdAt: string | Date;
+  // Client-only, never persisted -- set on the optimistically-added user bubble when the send
+  // itself fails, so the message doesn't sit there looking successfully sent with no way to
+  // recover the (already-cleared) input text. See sendMessage's catch block and handleRetrySend.
+  failed?: boolean;
 };
 
 interface ChatAreaProps {
@@ -187,12 +191,21 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
         }
       } catch (error) {
         console.error("Error sending message:", error);
+        // Mark the optimistic bubble as failed instead of leaving it looking identical to a
+        // successfully-sent message -- the input was already cleared above, so this (plus the
+        // Retry affordance in the render below) is the user's only way to recover.
+        setMessages((prev) => prev.map((msg) => (msg.id === tempMessage.id ? { ...msg, failed: true } : msg)));
       } finally {
         setSending(false);
       }
     },
     [sending, isGrowthPhase, projectId, growthTrigger.startGrowthTrigger]
   );
+
+  const handleRetrySend = (failedMessage: ConversationTurn) => {
+    setMessages((prev) => prev.filter((msg) => msg.id !== failedMessage.id));
+    sendMessage(failedMessage.message);
+  };
 
   const handleSend = (e: React.FormEvent) => {
     e.preventDefault();
@@ -262,9 +275,11 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
             >
               <div
                 className={`max-w-[80%] rounded-[1.5rem] px-5 py-3 text-sm leading-relaxed shadow-sm ${
-                  isUser
-                    ? "bg-accent text-white rounded-br-none"
-                    : "bg-paper text-ink rounded-bl-none border border-line"
+                  msg.failed
+                    ? "bg-danger-soft text-ink border border-danger/40 rounded-br-none"
+                    : isUser
+                      ? "bg-accent text-white rounded-br-none"
+                      : "bg-paper text-ink rounded-bl-none border border-line"
                 }`}
               >
                 <div className="font-bold text-[10px] uppercase tracking-wider mb-1 opacity-75">
@@ -275,17 +290,29 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
                 ) : (
                   <ReactMarkdown components={ASSISTANT_MARKDOWN_COMPONENTS}>{msg.message}</ReactMarkdown>
                 )}
-                <div className="text-[9px] text-right mt-1 opacity-60">
-                  {/* Locale pinned explicitly (not the runtime default) so the SSR pass and the
-                      browser always format this identically -- an unspecified locale/hour12 can
-                      resolve differently between Node and the browser even for the same wall-clock
-                      time, which is a hydration mismatch. */}
-                  {new Date(msg.createdAt).toLocaleTimeString("en-US", {
-                    hour: "2-digit",
-                    minute: "2-digit",
-                    hour12: true,
-                  })}
-                </div>
+                {msg.failed ? (
+                  <div className="mt-2 flex items-center gap-2 text-[11px] font-semibold text-danger">
+                    <span>⚠ Failed to send</span>
+                    <button
+                      onClick={() => handleRetrySend(msg)}
+                      className="rounded-full border border-danger/40 px-2.5 py-0.5 text-danger transition hover:bg-danger/10"
+                    >
+                      Retry
+                    </button>
+                  </div>
+                ) : (
+                  <div className="text-[9px] text-right mt-1 opacity-60">
+                    {/* Locale pinned explicitly (not the runtime default) so the SSR pass and the
+                        browser always format this identically -- an unspecified locale/hour12 can
+                        resolve differently between Node and the browser even for the same wall-clock
+                        time, which is a hydration mismatch. */}
+                    {new Date(msg.createdAt).toLocaleTimeString("en-US", {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                      hour12: true,
+                    })}
+                  </div>
+                )}
               </div>
             </div>
           );

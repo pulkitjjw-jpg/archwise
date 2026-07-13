@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
+from app.dependencies import get_owned_project
 from app.models import Architecture, Project, ShareLink
 from app.serializers import serialize_architecture
 
@@ -25,16 +26,12 @@ def _serialize_share_link(link: ShareLink) -> dict:
 
 
 @router.post("/projects/{project_id}/share-links", status_code=201)
-async def create_share_link(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> dict:
+async def create_share_link(project: Project = Depends(get_owned_project), db: AsyncSession = Depends(get_db)) -> dict:
     """Workstream T7 -- generates a new unguessable, no-login read-only link for this project.
     A project can have several active links at once; each has an independent lifetime."""
-    project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
     # token_urlsafe(32) -- 256 bits of entropy, not derived from or embedding the project's own
     # UUID, so a leaked/guessed token never reveals or relates to the real project id.
-    link = ShareLink(project_id=project_id, token=secrets.token_urlsafe(32))
+    link = ShareLink(project_id=project.id, token=secrets.token_urlsafe(32))
     db.add(link)
     await db.commit()
 
@@ -42,13 +39,13 @@ async def create_share_link(project_id: uuid.UUID, db: AsyncSession = Depends(ge
 
 
 @router.get("/projects/{project_id}/share-links")
-async def list_share_links(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> dict:
+async def list_share_links(project: Project = Depends(get_owned_project), db: AsyncSession = Depends(get_db)) -> dict:
     """For the creator's own link-management UI -- lists every link ever created for this
     project, active or revoked, newest first."""
     links = (
         (
             await db.execute(
-                select(ShareLink).where(ShareLink.project_id == project_id).order_by(ShareLink.created_at.desc())
+                select(ShareLink).where(ShareLink.project_id == project.id).order_by(ShareLink.created_at.desc())
             )
         )
         .scalars()
@@ -58,13 +55,15 @@ async def list_share_links(project_id: uuid.UUID, db: AsyncSession = Depends(get
 
 
 @router.delete("/projects/{project_id}/share-links/{share_link_id}")
-async def revoke_share_link(project_id: uuid.UUID, share_link_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> dict:
+async def revoke_share_link(
+    share_link_id: uuid.UUID, project: Project = Depends(get_owned_project), db: AsyncSession = Depends(get_db)
+) -> dict:
     """Revokes one link -- the row is kept (revoked_at set), not deleted, so it stays visible in
     the management list as "this used to work." Immediately makes the public /share/{token}
     lookup 404 for anyone still holding the link."""
     link = (
         await db.execute(
-            select(ShareLink).where(ShareLink.id == share_link_id, ShareLink.project_id == project_id)
+            select(ShareLink).where(ShareLink.id == share_link_id, ShareLink.project_id == project.id)
         )
     ).scalar_one_or_none()
     if not link:

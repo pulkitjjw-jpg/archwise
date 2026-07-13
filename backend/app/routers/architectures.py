@@ -1,13 +1,15 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.constants import DEFAULT_INDUSTRY_CONTEXT
 from app.db import get_db
+from app.dependencies import get_owned_project
 from app.models import Architecture, Project, Requirement
+from app.rate_limit import limiter
 from app.schemas import (
     ComponentSuggestionsRequest,
     LayoutOverrideRequest,
@@ -67,14 +69,16 @@ def _next_version(latest_arch: Architecture | None) -> str:
 
 
 @router.get("/projects/{project_id}/architectures")
-async def list_architectures(project_id: uuid.UUID, all: str | None = None, db: AsyncSession = Depends(get_db)) -> dict:
+async def list_architectures(
+    project: Project = Depends(get_owned_project), all: str | None = None, db: AsyncSession = Depends(get_db)
+) -> dict:
     if all == "true":
         result = await db.execute(
-            select(Architecture).where(Architecture.project_id == project_id).order_by(Architecture.created_at.desc())
+            select(Architecture).where(Architecture.project_id == project.id).order_by(Architecture.created_at.desc())
         )
         return {"architectures": [serialize_architecture(a) for a in result.scalars().all()]}
 
-    record = await _latest_architecture(db, project_id)
+    record = await _latest_architecture(db, project.id)
 
     # No architecture generated yet is an expected, common state (e.g. still gathering
     # requirements) -- respond 200 with a null payload rather than 404, so routine polling from
@@ -213,27 +217,37 @@ async def _get_or_generate_flow_story(db: AsyncSession, record: Architecture, pr
 
 
 @router.post("/projects/{project_id}/architectures/{architecture_id}/flow-story")
+@limiter.limit("30/hour")
 async def get_flow_story(
-    project_id: uuid.UUID, architecture_id: uuid.UUID, provider: str, db: AsyncSession = Depends(get_db)
+    request: Request,
+    architecture_id: uuid.UUID,
+    provider: str,
+    project: Project = Depends(get_owned_project),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     if provider not in VALID_FLOW_STORY_PROVIDERS:
         raise HTTPException(status_code=400, detail="Invalid provider specified")
 
     record = (
         await db.execute(
-            select(Architecture).where(Architecture.id == architecture_id, Architecture.project_id == project_id)
+            select(Architecture).where(Architecture.id == architecture_id, Architecture.project_id == project.id)
         )
     ).scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="Architecture version not found")
 
-    story = await _get_or_generate_flow_story(db, record, project_id, provider)
+    story = await _get_or_generate_flow_story(db, record, project.id, provider)
     return {"story": story, "sources": record.flow_story_sources.get(provider, [])}
 
 
 @router.post("/projects/{project_id}/architectures/{architecture_id}/journey")
+@limiter.limit("30/hour")
 async def get_user_journey(
-    project_id: uuid.UUID, architecture_id: uuid.UUID, provider: str, db: AsyncSession = Depends(get_db)
+    request: Request,
+    architecture_id: uuid.UUID,
+    provider: str,
+    project: Project = Depends(get_owned_project),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     """The "User Journey Architecture" view -- restructures the (already-generated-or-generated-
     here-first) flow story into discrete end-user-facing steps. Deliberately downstream of
@@ -243,7 +257,7 @@ async def get_user_journey(
 
     record = (
         await db.execute(
-            select(Architecture).where(Architecture.id == architecture_id, Architecture.project_id == project_id)
+            select(Architecture).where(Architecture.id == architecture_id, Architecture.project_id == project.id)
         )
     ).scalar_one_or_none()
     if not record:
@@ -256,8 +270,8 @@ async def get_user_journey(
         steps = record.journey_steps[provider]
         return {"journeySteps": steps, "verification": verify_journey_path(steps, provider_components, connections)}
 
-    flow_story = await _get_or_generate_flow_story(db, record, project_id, provider)
-    functional = await _latest_functional(db, project_id)
+    flow_story = await _get_or_generate_flow_story(db, record, project.id, provider)
+    functional = await _latest_functional(db, project.id)
 
     steps = await generate_user_journey(
         provider, flow_story, provider_components, connections, functional, settings.openrouter_api_key
@@ -274,8 +288,13 @@ async def get_user_journey(
 
 
 @router.post("/projects/{project_id}/architectures/{architecture_id}/migration-roadmap")
+@limiter.limit("30/hour")
 async def get_migration_roadmap(
-    project_id: uuid.UUID, architecture_id: uuid.UUID, provider: str, db: AsyncSession = Depends(get_db)
+    request: Request,
+    architecture_id: uuid.UUID,
+    provider: str,
+    project: Project = Depends(get_owned_project),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Migration Roadmap (Workstream T5) -- a phased plan from the user's stated existing system to
     this target architecture. Only meaningful for a project whose latest Requirement has
@@ -287,7 +306,7 @@ async def get_migration_roadmap(
 
     record = (
         await db.execute(
-            select(Architecture).where(Architecture.id == architecture_id, Architecture.project_id == project_id)
+            select(Architecture).where(Architecture.id == architecture_id, Architecture.project_id == project.id)
         )
     ).scalar_one_or_none()
     if not record:
@@ -299,7 +318,7 @@ async def get_migration_roadmap(
     reqs = (
         await db.execute(
             select(Requirement)
-            .where(Requirement.project_id == project_id)
+            .where(Requirement.project_id == project.id)
             .order_by(Requirement.version.desc())
             .limit(1)
         )
@@ -331,7 +350,10 @@ async def get_migration_roadmap(
 
 @router.patch("/projects/{project_id}/architectures/{architecture_id}/layout")
 async def update_layout_override(
-    project_id: uuid.UUID, architecture_id: uuid.UUID, payload: LayoutOverrideRequest, db: AsyncSession = Depends(get_db)
+    architecture_id: uuid.UUID,
+    payload: LayoutOverrideRequest,
+    project: Project = Depends(get_owned_project),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Persists one node's manually-dragged position (Workstream Q) -- purely cosmetic, so this
     merges into the CURRENT architecture version's layout_overrides in place rather than
@@ -340,7 +362,7 @@ async def update_layout_override(
     last positioned, and doesn't inherit later versions' repositioning."""
     record = (
         await db.execute(
-            select(Architecture).where(Architecture.id == architecture_id, Architecture.project_id == project_id)
+            select(Architecture).where(Architecture.id == architecture_id, Architecture.project_id == project.id)
         )
     ).scalar_one_or_none()
     if not record:
@@ -353,8 +375,13 @@ async def update_layout_override(
 
 
 @router.post("/projects/{project_id}/architectures/{architecture_id}/propose-changes")
+@limiter.limit("20/hour")
 async def propose_architecture_changes(
-    project_id: uuid.UUID, architecture_id: uuid.UUID, payload: ProposeChangesRequest, db: AsyncSession = Depends(get_db)
+    request: Request,
+    architecture_id: uuid.UUID,
+    payload: ProposeChangesRequest,
+    project: Project = Depends(get_owned_project),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Preview-only: identifies which components a freeform chat-described enhancement would add
     or change, scoped to one cloud provider, and returns them as reviewable cards. Nothing is
@@ -365,7 +392,7 @@ async def propose_architecture_changes(
 
     record = (
         await db.execute(
-            select(Architecture).where(Architecture.id == architecture_id, Architecture.project_id == project_id)
+            select(Architecture).where(Architecture.id == architecture_id, Architecture.project_id == project.id)
         )
     ).scalar_one_or_none()
     if not record:
@@ -374,7 +401,7 @@ async def propose_architecture_changes(
     reqs = (
         await db.execute(
             select(Requirement)
-            .where(Requirement.project_id == project_id)
+            .where(Requirement.project_id == project.id)
             .order_by(Requirement.version.desc())
             .limit(1)
         )
@@ -407,7 +434,10 @@ async def propose_architecture_changes(
 
 
 @router.post("/projects/{project_id}/architectures/whatif-suggestions")
-async def get_whatif_suggestions(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> dict:
+@limiter.limit("30/hour")
+async def get_whatif_suggestions(
+    request: Request, project: Project = Depends(get_owned_project), db: AsyncSession = Depends(get_db)
+) -> dict:
     """What-If Simulator (Workstream V) -- AI-suggested HYPOTHETICAL variations per field, fetched
     fresh whenever the panel opens. Deliberately reads the project's CURRENT saved requirements
     itself (not client-supplied) so suggestions are always grounded in real, fresh state -- the
@@ -416,7 +446,7 @@ async def get_whatif_suggestions(project_id: uuid.UUID, db: AsyncSession = Depen
     reqs = (
         await db.execute(
             select(Requirement)
-            .where(Requirement.project_id == project_id)
+            .where(Requirement.project_id == project.id)
             .order_by(Requirement.version.desc())
             .limit(1)
         )
@@ -441,8 +471,12 @@ async def get_whatif_suggestions(project_id: uuid.UUID, db: AsyncSession = Depen
 
 
 @router.post("/projects/{project_id}/architectures/component-suggestions")
+@limiter.limit("30/hour")
 async def get_component_suggestions(
-    project_id: uuid.UUID, payload: ComponentSuggestionsRequest, db: AsyncSession = Depends(get_db)
+    request: Request,
+    payload: ComponentSuggestionsRequest,
+    project: Project = Depends(get_owned_project),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Manual Editor Controls (Workstream W) -- AI-suggested component types/names worth adding
     next, given the CLIENT'S current draft diagram (which may include unsaved manual edits) and
@@ -451,7 +485,7 @@ async def get_component_suggestions(
     reqs = (
         await db.execute(
             select(Requirement)
-            .where(Requirement.project_id == project_id)
+            .where(Requirement.project_id == project.id)
             .order_by(Requirement.version.desc())
             .limit(1)
         )
@@ -473,8 +507,12 @@ async def get_component_suggestions(
 
 
 @router.post("/projects/{project_id}/architectures/whatif-preview")
+@limiter.limit("20/hour")
 async def preview_whatif_architecture(
-    project_id: uuid.UUID, payload: WhatIfPreviewRequest, db: AsyncSession = Depends(get_db)
+    request: Request,
+    payload: WhatIfPreviewRequest,
+    project: Project = Depends(get_owned_project),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     """What-If Simulator (Workstream T1, extended): runs the FULL real-generation pipeline
     (generate_architecture_bundle -- same rules engine + LLM validation generate_architecture
@@ -483,11 +521,7 @@ async def preview_whatif_architecture(
     preview, not just a scale/budget slider -- because the real generation pipeline already
     considers all of these fields together, simulating a subset would misrepresent how the actual
     architecture would come out."""
-    project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    latest_arch = await _latest_architecture(db, project_id)
+    latest_arch = await _latest_architecture(db, project.id)
 
     functional = list(payload.functional)
     if payload.additionalContext and payload.additionalContext.strip():
@@ -518,8 +552,13 @@ async def preview_whatif_architecture(
 
 
 @router.post("/projects/{project_id}/architectures/{architecture_id}/refine-proposal")
+@limiter.limit("30/hour")
 async def refine_proposal(
-    project_id: uuid.UUID, architecture_id: uuid.UUID, payload: RefineProposalRequest, db: AsyncSession = Depends(get_db)
+    request: Request,
+    architecture_id: uuid.UUID,
+    payload: RefineProposalRequest,
+    project: Project = Depends(get_owned_project),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Inline discuss/refine for a single pending proposal (Workstream O) -- the user pushes
     back on one card ("use a cheaper alternative") without affecting any other proposal in the
@@ -531,7 +570,7 @@ async def refine_proposal(
 
     record = (
         await db.execute(
-            select(Architecture).where(Architecture.id == architecture_id, Architecture.project_id == project_id)
+            select(Architecture).where(Architecture.id == architecture_id, Architecture.project_id == project.id)
         )
     ).scalar_one_or_none()
     if not record:
@@ -540,7 +579,7 @@ async def refine_proposal(
     reqs = (
         await db.execute(
             select(Requirement)
-            .where(Requirement.project_id == project_id)
+            .where(Requirement.project_id == project.id)
             .order_by(Requirement.version.desc())
             .limit(1)
         )
@@ -571,17 +610,15 @@ async def refine_proposal(
 
 
 @router.post("/projects/{project_id}/architectures", status_code=201)
-async def generate_architecture(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> dict:
-    # 1. Fetch project details
-    project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    # 2. Fetch the latest requirements
+@limiter.limit("10/hour")
+async def generate_architecture(
+    request: Request, project: Project = Depends(get_owned_project), db: AsyncSession = Depends(get_db)
+) -> dict:
+    # 1. Fetch the latest requirements
     reqs = (
         await db.execute(
             select(Requirement)
-            .where(Requirement.project_id == project_id)
+            .where(Requirement.project_id == project.id)
             .order_by(Requirement.version.desc())
             .limit(1)
         )
@@ -593,8 +630,8 @@ async def generate_architecture(project_id: uuid.UUID, db: AsyncSession = Depend
     industry_context = reqs.industry_context or DEFAULT_INDUSTRY_CONTEXT
     product_domain = reqs.product_domain or None
 
-    # 3. Fetch the latest architecture for versioning and delta comparison
-    latest_arch = await _latest_architecture(db, project_id)
+    # 2. Fetch the latest architecture for versioning and delta comparison
+    latest_arch = await _latest_architecture(db, project.id)
     next_version = _next_version(latest_arch)
 
     # 3b. Knowledge-base RAG (highest-value touchpoint per the rollout plan: monolith-vs-
@@ -643,7 +680,7 @@ async def generate_architecture(project_id: uuid.UUID, db: AsyncSession = Depend
     # 5. Save new architecture version with all five cloud mappings, recommendations, LLD specs,
     # and security findings.
     record = Architecture(
-        project_id=project_id,
+        project_id=project.id,
         version=next_version,
         hld={"components": bundle["components"], "connections": bundle["connections"]},
         reasoning={
@@ -678,18 +715,15 @@ async def generate_architecture(project_id: uuid.UUID, db: AsyncSession = Depend
 
 @router.post("/projects/{project_id}/architectures/manual", status_code=201)
 async def save_manual_architecture(
-    project_id: uuid.UUID, payload: ManualArchitectureRequest, db: AsyncSession = Depends(get_db)
+    payload: ManualArchitectureRequest,
+    project: Project = Depends(get_owned_project),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
-    # 1. Fetch project details
-    project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    # 2. Fetch latest requirements
+    # 1. Fetch latest requirements
     reqs = (
         await db.execute(
             select(Requirement)
-            .where(Requirement.project_id == project_id)
+            .where(Requirement.project_id == project.id)
             .order_by(Requirement.version.desc())
             .limit(1)
         )
@@ -744,11 +778,11 @@ async def save_manual_architecture(
     if not validation["isValid"]:
         raise HTTPException(status_code=400, detail=f"Validation blocked save: {'; '.join(validation['errors'])}")
 
-    # 5. Fetch previous version to compute diff and calculate next version
-    latest_arch = await _latest_architecture(db, project_id)
+    # 4b. Fetch previous version to compute diff and calculate next version
+    latest_arch = await _latest_architecture(db, project.id)
     next_version = _next_version(latest_arch)
 
-    # 6. Compute diff against previous architecture version
+    # 5. Compute diff against previous architecture version
     prev_components = latest_arch.hld.get("components", []) if latest_arch else []
     diff = compute_architecture_diff(
         compiled_components,
@@ -764,9 +798,9 @@ async def save_manual_architecture(
         for prov in ("aws", "azure", "gcp", "kubernetes", "private")
     }
 
-    # 7. Save manual architecture version
+    # 6. Save manual architecture version
     record = Architecture(
-        project_id=project_id,
+        project_id=project.id,
         version=next_version,
         hld={"components": compiled_components, "connections": connections},
         reasoning={

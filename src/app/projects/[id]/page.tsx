@@ -1,5 +1,6 @@
+import { cookies } from "next/headers";
 import Link from "next/link";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import ChatArea from "@/app/components/ChatArea";
 import ProjectWorkspaceGrid from "@/app/components/ProjectWorkspaceGrid";
 
@@ -20,15 +21,21 @@ type ConversationRecord = {
 
 // Server component -- runs on the Next.js server itself, so it reaches the backend directly
 // over the same private path the catch-all proxy uses (BACKEND_URL + X-Internal-Auth), rather
-// than looping back through its own proxy route over HTTP.
+// than looping back through its own proxy route over HTTP. Since this bypasses the proxy, it
+// has to do the proxy's cookie->header translation itself too (see src/app/api/[...path]/route.ts).
 async function backendFetch(path: string) {
   const backendUrl = process.env.BACKEND_URL;
   const internalAuthSecret = process.env.INTERNAL_AUTH_SECRET;
   if (!backendUrl || !internalAuthSecret) {
     throw new Error("Backend is not configured");
   }
+  const cookieStore = await cookies();
+  const sessionToken = cookieStore.get("session_token")?.value;
   return fetch(`${backendUrl}${path}`, {
-    headers: { "x-internal-auth": internalAuthSecret },
+    headers: {
+      "x-internal-auth": internalAuthSecret,
+      ...(sessionToken ? { "x-session-token": sessionToken } : {}),
+    },
     cache: "no-store",
   });
 }
@@ -37,6 +44,13 @@ export default async function ProjectPage({ params }: ProjectPageProps) {
   const { id } = await params;
 
   const projectRes = await backendFetch(`/api/projects/${id}`);
+  // middleware.ts already redirects an unauthenticated page visit to /login before this ever
+  // runs, but it only checks cookie PRESENCE, not validity -- an expired/invalid session cookie
+  // reaches here and gets a real 401 from the backend, which belongs at /login too, not a thrown
+  // "Failed to load project" error.
+  if (projectRes.status === 401) {
+    redirect("/login");
+  }
   if (projectRes.status === 404) {
     notFound();
   }

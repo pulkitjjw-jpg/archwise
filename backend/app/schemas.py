@@ -1,6 +1,6 @@
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
 class ProjectCreateRequest(BaseModel):
@@ -140,3 +140,25 @@ class LayoutOverrideRequest(BaseModel):
     componentId: str
     x: float
     y: float
+
+
+class RegisterRequest(BaseModel):
+    email: EmailStr
+    # Length-only check here; hashing itself (bcrypt) is what actually protects the value. 8 is a
+    # deliberately modest floor -- this app has no email verification or MFA to fall back on yet,
+    # so it's a baseline against trivial passwords, not a strength policy.
+    password: str = Field(min_length=8)
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    newPassword: str = Field(min_length=8)

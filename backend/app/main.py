@@ -3,9 +3,12 @@ import logging
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 from app.config import settings
-from app.routers import admin, architectures, conversations, export, health, projects, requirements, share
+from app.rate_limit import limiter
+from app.routers import admin, architectures, auth, conversations, export, health, projects, requirements, share
 
 # Root logger defaults to WARNING with no handler configured, which would silently drop the
 # INFO-level "served by <model>" logs app/services/llm.py emits on every successful fallback-chain
@@ -16,6 +19,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger("app")
 
 app = FastAPI(title="AI Cloud Architecture Generator — Backend")
+
+app.state.limiter = limiter
+app.add_middleware(SlowAPIMiddleware)
 
 # No CORS middleware on purpose: this service is never called from a browser origin, only
 # from Next.js's own server-side proxy. Adding permissive CORS here would be a second way to
@@ -53,7 +59,17 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={"error": "Internal server error"})
 
 
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
+    # Same { error: string } shape as every other error response -- not slowapi's default body.
+    return JSONResponse(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        content={"error": "Too many requests -- please slow down and try again shortly."},
+    )
+
+
 app.include_router(health.router, prefix="/api")
+app.include_router(auth.router, prefix="/api")
 app.include_router(projects.router, prefix="/api")
 app.include_router(conversations.router, prefix="/api")
 app.include_router(requirements.router, prefix="/api")

@@ -1,13 +1,15 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.constants import DEFAULT_INDUSTRY_CONTEXT
 from app.db import get_db
-from app.models import Conversation, Requirement
+from app.dependencies import get_owned_project
+from app.models import Conversation, Project, Requirement
+from app.rate_limit import limiter
 from app.schemas import RequirementsPutRequest
 from app.serializers import serialize_requirement
 from app.services.knowledge_retrieval import (
@@ -36,8 +38,8 @@ async def _latest_requirement(db: AsyncSession, project_id: uuid.UUID) -> Requir
 
 
 @router.get("/projects/{project_id}/requirements")
-async def get_requirements(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> dict:
-    record = await _latest_requirement(db, project_id)
+async def get_requirements(project: Project = Depends(get_owned_project), db: AsyncSession = Depends(get_db)) -> dict:
+    record = await _latest_requirement(db, project.id)
 
     # No requirements extracted yet is an expected, common state (e.g. brainstorm still in
     # progress) -- respond 200 with a null payload rather than 404, so routine polling from the
@@ -49,13 +51,16 @@ async def get_requirements(project_id: uuid.UUID, db: AsyncSession = Depends(get
 
 
 @router.post("/projects/{project_id}/requirements", status_code=201)
-async def extract_requirements(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> dict:
+@limiter.limit("30/hour")
+async def extract_requirements(
+    request: Request, project: Project = Depends(get_owned_project), db: AsyncSession = Depends(get_db)
+) -> dict:
     # Load conversation history
     history = (
         (
             await db.execute(
                 select(Conversation)
-                .where(Conversation.project_id == project_id)
+                .where(Conversation.project_id == project.id)
                 .order_by(Conversation.created_at.asc())
             )
         )
@@ -69,12 +74,12 @@ async def extract_requirements(project_id: uuid.UUID, db: AsyncSession = Depends
     )
 
     # Get current latest version to increment
-    latest = await _latest_requirement(db, project_id)
+    latest = await _latest_requirement(db, project.id)
     next_version = latest.version + 1 if latest else 1
 
     # Always insert a new record for version history
     record = Requirement(
-        project_id=project_id,
+        project_id=project.id,
         functional=extracted["functional"],
         non_functional=extracted["nonFunctional"],
         industry_context=extracted["industryContext"],
@@ -89,8 +94,12 @@ async def extract_requirements(project_id: uuid.UUID, db: AsyncSession = Depends
 
 
 @router.post("/projects/{project_id}/requirements/suggestions")
+@limiter.limit("30/hour")
 async def get_requirement_suggestions(
-    project_id: uuid.UUID, payload: RequirementsPutRequest, db: AsyncSession = Depends(get_db)
+    request: Request,
+    payload: RequirementsPutRequest,
+    project: Project = Depends(get_owned_project),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     # Stateless and not persisted -- recomputed on demand from whatever the client currently has
     # (saved values, or the user's in-progress edit-mode draft), so suggestions stay relevant as
@@ -126,8 +135,11 @@ async def get_requirement_suggestions(
 
 
 @router.post("/projects/{project_id}/requirements/summary")
-async def get_conversation_summary(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> dict:
-    latest = await _latest_requirement(db, project_id)
+@limiter.limit("30/hour")
+async def get_conversation_summary(
+    request: Request, project: Project = Depends(get_owned_project), db: AsyncSession = Depends(get_db)
+) -> dict:
+    latest = await _latest_requirement(db, project.id)
     if not latest:
         raise HTTPException(status_code=400, detail="No requirements yet -- complete the discovery conversation first")
 
@@ -141,7 +153,7 @@ async def get_conversation_summary(project_id: uuid.UUID, db: AsyncSession = Dep
         (
             await db.execute(
                 select(Conversation)
-                .where(Conversation.project_id == project_id)
+                .where(Conversation.project_id == project.id)
                 .order_by(Conversation.created_at.asc())
             )
         )
@@ -175,13 +187,15 @@ async def get_conversation_summary(project_id: uuid.UUID, db: AsyncSession = Dep
 
 @router.put("/projects/{project_id}/requirements")
 async def save_requirements(
-    project_id: uuid.UUID, payload: RequirementsPutRequest, db: AsyncSession = Depends(get_db)
+    payload: RequirementsPutRequest,
+    project: Project = Depends(get_owned_project),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     if not payload.functional or not payload.nonFunctional:
         raise HTTPException(status_code=400, detail="functional and nonFunctional are required")
 
     # Get current latest version to increment
-    latest = await _latest_requirement(db, project_id)
+    latest = await _latest_requirement(db, project.id)
     next_version = latest.version + 1 if latest else 1
 
     # Manual edits via the Requirements tab never send industryContext -- carry the latest
@@ -192,7 +206,7 @@ async def save_requirements(
 
     # Always insert a new record for version history
     record = Requirement(
-        project_id=project_id,
+        project_id=project.id,
         functional=payload.functional,
         non_functional=payload.nonFunctional,
         industry_context=industry_context,

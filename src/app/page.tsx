@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import IntakeForm from "@/app/components/IntakeForm";
+import { useAuth } from "@/app/contexts/AuthContext";
 
 type ProjectStatus =
   | "just_started"
@@ -122,6 +123,12 @@ export default function HomePage() {
 
   const openProject = (id: string) => router.push(`/projects/${id}`);
 
+  const { user, logout } = useAuth();
+  const handleLogout = async () => {
+    await logout();
+    router.push("/login");
+  };
+
   const loading = projects === null;
   const isEmpty = !loading && projects.length === 0;
 
@@ -143,14 +150,27 @@ export default function HomePage() {
                 multi-cloud architecture — with cost estimates, LLD detail, and Terraform export.
               </p>
             </div>
-            {!isEmpty && (
-              <button
-                onClick={() => setShowIntake((v) => !v)}
-                className="flex shrink-0 items-center justify-center rounded-2xl bg-accent px-5 py-3 text-sm font-semibold text-white shadow-md transition-all hover:bg-accent-ink active:scale-[0.98]"
-              >
-                {showIntake ? "Cancel" : "+ New Project"}
-              </button>
-            )}
+            <div className="flex shrink-0 items-center gap-3">
+              {!isEmpty && (
+                <button
+                  onClick={() => setShowIntake((v) => !v)}
+                  className="flex items-center justify-center rounded-2xl bg-accent px-5 py-3 text-sm font-semibold text-white shadow-md transition-all hover:bg-accent-ink active:scale-[0.98]"
+                >
+                  {showIntake ? "Cancel" : "+ New Project"}
+                </button>
+              )}
+              {user && (
+                <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-2">
+                  <span className="text-xs font-semibold text-ink-faint">{user.email}</span>
+                  <button
+                    onClick={handleLogout}
+                    className="text-xs font-bold text-accent-on-dark transition hover:underline"
+                  >
+                    Log out
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 

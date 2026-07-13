@@ -47,6 +47,14 @@ async function proxy(req: NextRequest, { params }: { params: Promise<{ path: str
     forwardHeaders.set("x-forwarded-for", realIp);
     forwardHeaders.set("x-real-ip", realIp);
   }
+  // The backend has no concept of cookies (it's never called directly by a browser) -- it reads
+  // per-user identity from x-session-token instead. This is the one place that translates between
+  // the two: read the httpOnly cookie the browser actually sent, forward it as the header the
+  // backend's get_current_user dependency expects.
+  const sessionToken = req.cookies.get("session_token")?.value;
+  if (sessionToken) {
+    forwardHeaders.set("x-session-token", sessionToken);
+  }
 
   let upstreamRes: Response;
   try {

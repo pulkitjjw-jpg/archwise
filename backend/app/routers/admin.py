@@ -6,14 +6,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db import get_db
+from app.dependencies import require_admin
+from app.models import User
 
 logger = logging.getLogger("app.routers.admin")
 
-# Workstream Z1 -- the app's first admin surface. No auth of any kind yet (the app has none
-# anywhere), but deliberately kept under its own /admin path prefix (not mixed into /projects,
-# /requirements, etc.) so gating everything under this router behind an admin-only check later
-# is a one-line addition (a dependency on this router, or a path-prefix check in a middleware)
-# rather than an audit of which individual routes need it.
+# Workstream Z1 -- the app's first admin surface, kept under its own /admin path prefix (not
+# mixed into /projects, /requirements, etc.). Now gated behind require_admin (Phase B, Milestone
+# 1) on every route in this router -- see app/dependencies.py. The first admin account is
+# promoted with a one-off `UPDATE users SET is_admin = true WHERE email = '...'`; there's no
+# self-serve promotion UI for a single-admin setup.
 router = APIRouter()
 
 _ALLOWED_GRANULARITY = {"hour", "day"}
@@ -21,7 +23,7 @@ _ALLOWED_SORT_COLUMNS = {"started_at", "total_latency_ms", "total_cost_usd"}
 
 
 @router.get("/admin/usage-summary")
-async def get_usage_summary(db: AsyncSession = Depends(get_db)) -> dict:
+async def get_usage_summary(db: AsyncSession = Depends(get_db), _admin: User = Depends(require_admin)) -> dict:
     """Overall totals plus per-model rollups, computed fresh on every request -- this table is
     one row per model ATTEMPT (see app/models.py's LlmUsageLog), so every aggregate here either
     explicitly counts DISTINCT call_group_id (one real user-facing LLM request) or filters
@@ -148,7 +150,9 @@ async def get_usage_summary(db: AsyncSession = Depends(get_db)) -> dict:
 
 @router.get("/admin/usage-timeseries")
 async def get_usage_timeseries(
-    granularity: str = Query("day", pattern="^(hour|day)$"), db: AsyncSession = Depends(get_db)
+    granularity: str = Query("day", pattern="^(hour|day)$"),
+    db: AsyncSession = Depends(get_db),
+    _admin: User = Depends(require_admin),
 ) -> dict:
     """Calls per hour/day, counted per logical request (DISTINCT call_group_id) not per attempt
     row. `granularity` is validated against a hard allowlist before use -- date_trunc's unit
@@ -188,6 +192,7 @@ async def get_usage_calls(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
+    _admin: User = Depends(require_admin),
 ) -> dict:
     """One row per logical call (grouped by call_group_id, excluding fix-pass attempt rows),
     matching what the "recent calls" table needs -- endpoint, which model actually served it (or
