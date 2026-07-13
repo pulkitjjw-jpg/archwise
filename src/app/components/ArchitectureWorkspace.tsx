@@ -19,6 +19,7 @@ import {
 } from "@/lib/journey-verification";
 import { computeHealthScore, type HealthScore } from "@/lib/health-score";
 import { useStagedLoadingMessage } from "@/app/hooks/useStagedLoadingMessage";
+import { useGrowthTrigger } from "@/app/contexts/GrowthTriggerContext";
 import { FIELD_EXPLANATIONS } from "@/lib/field-explanations";
 import {
   computeDiagramLayoutAsync,
@@ -301,6 +302,17 @@ const GENERATION_STAGES = [
 ];
 const GENERATION_STAGE_INTERVAL_MS = 8000;
 
+// Staged phrases for the growth-trigger analyze/apply lifecycle (GrowthTriggerContext) -- shorter
+// and faster-cycling than GENERATION_STAGES above since propose-changes/manual-save are both much
+// lighter calls than a full architecture generation.
+const GROWTH_ANALYZING_STAGES = [
+  "Reviewing your requested changes...",
+  "Working out which components this affects...",
+  "Almost done...",
+];
+const GROWTH_APPLYING_STAGES = ["Updating the architecture...", "Saving the new version..."];
+const GROWTH_STAGE_INTERVAL_MS = 3200;
+
 type CloudMapping = {
   serviceName: string;
   alternatives: Array<{
@@ -451,6 +463,17 @@ export default function ArchitectureWorkspace({
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const generationStage = useStagedLoadingMessage(generating, GENERATION_STAGES, GENERATION_STAGE_INTERVAL_MS);
+  const growthTrigger = useGrowthTrigger();
+  const growthAnalyzingStage = useStagedLoadingMessage(
+    growthTrigger.status === "analyzing",
+    GROWTH_ANALYZING_STAGES,
+    GROWTH_STAGE_INTERVAL_MS
+  );
+  const growthApplyingStage = useStagedLoadingMessage(
+    growthTrigger.status === "applying",
+    GROWTH_APPLYING_STAGES,
+    GROWTH_STAGE_INTERVAL_MS
+  );
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [activeProvider, setActiveProvider] = useState<CloudProviderKey>("aws");
   const [viewMode, setViewMode] = useState<"diagram" | "comparison" | "journey" | "migration">("diagram");
@@ -1537,11 +1560,15 @@ export default function ArchitectureWorkspace({
   };
 
   // Chat-based Enhancement Proposals -- triggered when a growth-trigger chat conversation
-  // concludes (see ChatArea's "growthTriggerCompleted" event). Scoped to whichever provider is
-  // currently active; re-fetches automatically if the user switches provider while a proposal
-  // is pending, so the review is always for the provider actually on screen. Nothing is
-  // persisted until the user approves individual cards and clicks Apply, which reuses the same
-  // manual-save endpoint/versioning the manual editor already uses.
+  // concludes. The analyze/review/apply lifecycle (status, description, the fetched proposals
+  // themselves) lives in GrowthTriggerContext, mounted above the tab-switching boundary in
+  // ProjectWorkspaceGrid -- NOT as local state here -- so it survives the user switching away
+  // from this tab mid-process, and so the analysis actually starts the moment the chat side
+  // triggers it even if this component isn't mounted yet. Only per-review-session UI state that's
+  // fine to lose if the tab remounts (which decisions/discussions are open, not the proposals
+  // themselves) stays local below. Nothing is persisted to the architecture until the user
+  // approves individual cards and clicks Apply, which reuses the same manual-save endpoint/
+  // versioning the manual editor already uses.
   type ProposedChange = {
     action: "add" | "modify";
     componentId: string;
@@ -1554,11 +1581,10 @@ export default function ArchitectureWorkspace({
     previousReasoning?: string;
     domainPattern?: string;
   };
-  const [pendingDescription, setPendingDescription] = useState<string | null>(null);
-  const [proposals, setProposals] = useState<ProposedChange[]>([]);
+  const pendingDescription = growthTrigger.description;
+  const proposals = growthTrigger.proposals as ProposedChange[];
+  const proposalsLoading = growthTrigger.status === "analyzing";
   const [proposalDecisions, setProposalDecisions] = useState<Record<string, "approved" | "rejected">>({});
-  const [proposalsLoading, setProposalsLoading] = useState(false);
-  const [proposalsFetchedFor, setProposalsFetchedFor] = useState<string | null>(null);
   const [applyingProposals, setApplyingProposals] = useState(false);
 
   // Batch selection -- independent of proposalDecisions (accept/reject). A checkbox here just
@@ -1905,53 +1931,16 @@ export default function ArchitectureWorkspace({
     }
   };
 
-  const fetchProposals = async (description: string, archId: string) => {
-    setProposalsLoading(true);
+  // Analysis is triggered and fetched by GrowthTriggerContext itself (see ChatArea's
+  // growthTrigger.startGrowthTrigger call) -- this component just resets its own local
+  // review-session UI state whenever a fresh batch of proposals lands, mirroring what the old
+  // fetchProposals did inline before each fetch.
+  useEffect(() => {
     setProposalDecisions({});
     setSelectedProposalIds(new Set());
     setProposalDiscussions({});
     setOpenDiscussionId(null);
-    try {
-      const res = await fetch(
-        `/api/projects/${projectId}/architectures/${archId}/propose-changes?provider=${activeProvider}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ description, provider: activeProvider }),
-        }
-      );
-      if (!res.ok) throw new Error("Failed to generate proposed changes");
-      const data = await res.json();
-      setProposals(data.proposals || []);
-      setProposalsFetchedFor(`${archId}:${activeProvider}`);
-    } catch (err) {
-      console.error("Failed to fetch proposed changes:", err);
-      setProposals([]);
-    } finally {
-      setProposalsLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent<{ description: string }>).detail;
-      if (!detail?.description) return;
-      setPendingDescription(detail.description);
-      setProposalsFetchedFor(null);
-      setProposals([]);
-      setProposalDecisions({});
-    };
-    window.addEventListener("growthTriggerCompleted", handler);
-    return () => window.removeEventListener("growthTriggerCompleted", handler);
-  }, []);
-
-  useEffect(() => {
-    if (!pendingDescription || !architecture) return;
-    const key = `${architecture.id}:${activeProvider}`;
-    if (proposalsFetchedFor === key || proposalsLoading) return;
-    fetchProposals(pendingDescription, architecture.id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingDescription, architecture, activeProvider]);
+  }, [proposals]);
 
   const decideProposal = (componentId: string, decision: "approved" | "rejected") => {
     setProposalDecisions((prev) => ({ ...prev, [componentId]: decision }));
@@ -2039,7 +2028,7 @@ export default function ArchitectureWorkspace({
       // Swap the refined proposal into place in-line -- same componentId, updated fields.
       // Any existing accept/reject decision for this card is cleared since the underlying
       // proposal just changed and deserves a fresh look before being (re-)approved.
-      setProposals((prev) => prev.map((p) => (p.componentId === proposal.componentId ? data.proposal : p)));
+      growthTrigger.updateProposal(proposal.componentId, data.proposal);
       setProposalDecisions((prev) => {
         const next = { ...prev };
         delete next[proposal.componentId];
@@ -2060,10 +2049,8 @@ export default function ArchitectureWorkspace({
   };
 
   const dismissProposals = () => {
-    setPendingDescription(null);
-    setProposals([]);
+    growthTrigger.dismiss();
     setProposalDecisions({});
-    setProposalsFetchedFor(null);
     setSelectedProposalIds(new Set());
     setProposalDiscussions({});
     setOpenDiscussionId(null);
@@ -2088,6 +2075,7 @@ export default function ArchitectureWorkspace({
 
     try {
       setApplyingProposals(true);
+      growthTrigger.markApplying();
       setError("");
       const res = await fetch(`/api/projects/${projectId}/architectures/manual`, {
         method: "POST",
@@ -2099,10 +2087,16 @@ export default function ArchitectureWorkspace({
         throw new Error(errData.error || "Failed to apply approved changes");
       }
       const data = await res.json();
-      dismissProposals();
+      setProposalDecisions({});
+      setSelectedProposalIds(new Set());
+      setProposalDiscussions({});
+      setOpenDiscussionId(null);
+      growthTrigger.markApplied(data.architecture.version);
       await loadArchitecture(data.architecture.version);
     } catch (err: any) {
-      setError(err.message || "An error occurred while applying approved changes.");
+      const message = err.message || "An error occurred while applying approved changes.";
+      setError(message);
+      growthTrigger.markApplyFailed(message);
     } finally {
       setApplyingProposals(false);
     }
@@ -2644,9 +2638,13 @@ export default function ArchitectureWorkspace({
         </div>
       )}
 
-      {/* Chat-Based Enhancement Proposals -- see the useEffect pair above listening for
-          "growthTriggerCompleted". Review-and-approve only; nothing here mutates the
-          architecture until "Apply Approved Changes" is clicked. */}
+      {/* Chat-Based Enhancement Proposals -- state lives in GrowthTriggerContext (see
+          ArchitectureWorkspace's top-level growthTrigger hook), not local state, so this panel
+          reflects reality even if analysis started/finished while this component wasn't mounted.
+          Review-and-approve only; nothing here mutates the architecture until "Apply Approved
+          Changes" is clicked. Positioned outside any viewMode branch so it's visible regardless
+          of which view (Topology/Compare Clouds/User Journey/Migration) is active -- "don't show
+          a stale/blank view with no indication that new work is in progress." */}
       {pendingDescription && (
         <div className="mx-6 mt-4 rounded-2xl border border-accent/25 bg-accent-soft/60 p-4">
           <div className="flex items-start justify-between gap-2">
@@ -2656,18 +2654,31 @@ export default function ArchitectureWorkspace({
             </span>
             <button
               onClick={dismissProposals}
-              className="text-xs font-bold text-ink-muted transition hover:text-ink"
+              disabled={applyingProposals}
+              className="text-xs font-bold text-ink-muted transition hover:text-ink disabled:opacity-40"
             >
               Dismiss
             </button>
           </div>
           <p className="mt-1.5 text-xs italic text-ink-muted">&ldquo;{pendingDescription}&rdquo;</p>
 
-          {proposalsLoading ? (
+          {applyingProposals ? (
+            <div className="mt-3 flex items-center gap-2 text-xs font-semibold text-accent-ink">
+              <span className="h-3 w-3 flex-none animate-spin rounded-full border-2 border-accent border-t-transparent" />
+              {growthApplyingStage}
+            </div>
+          ) : proposalsLoading ? (
             <div className="mt-3 flex items-center gap-2 text-xs text-ink-muted">
               <span className="h-3 w-3 flex-none animate-spin rounded-full border-2 border-accent border-t-transparent" />
-              Analyzing which components this would affect for {PROVIDER_LABELS[activeProvider]}...
+              {growthAnalyzingStage}
             </div>
+          ) : growthTrigger.status === "error" ? (
+            <p className="mt-2 text-xs font-medium text-danger">
+              {growthTrigger.error || "Something went wrong analyzing the requested changes."}{" "}
+              <button onClick={dismissProposals} className="font-bold underline hover:no-underline">
+                Dismiss
+              </button>
+            </p>
           ) : proposals.length === 0 ? (
             <p className="mt-2 text-xs text-ink-muted">
               No architecture changes are needed for this on {PROVIDER_LABELS[activeProvider]} -- your existing

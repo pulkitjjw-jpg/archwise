@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import InfoTooltip from "./InfoTooltip";
 import { useStagedLoadingMessage } from "@/app/hooks/useStagedLoadingMessage";
+import { useGrowthTrigger } from "@/app/contexts/GrowthTriggerContext";
 
 // The assistant sometimes writes structured replies (bold labels, bullet lists) using markdown
 // syntax -- rendered here instead of left as raw "**text**"/"- item" characters, which otherwise
@@ -39,6 +40,19 @@ const THINKING_STAGES = [
 ];
 const THINKING_STAGE_INTERVAL_MS = 3000;
 
+// Shown after a growth-trigger conversation concludes -- the assistant's own reply has already
+// arrived by this point (that's the THINKING_STAGES window above), but real background work
+// keeps going afterward: analyzing which components the request affects, then, once approved,
+// saving the updated architecture. Without this, the chat looks "done" the moment the assistant's
+// message appears even though nothing has actually been updated yet.
+const ANALYZING_STAGES = [
+  "Reviewing your requested changes...",
+  "Working out which parts of the architecture are affected...",
+  "Almost done...",
+];
+const APPLYING_STAGES = ["Updating the architecture...", "Saving the new version..."];
+const GROWTH_STAGE_INTERVAL_MS = 3200;
+
 type ConversationTurn = {
   id: string;
   role: string;
@@ -59,11 +73,23 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
   const [sending, setSending] = useState(false);
   const thinkingStage = useStagedLoadingMessage(sending, THINKING_STAGES, THINKING_STAGE_INTERVAL_MS);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const growthTrigger = useGrowthTrigger();
+  const analyzingStage = useStagedLoadingMessage(
+    growthTrigger.status === "analyzing",
+    ANALYZING_STAGES,
+    GROWTH_STAGE_INTERVAL_MS
+  );
+  const applyingStage = useStagedLoadingMessage(
+    growthTrigger.status === "applying",
+    APPLYING_STAGES,
+    GROWTH_STAGE_INTERVAL_MS
+  );
 
-  // Scroll to bottom on new messages or typing indicator
+  // Scroll to bottom on new messages, the typing indicator, or the growth-trigger banner
+  // appearing/changing state.
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, sending]);
+  }, [messages, sending, growthTrigger.status]);
 
   const latestMessage = messages[messages.length - 1];
   const latestStage = latestMessage?.stage || "intake";
@@ -131,15 +157,18 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
             });
             window.dispatchEvent(new Event("requirementsUpdated"));
 
-            // The chat-proposed-changes review flow (growthTriggerCompleted) only makes sense
-            // for a growth trigger against an *existing* architecture -- the very first
-            // completion has no architecture yet to propose changes against.
+            // The chat-proposed-changes review flow only makes sense for a growth trigger
+            // against an *existing* architecture -- the very first completion has no
+            // architecture yet to propose changes against.
             if (isGrowthPhase) {
               // Gather this growth-trigger's full description from fresh server-side history
               // (not the local `messages` closure, which can be stale) so multi-turn
-              // clarification isn't lost, then hand it to the architecture panel so it can
-              // propose component-level changes for review -- see ArchitectureWorkspace's
-              // "growthTriggerCompleted" listener.
+              // clarification isn't lost, then hand it to the shared GrowthTriggerContext so
+              // it can propose component-level changes for review -- see
+              // ArchitectureWorkspace, which reads the same context rather than needing its
+              // own listener attached (previously a `window` CustomEvent, silently dropped
+              // whenever ArchitectureWorkspace wasn't mounted -- e.g. the user still on the
+              // Requirements tab, which is the default).
               const historyRes = await fetch(`/api/projects/${projectId}/conversations`);
               if (historyRes.ok) {
                 const { conversations } = await historyRes.json();
@@ -148,9 +177,7 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
                   .map((c: ConversationTurn) => c.message)
                   .join(" ");
                 if (growthDescription.trim()) {
-                  window.dispatchEvent(
-                    new CustomEvent("growthTriggerCompleted", { detail: { description: growthDescription } })
-                  );
+                  growthTrigger.startGrowthTrigger(projectId, growthDescription);
                 }
               }
             }
@@ -164,7 +191,7 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
         setSending(false);
       }
     },
-    [sending, isGrowthPhase, projectId]
+    [sending, isGrowthPhase, projectId, growthTrigger.startGrowthTrigger]
   );
 
   const handleSend = (e: React.FormEvent) => {
@@ -279,6 +306,43 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
                 </div>
                 <span className="text-xs text-ink-muted italic">{thinkingStage}</span>
               </div>
+            </div>
+          </div>
+        )}
+        {/* Growth-trigger processing banner -- persists independently of the typing indicator
+            above (which only covers the assistant's own reply). Real work keeps happening after
+            that reply appears: analyzing which components the request affects, then, once
+            approved on the Architecture tab, saving the new version. Without this the chat looks
+            "done" the moment the assistant's message lands even though nothing has actually
+            updated yet. */}
+        {growthTrigger.status !== "idle" && growthTrigger.status !== "done" && (
+          <div className="flex justify-start">
+            <div className="max-w-[80%] rounded-[1.5rem] rounded-bl-none border border-accent/25 bg-accent-soft/60 px-5 py-3 shadow-sm">
+              <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-accent-ink opacity-75">
+                Architecture Update
+              </div>
+              {growthTrigger.status === "analyzing" && (
+                <div className="flex items-center gap-2 py-1">
+                  <span className="h-3 w-3 flex-none animate-spin rounded-full border-2 border-accent border-t-transparent" />
+                  <span className="text-xs italic text-ink-muted">{analyzingStage}</span>
+                </div>
+              )}
+              {growthTrigger.status === "ready" && (
+                <p className="text-xs text-ink">
+                  {growthTrigger.proposals.length > 0
+                    ? `Found ${growthTrigger.proposals.length} proposed change${growthTrigger.proposals.length === 1 ? "" : "s"} — head to the Architecture tab to review and approve.`
+                    : "No architecture changes were needed for this request."}
+                </p>
+              )}
+              {growthTrigger.status === "applying" && (
+                <div className="flex items-center gap-2 py-1">
+                  <span className="h-3 w-3 flex-none animate-spin rounded-full border-2 border-accent border-t-transparent" />
+                  <span className="text-xs italic text-ink-muted">{applyingStage}</span>
+                </div>
+              )}
+              {growthTrigger.status === "error" && (
+                <p className="text-xs text-danger">{growthTrigger.error || "Something went wrong analyzing the requested changes."}</p>
+              )}
             </div>
           </div>
         )}

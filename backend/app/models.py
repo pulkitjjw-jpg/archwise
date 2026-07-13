@@ -102,8 +102,17 @@ class Conversation(Base):
     # user turns). Persisted rather than computed ephemerally so a page reload doesn't lose the
     # suggestions for the latest unanswered question.
     suggested_replies: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    # clock_timestamp(), NOT now() -- now()/CURRENT_TIMESTAMP is frozen to transaction START time
+    # in Postgres, so a user turn and its assistant reply (inserted in the SAME transaction in
+    # routers/conversations.py, often 10-90+ seconds apart across an LLM call) would otherwise get
+    # IDENTICAL created_at values. That's not just cosmetic: the frontend derives "what's the
+    # latest/current stage" from the last message when sorted by created_at, and a same-timestamp
+    # tie has no guaranteed order -- observed in practice causing a user's own message to sort
+    # after its assistant reply, which silently broke growth-trigger detection (isGrowthPhase read
+    # the wrong turn's stage). clock_timestamp() returns the real wall-clock time at each
+    # individual statement instead.
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("clock_timestamp()")
     )
 
     project: Mapped["Project"] = relationship(back_populates="conversations")
