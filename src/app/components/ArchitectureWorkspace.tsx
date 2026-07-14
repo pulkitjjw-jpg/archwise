@@ -2740,6 +2740,16 @@ export default function ArchitectureWorkspace({
           ) : growthTrigger.status === "error" ? (
             <p className="mt-2 text-xs font-medium text-danger">
               {growthTrigger.error || "Something went wrong analyzing the requested changes."}{" "}
+              {/* Retry re-runs the SAME analysis via the description GrowthTriggerContext already
+                  kept (only dismiss()/markApplied() clear it) -- previously the only option here
+                  was Dismiss, which cleared it, forcing the user to retype the whole change
+                  request in chat from scratch. */}
+              <button
+                onClick={() => growthTrigger.startGrowthTrigger(projectId, growthTrigger.description || "")}
+                className="font-bold underline hover:no-underline"
+              >
+                Retry
+              </button>{" "}
               <button onClick={dismissProposals} className="font-bold underline hover:no-underline">
                 Dismiss
               </button>
