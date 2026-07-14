@@ -12,6 +12,58 @@ import type { NextRequest } from "next/server";
 // drift out of sync.
 const PUBLIC_PAGE_PREFIXES = ["/login", "/signup", "/forgot-password", "/reset-password", "/share"];
 
+// Surveyed the whole app before writing this: no external fonts (system stack, no next/font
+// Google Fonts import), no external scripts, no dangerouslySetInnerHTML anywhere, react-markdown
+// is used without rehype-raw so it never renders raw HTML, and every fetch is same-origin (the
+// backend is never called directly from the browser -- see the [...path] proxy).
+//
+// script-src and style-src both need 'unsafe-inline'. style-src's case is unavoidable either way:
+// the architecture diagram canvas positions nodes via React's style prop, which serializes to a
+// literal style="..." attribute in the server-rendered HTML, and CSP blocks the browser from ever
+// applying a markup-level inline style without 'unsafe-inline' (or a matching nonce/hash).
+//
+// script-src's case was NOT the original plan -- a nonce + 'strict-dynamic' policy (Next.js's own
+// documented pattern: thread a per-request nonce through both the request's and response's
+// Content-Security-Policy headers) is supposed to let Next's own inline bootstrap/RSC-payload
+// scripts through without 'unsafe-inline'. Implemented and live-tested it against this exact app
+// (twice, following the docs precisely) and confirmed via the raw served HTML that Next 16 with
+// Turbopack never actually stamps nonce="..." onto any of its own injected <script> tags --
+// zero nonce attributes anywhere in the response despite the header being threaded through
+// exactly as documented. With a real nonce present, browsers ignore 'unsafe-inline' as a
+// fallback per the CSP3 spec, so a nonce that Next never uses doesn't just fail to help, it
+// actively blocks Next's own scripts outright -- confirmed live as a fully broken (non-
+// hydrating) app in production. Whether this is a Turbopack-specific gap or a Next 16 regression
+// wasn't chased further; either way it isn't fixable from userland middleware.
+//
+// Net effect: 'self' still blocks loading scripts from any external/attacker-controlled domain
+// (the actually-important part of script-src against a supply-chain or injected-<script src>
+// attack), 'unsafe-inline' only loosens the restriction on inline script CONTENT -- and this
+// app has no dangerouslySetInnerHTML and no raw-HTML markdown rendering anywhere, so there's no
+// known path for attacker-controlled content to reach an inline <script> tag in the first place.
+// Real, working protection today beats a theoretically stronger policy that breaks the app.
+//
+// Gated to production only -- Turbopack dev mode and Fast Refresh have their own script/eval
+// needs that aren't worth chasing down for a header with no benefit against a threat model that
+// doesn't include the developer's own machine; local `npm run dev` behavior is unaffected.
+const CSP_PRODUCTION =
+  "default-src 'self'; " +
+  "script-src 'self' 'unsafe-inline'; " +
+  "style-src 'self' 'unsafe-inline'; " +
+  "img-src 'self' data: blob:; " +
+  "font-src 'self' data:; " +
+  // @iconify/react's <Icon> component -- used all over the diagram/component sidebar, per-
+  // service icons, etc. -- fetches icon SVG data from these three domains (a documented 3-way
+  // failover CDN, same vendor as the @iconify-json/* build dependency) at RUNTIME, not from a
+  // local bundle. Missed on first pass (no static `src="http..."` in the JSX to grep for -- this
+  // is a network call inside the library's own code) and only surfaced by live-testing: every
+  // icon in the app silently rendered blank under a bare 'self' connect-src. Confirmed these are
+  // the only three; no other external host is contacted anywhere in the app.
+  "connect-src 'self' https://api.iconify.design https://api.unisvg.com https://api.simplesvg.com; " +
+  "frame-ancestors 'none'; " +
+  "base-uri 'self'; " +
+  "form-action 'self'; " +
+  "object-src 'none'";
+
 export function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
   const isApi = pathname.startsWith("/api/");
@@ -26,11 +78,12 @@ export function proxy(req: NextRequest) {
     response = NextResponse.next();
   }
 
-  // Cheap, safe security headers with no risk of breaking the app's own heavy dynamic/inline
-  // styling (a full Content-Security-Policy is deferred -- see the Phase A audit -- since getting
-  // it right needs live verification against the architecture canvas, not bundled in here).
   response.headers.set("X-Frame-Options", "DENY");
   response.headers.set("X-Content-Type-Options", "nosniff");
+  if (process.env.NODE_ENV === "production") {
+    response.headers.set("Content-Security-Policy", CSP_PRODUCTION);
+    response.headers.set("Strict-Transport-Security", "max-age=63072000; includeSubDomains");
+  }
 
   return response;
 }
