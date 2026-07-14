@@ -53,6 +53,27 @@ services:
     networks:
       - internal
 
+  # Production-like containerized frontend (see root Dockerfile). NOT the day-to-day dev
+  # workflow -- that's still `npm run dev` on the host against this same backend on :8000,
+  # unaffected by this service's existence. Bound to 3001 (not 3000) specifically so `docker
+  # compose up` never collides with a `npm run dev` you might already have running locally; start
+  # this one explicitly with `docker compose up frontend` when you want to test the real
+  # production build end-to-end.
+  frontend:
+    build: .
+    environment:
+      # backend:8000 -- the service name IS the hostname on the internal docker network, no
+      # published port needed for this hop (unlike the host-dev-server case above).
+      BACKEND_URL: "http://backend:8000"
+      INTERNAL_AUTH_SECRET: "${INTERNAL_AUTH_SECRET}"
+      NODE_ENV: production
+    depends_on:
+      - backend
+    ports:
+      - "127.0.0.1:3001:3000"
+    networks:
+      - internal
+
 networks:
   internal:
 
