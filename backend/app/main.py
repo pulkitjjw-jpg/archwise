@@ -1,4 +1,6 @@
 import logging
+import time
+import uuid
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
@@ -7,6 +9,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
 from app.config import settings
+from app.logging_config import configure_logging, request_id_var
 from app.rate_limit import limiter
 from app.routers import admin, architectures, auth, conversations, export, health, projects, requirements, share
 
@@ -14,7 +17,9 @@ from app.routers import admin, architectures, auth, conversations, export, healt
 # INFO-level "served by <model>" logs app/services/llm.py emits on every successful fallback-chain
 # call -- the only visibility into which model actually served a request. INFO is the right
 # floor: routine per-request model selection is operationally useful, DEBUG would be noisy.
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+# JSON-structured (see app/logging_config.py), not plain text -- parseable by whatever log
+# aggregator a real deployment ships to, and every line carries the request that produced it.
+configure_logging(level=logging.INFO)
 
 logger = logging.getLogger("app")
 
@@ -66,6 +71,49 @@ async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
         content={"error": "Too many requests -- please slow down and try again shortly."},
     )
+
+
+@app.middleware("http")
+async def request_context(request: Request, call_next):
+    """The LAST-registered middleware, which Starlette makes the OUTERMOST -- wraps every other
+    middleware (including require_internal_auth) so even a rejected/unauthenticated request gets
+    a correlation id and a completion log line, not just successfully-routed ones. Every log call
+    anywhere during this request (any module, any call depth) picks up requestId automatically
+    via request_id_var -- see app/logging_config.py. Also echoed back as X-Request-Id so a
+    specific request can be correlated with a support report or a frontend-side error."""
+    request_id = str(uuid.uuid4())
+    token = request_id_var.set(request_id)
+    start = time.monotonic()
+    try:
+        response = await call_next(request)
+    except Exception:
+        # The unhandled-exception path already logs its own traceback (see
+        # unhandled_exception_handler) -- this just ensures a completion line still exists even
+        # when call_next raises past FastAPI's own exception handling.
+        duration_ms = int((time.monotonic() - start) * 1000)
+        logger.error(
+            "request failed",
+            extra={"method": request.method, "path": request.url.path, "durationMs": duration_ms},
+        )
+        request_id_var.reset(token)
+        raise
+
+    duration_ms = int((time.monotonic() - start) * 1000)
+    response.headers["X-Request-Id"] = request_id
+    # /health is polled every few seconds by any real load balancer/orchestrator -- logging every
+    # hit at INFO would drown out everything else in the stream for zero operational value.
+    if request.url.path != "/api/health":
+        logger.info(
+            "request completed",
+            extra={
+                "method": request.method,
+                "path": request.url.path,
+                "status": response.status_code,
+                "durationMs": duration_ms,
+            },
+        )
+    request_id_var.reset(token)
+    return response
 
 
 app.include_router(health.router, prefix="/api")
