@@ -21,7 +21,11 @@ class ConversationCreateRequest(BaseModel):
 
 
 class RequirementsPutRequest(BaseModel):
-    functional: Any
+    # Was `Any` -- both real callers (RequirementsPanel's manual edit, the What-If Simulator's
+    # "Make this real") always send a plain string array; Pydantic now rejects anything else at
+    # the boundary instead of letting an arbitrary JSON shape reach save_requirements and get
+    # persisted into the JSONB column unchecked.
+    functional: list[str]
     nonFunctional: dict[str, Any]
     # Optional -- omitted by the existing Requirements tab edit flow (which never touches
     # industry/compliance context), but the What-If Simulator's "Make this real" needs a way to

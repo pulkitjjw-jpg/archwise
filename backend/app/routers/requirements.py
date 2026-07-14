@@ -103,20 +103,23 @@ async def get_requirement_suggestions(
 ) -> dict:
     # Stateless and not persisted -- recomputed on demand from whatever the client currently has
     # (saved values, or the user's in-progress edit-mode draft), so suggestions stay relevant as
-    # the user types/selects rather than freezing at whatever was last saved.
-    functional = payload.functional if isinstance(payload.functional, list) else []
+    # the user types/selects rather than freezing at whatever was last saved. payload.functional
+    # is guaranteed to be a list[str] by RequirementsPutRequest -- no runtime shape check needed.
     industry_context = payload.industryContext or DEFAULT_INDUSTRY_CONTEXT
 
     # Knowledge-base RAG (Step 4 priority 3: NFR reasoning, Sommerville's requirements-engineering
     # chapters in particular). Same pattern as HLD generation -- retrieve here (router has the DB
     # session), pass plain dicts into the LLM layer.
     knowledge_chunks = await retrieve_relevant_knowledge(
-        db, build_requirements_context_query({"functional": functional, "nonFunctional": payload.nonFunctional}, industry_context)
+        db,
+        build_requirements_context_query(
+            {"functional": payload.functional, "nonFunctional": payload.nonFunctional}, industry_context
+        ),
     )
     knowledge_context = [chunk_to_prompt_dict(c) for c in knowledge_chunks]
 
     suggestions = await generate_requirement_suggestions(
-        functional,
+        payload.functional,
         payload.nonFunctional,
         settings.openrouter_api_key,
         knowledge_context,
