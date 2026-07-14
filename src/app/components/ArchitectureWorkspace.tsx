@@ -679,9 +679,45 @@ export default function ArchitectureWorkspace({
     return { before, after };
   };
 
-  const handleExport = () => {
+  const handleExport = async () => {
     if (!architecture) return;
-    window.location.href = `/api/projects/${projectId}/export?provider=${activeProvider}`;
+    try {
+      setManifestExportBusy(true);
+      setError("");
+      setErrorRetryAction(null);
+
+      const res = await fetch(`/api/projects/${projectId}/export?provider=${activeProvider}`);
+      if (!res.ok) {
+        // Previously a raw `window.location.href` navigation -- a backend error (404, 500, an
+        // expired session) navigated the whole tab away to a raw JSON error body with zero
+        // feedback and no way to retry without reloading. Fetching first means a failure can be
+        // caught and surfaced the same way every other export failure already is.
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "Failed to export. Please try again.");
+      }
+
+      const blob = await res.blob();
+      // Reuse the filename the backend already computed (safe_name-export_label-provider.zip)
+      // rather than re-deriving it client-side -- one source of truth for the naming scheme.
+      const disposition = res.headers.get("Content-Disposition") || "";
+      const filenameMatch = disposition.match(/filename="([^"]+)"/);
+      const filename = filenameMatch ? filenameMatch[1] : `architecture-${activeProvider}.zip`;
+
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      console.error("Manifest export failed:", err);
+      setError(err.message || "Failed to export. Please try again.");
+      setErrorRetryAction(() => () => handleExport());
+    } finally {
+      setManifestExportBusy(false);
+    }
   };
 
   // Exports the diagram itself as an image -- a separate concern from handleExport above, which
@@ -1400,6 +1436,7 @@ export default function ArchitectureWorkspace({
   const diagramSvgRef = useRef<SVGSVGElement>(null);
   const [imageExportOpen, setImageExportOpen] = useState(false);
   const [imageExportBusy, setImageExportBusy] = useState(false);
+  const [manifestExportBusy, setManifestExportBusy] = useState(false);
   const imageExportRef = useRef<HTMLSpanElement>(null);
 
   // Fullscreen diagram mode (Workstream Q) -- more room to visually untangle complex
@@ -3285,9 +3322,15 @@ export default function ArchitectureWorkspace({
                     <span className="inline-flex items-center gap-1">
                       <button
                         onClick={handleExport}
-                        className="rounded-xl bg-accent hover:bg-accent-ink text-white px-3 py-1.5 text-[9.5px] font-extrabold uppercase transition shadow-sm active:scale-95 flex items-center gap-1"
+                        disabled={manifestExportBusy}
+                        className="rounded-xl bg-accent hover:bg-accent-ink text-white px-3 py-1.5 text-[9.5px] font-extrabold uppercase transition shadow-sm active:scale-95 flex items-center gap-1 disabled:opacity-50"
                       >
-                        <span>📥</span> {activeProvider === "kubernetes" ? "Export Manifests" : "Export TF"}
+                        <span>📥</span>{" "}
+                        {manifestExportBusy
+                          ? "Exporting..."
+                          : activeProvider === "kubernetes"
+                            ? "Export Manifests"
+                            : "Export TF"}
                       </button>
                       <InfoTooltip
                         text={
