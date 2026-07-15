@@ -2,7 +2,8 @@ from app.models import Architecture, Conversation, Project, Requirement, User
 
 
 def serialize_user(u: User) -> dict:
-    # Deliberately excludes password_hash -- never let it flow into a response, even indirectly.
+    # Deliberately excludes clerk_user_id -- an internal sync key the frontend has no use for
+    # (it already knows its own Clerk identity directly from Clerk's own hooks).
     return {
         "id": str(u.id),
         "email": u.email,

@@ -29,19 +29,28 @@ PRODUCT_DOMAIN_DEFAULT = text(r"""'{"category":"other","rationale":"","reference
 
 
 class User(Base):
-    """Added when per-user auth was introduced (Phase B, Milestone 1) -- until then the app had no
-    concept of a user at all (see the now-stale comment on ShareLink below). Sessions are NOT
-    stored here -- they live in Redis as opaque secrets.token_urlsafe tokens (see app/security.py),
-    the same proven pattern as ShareLink.token, so a session can be revoked instantly by deleting
-    its Redis key without touching this table."""
+    """Added when per-user auth was introduced (Phase B, Milestone 1); re-keyed to Clerk in the
+    Clerk migration -- Clerk now owns credentials, sessions, and email verification entirely, so
+    this table is purely a local mirror: an internal UUID (kept as the FK anchor for `projects`
+    and everywhere else, since Clerk's own IDs are prefixed strings like "user_2abc...", not
+    UUIDs -- re-typing every downstream FK to match would have been a much larger blast radius
+    than keeping one small translation table) plus whatever app-specific state Clerk has no
+    reason to know about (is_admin). Rows are created lazily on a Clerk user's first authenticated
+    request (see app/services/clerk_sync.py), not eagerly via a signup endpoint -- there is no
+    signup endpoint anymore, Clerk's own hosted/headless flows handle that entirely client-side."""
 
     __tablename__ = "users"
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
     )
+    # Clerk's own user id (the JWT's "sub" claim) -- the sync key between Clerk's identity and
+    # this row. Unique, not nullable: every row here corresponds to exactly one Clerk user.
+    clerk_user_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    # Mirrored from Clerk at row-creation time for display (admin user list, etc.) -- Clerk is
+    # still the source of truth for the real value; this can drift if a user changes their email
+    # in Clerk later (no webhook sync implemented yet, see clerk_sync.py's module docstring).
     email: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
-    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
     is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=text("clock_timestamp()")

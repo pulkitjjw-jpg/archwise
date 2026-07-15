@@ -40,6 +40,23 @@ class Settings(BaseSettings):
     llm_validation_fix_timeout_seconds: float = 10.0
     redis_url: str = "redis://localhost:6379/0"
 
+    # Clerk (replaces the old bcrypt+Redis-session auth system). clerk_secret_key is used both
+    # for the Backend API client (fetching a new user's email on first sight, see
+    # app/services/clerk_sync.py) and as a fallback JWKS-retrieval credential; clerk_jwt_key is
+    # what actually makes session verification networkless on every request (see
+    # app/dependencies.py's get_current_user) -- from the Clerk dashboard under
+    # API Keys -> Advanced -> JWT public key.
+    clerk_secret_key: str
+    clerk_jwt_key: str
+
+    # Resend (export-delivery emails only -- Clerk handles all auth-related emails natively, so
+    # this is scoped to the "Email to me" export feature, not signup/login/password-reset).
+    # Optional/empty-string default so the backend still starts without it configured; the export
+    # email endpoint itself 500s with a clear message if a send is attempted with no key set.
+    # Sender uses Resend's shared onboarding domain (onboarding@resend.dev) until a custom domain
+    # is configured -- see app/services/email.py.
+    resend_api_key: str = ""
+
     @property
     def llm_chain(self) -> list[str]:
         return [m.strip() for m in self.llm_model_chain.split(",") if m.strip()]

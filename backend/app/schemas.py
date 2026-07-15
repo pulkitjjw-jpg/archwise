@@ -1,6 +1,6 @@
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ProjectCreateRequest(BaseModel):
@@ -146,31 +146,27 @@ class LayoutOverrideRequest(BaseModel):
     y: float
 
 
-class RegisterRequest(BaseModel):
-    email: EmailStr
-    # Length-only check here; hashing itself (bcrypt) is what actually protects the value. 8 is a
-    # deliberately modest floor -- this app has no email verification or MFA to fall back on yet,
-    # so it's a baseline against trivial passwords, not a strength policy.
-    password: str = Field(min_length=8)
+class EmailExportAttachment(BaseModel):
+    """Only present for client-generated exports (docs markdown, diagram image) -- the browser
+    already built these (see ArchitectureWorkspace.tsx's handleExportFlowDocs / image export) and
+    has no reason to ask the backend to regenerate them just to attach them to an email. For
+    terraform/kubernetes/executive-summary, the backend regenerates server-side (same functions
+    the direct-download routes already use) and this field is ignored."""
+
+    filename: str
+    contentBase64: str
+    mimeType: str
 
 
-class LoginRequest(BaseModel):
-    email: EmailStr
-    password: str
+class EmailExportRequest(BaseModel):
+    format: str  # "terraform" | "kubernetes" | "executive-summary" | "docs" | "image"
+    provider: str = "aws"
+    attachment: EmailExportAttachment | None = None
 
 
-class ForgotPasswordRequest(BaseModel):
-    email: EmailStr
-
-
-class ResetPasswordRequest(BaseModel):
-    token: str
-    newPassword: str = Field(min_length=8)
-
-
-class ChangePasswordRequest(BaseModel):
-    currentPassword: str
-    newPassword: str = Field(min_length=8)
+# RegisterRequest/LoginRequest/ForgotPasswordRequest/ResetPasswordRequest/ChangePasswordRequest
+# removed -- Clerk owns credentials, sessions, and email verification entirely now (see
+# app/dependencies.py's get_current_user).
 
 
 class UpdateAppSettingsRequest(BaseModel):

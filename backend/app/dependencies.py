@@ -1,33 +1,41 @@
 import uuid
 from typing import Annotated
 
+from clerk_backend_api.security.types import TokenVerificationError, VerifyTokenOptions
+from clerk_backend_api.security.verifytoken import verify_token
 from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.db import get_db
 from app.models import Project, User
-from app.security import get_user_id_from_session
+from app.services.clerk_sync import get_or_create_user_by_clerk_id
 
 
 async def get_current_user(
     request: Request,
-    x_session_token: Annotated[str | None, Header()] = None,
+    authorization: Annotated[str | None, Header()] = None,
     db: AsyncSession = Depends(get_db),
 ) -> User:
-    if not x_session_token:
+    """Replaces the old Redis-session lookup with Clerk JWT verification. `jwt_key` (a PEM public
+    key from the Clerk dashboard) makes this networkless -- a local signature check, same cost
+    profile as the old Redis GET, not a round-trip to Clerk's API on every request. The Bearer
+    token itself is forwarded by the Next.js catch-all proxy (src/app/api/[...path]/route.ts),
+    which reads it via auth().getToken() -- this backend still never talks to a browser directly."""
+    if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="You need to be logged in to do that. Please sign in and try again.")
-    user_id = await get_user_id_from_session(x_session_token)
-    if not user_id:
+    token = authorization.removeprefix("Bearer ")
+    try:
+        payload = verify_token(token, VerifyTokenOptions(jwt_key=settings.clerk_jwt_key))
+    except TokenVerificationError:
         raise HTTPException(status_code=401, detail="Your session has expired. Please sign in again.")
-    user = await db.get(User, user_id)
-    if not user:
-        # The session outlived the user (e.g. deleted between login and this request) -- treat
-        # exactly like any other invalid session rather than a distinct error, nothing useful to
-        # tell the caller differently.
-        raise HTTPException(status_code=401, detail="You need to be logged in to do that. Please sign in and try again.")
+    clerk_user_id = payload["sub"]
+    user = await get_or_create_user_by_clerk_id(db, clerk_user_id)
     # Stashed so app/rate_limit.py's key function can rate-limit by user instead of by
-    # connection -- every request arrives from the same Next.js proxy IP otherwise.
+    # connection -- every request arrives from the same Next.js proxy IP otherwise. Unchanged
+    # from the pre-Clerk implementation -- rate_limit.py doesn't know or care where user_id
+    # came from.
     request.state.user_id = user.id
     return user
 
