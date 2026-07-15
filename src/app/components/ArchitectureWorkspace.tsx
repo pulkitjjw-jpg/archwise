@@ -8,7 +8,7 @@ import { runLldRulesEngine } from "@/lib/lld-rules";
 import { validateArchitectureLayout, getProviderMaturityWarning } from "@/lib/validation";
 import { resolveServiceIcon } from "@/lib/service-icons";
 import { getLearnContent, getPlainDescription } from "@/lib/component-descriptions";
-import { exportDiagramAsPng, exportDiagramAsSvg, type PngExportEdge, type PngExportNode } from "@/lib/diagram-export";
+import { blobToBase64, exportDiagramAsPng, exportDiagramAsSvg, type PngExportEdge, type PngExportNode } from "@/lib/diagram-export";
 import { buildFlowDocumentationMarkdown, downloadMarkdown, type FlowDocComponent } from "@/lib/flow-documentation-export";
 import {
   verifyJourneyPath,
@@ -806,6 +806,41 @@ export default function ArchitectureWorkspace({
 
   const [docsExportBusy, setDocsExportBusy] = useState(false);
 
+  // Extracted from handleExportFlowDocs below so the "Email to me" action (which needs the same
+  // markdown as an attachment, not a browser download) doesn't have to re-derive it separately.
+  const buildDocsMarkdownContent = async (): Promise<{ markdown: string; filenameBase: string }> => {
+    const [projectRes, summaryRes] = await Promise.all([
+      fetch(`/api/projects/${projectId}`),
+      fetch(`/api/projects/${projectId}/requirements/summary`, { method: "POST" }),
+    ]);
+    const projectName = projectRes.ok ? (await projectRes.json())?.project?.name : undefined;
+    const conversationSummary = summaryRes.ok ? (await summaryRes.json())?.summary : null;
+
+    const components: FlowDocComponent[] = architecture!.hld.components.map((c) => {
+      const mapping = getMappingForProvider(c, activeProvider);
+      return {
+        name: c.name,
+        type: c.type,
+        serviceName: mapping?.serviceName || c.name,
+        reasoning: c.reasoning || "",
+      };
+    });
+
+    const costs = calculateTotalCost(activeProvider);
+    const markdown = buildFlowDocumentationMarkdown({
+      projectName: projectName || "Untitled Project",
+      providerLabel: PROVIDER_LABELS[activeProvider],
+      version: architecture!.version,
+      conversationSummary,
+      flowStory: currentFlowStory || null,
+      components,
+      costMin: costs.min,
+      costMax: costs.max,
+    });
+
+    return { markdown, filenameBase: `architecture-docs-v${architecture!.version}-${activeProvider}` };
+  };
+
   // Separate export action from both Export TF (deployable code) and Export Image (just the
   // picture) -- this is the only one with narrative explanation baked in, by design.
   const handleExportFlowDocs = async () => {
@@ -815,37 +850,8 @@ export default function ArchitectureWorkspace({
       setDocsExportBusy(true);
       setError("");
       setErrorRetryAction(null);
-
-      const [projectRes, summaryRes] = await Promise.all([
-        fetch(`/api/projects/${projectId}`),
-        fetch(`/api/projects/${projectId}/requirements/summary`, { method: "POST" }),
-      ]);
-      const projectName = projectRes.ok ? (await projectRes.json())?.project?.name : undefined;
-      const conversationSummary = summaryRes.ok ? (await summaryRes.json())?.summary : null;
-
-      const components: FlowDocComponent[] = architecture.hld.components.map((c) => {
-        const mapping = getMappingForProvider(c, activeProvider);
-        return {
-          name: c.name,
-          type: c.type,
-          serviceName: mapping?.serviceName || c.name,
-          reasoning: c.reasoning || "",
-        };
-      });
-
-      const costs = calculateTotalCost(activeProvider);
-      const markdown = buildFlowDocumentationMarkdown({
-        projectName: projectName || "Untitled Project",
-        providerLabel: PROVIDER_LABELS[activeProvider],
-        version: architecture.version,
-        conversationSummary,
-        flowStory: currentFlowStory || null,
-        components,
-        costMin: costs.min,
-        costMax: costs.max,
-      });
-
-      downloadMarkdown(markdown, `architecture-docs-v${architecture.version}-${activeProvider}`);
+      const { markdown, filenameBase } = await buildDocsMarkdownContent();
+      downloadMarkdown(markdown, filenameBase);
     } catch (err) {
       console.error("Flow documentation export failed:", err);
       setError("Failed to export architecture documentation. Please try again.");
@@ -886,6 +892,114 @@ export default function ArchitectureWorkspace({
     } finally {
       setExecSummaryExportBusy(false);
     }
+  };
+
+  // "Email to me" -- always sent to the requester's own Clerk-registered email, decided
+  // server-side (see backend/app/routers/export.py's email_export), never something this UI
+  // collects. Terraform/Kubernetes/Executive Summary are regenerated server-side by that same
+  // route; Docs/Image are already-generated client-side content (the exact same markdown/blob the
+  // matching download button would produce) sent up as a base64 attachment.
+  const [emailBusy, setEmailBusy] = useState<string | null>(null);
+  const [emailSuccess, setEmailSuccess] = useState<string | null>(null);
+
+  const emailExport = async (
+    format: "terraform" | "kubernetes" | "executive-summary" | "docs" | "image",
+    attachment?: { filename: string; blob: Blob }
+  ) => {
+    setEmailBusy(format);
+    setEmailSuccess(null);
+    setError("");
+    try {
+      const body: Record<string, unknown> = { format, provider: activeProvider };
+      if (attachment) {
+        body.attachment = {
+          filename: attachment.filename,
+          contentBase64: await blobToBase64(attachment.blob),
+          mimeType: attachment.blob.type,
+        };
+      }
+      const res = await fetch(`/api/projects/${projectId}/export/email`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Failed to send that email. Please try again.");
+      setEmailSuccess(format);
+      setTimeout(() => setEmailSuccess((cur) => (cur === format ? null : cur)), 4000);
+    } catch (err: any) {
+      console.error("Email export failed:", err);
+      setError(err.message || "Failed to send that email. Please try again.");
+    } finally {
+      setEmailBusy(null);
+    }
+  };
+
+  const handleEmailManifest = () => emailExport(activeProvider === "kubernetes" ? "kubernetes" : "terraform");
+  const handleEmailExecutiveSummary = () => emailExport("executive-summary");
+  const handleEmailDocs = async () => {
+    if (!architecture) return;
+    const { markdown, filenameBase } = await buildDocsMarkdownContent();
+    await emailExport("docs", { filename: `${filenameBase}.md`, blob: new Blob([markdown], { type: "text/markdown" }) });
+  };
+  const handleEmailImage = async (format: "png" | "svg") => {
+    setImageExportOpen(false);
+    if (!architecture) return;
+    const filenameBase = `architecture-diagram-v${architecture.version}`;
+    if (format === "svg") {
+      const svgEl = diagramSvgRef.current;
+      if (!svgEl) return;
+      const blob = exportDiagramAsSvg(svgEl, filenameBase, false);
+      await emailExport("image", { filename: `${filenameBase}.svg`, blob });
+      return;
+    }
+    const realPngNodes: PngExportNode[] = diagramComponents
+      .map((c) => {
+        const coord = nodeCoords[c.id];
+        if (!coord) return null;
+        const mapping = getMappingForProvider(c, activeProvider);
+        return {
+          id: c.id,
+          x: coord.x,
+          y: coord.y,
+          width: coord.width,
+          height: coord.height,
+          label: c.name,
+          serviceName: mapping?.serviceName || c.name,
+          isCompliance: isComplianceNode(c.type),
+          isOverride: c.metadata?.overrideSource === "user",
+          accentHex: "#5B4FE8",
+        };
+      })
+      .filter((n): n is PngExportNode => n !== null);
+    const bookendPngNodes: PngExportNode[] = [];
+    for (const n of bookendNodes) {
+      const coord = nodeCoords[n.id];
+      if (!coord) continue;
+      bookendPngNodes.push({
+        id: n.id,
+        x: coord.x,
+        y: coord.y,
+        width: coord.width,
+        height: coord.height,
+        label: n.kind === "user" ? "Start" : n.kind === "client" ? "Frontend" : "End",
+        serviceName: n.name,
+        isCompliance: false,
+        isOverride: false,
+        accentHex: "#12161F",
+        isBookend: true,
+      });
+    }
+    const pngNodes: PngExportNode[] = [...realPngNodes, ...bookendPngNodes];
+    const pngEdges: PngExportEdge[] = layoutConnections
+      .map((conn) => {
+        const points = diagramLayout.edgePoints[`${conn.from}->${conn.to}`];
+        if (!points || points.length < 2) return null;
+        return { d: buildRoundedPath(points) };
+      })
+      .filter((e): e is PngExportEdge => e !== null);
+    const blob = await exportDiagramAsPng(pngNodes, pngEdges, diagramLayout.width, diagramLayout.height, filenameBase, 2, false);
+    await emailExport("image", { filename: `${filenameBase}.png`, blob });
   };
 
   const loadComponentSuggestions = (components: ComponentData[], connections: { from: string; to: string; protocol?: string }[]) => {
@@ -3350,6 +3464,18 @@ export default function ArchitectureWorkspace({
                             : "Downloads ready-to-run Terraform (.tf) files for the selected cloud provider — the actual deployable infrastructure code, not a picture of it. Switch providers above to export a different cloud's config."
                         }
                       />
+                      <button
+                        onClick={handleEmailManifest}
+                        disabled={emailBusy === (activeProvider === "kubernetes" ? "kubernetes" : "terraform")}
+                        title="Email this to me"
+                        className="rounded-xl border border-line-strong bg-panel hover:bg-paper text-ink-muted px-2 py-1.5 text-[10px] transition shadow-sm active:scale-95 disabled:opacity-50"
+                      >
+                        {emailBusy === (activeProvider === "kubernetes" ? "kubernetes" : "terraform")
+                          ? "…"
+                          : emailSuccess === (activeProvider === "kubernetes" ? "kubernetes" : "terraform")
+                            ? "✅"
+                            : "✉️"}
+                      </button>
                     </span>
 
                     {/* Export Diagram Image -- deliberately a separate control from Export TF
@@ -3363,18 +3489,26 @@ export default function ArchitectureWorkspace({
                         <span>🖼️</span> {imageExportBusy ? "Exporting..." : "Export Image"} <span className="text-[8px]">▾</span>
                       </button>
                       {imageExportOpen && (
-                        <div className="absolute left-0 top-full z-20 mt-1.5 w-36 rounded-xl border border-line bg-white p-1 shadow-lg animate-fadeIn">
+                        <div className="absolute left-0 top-full z-20 mt-1.5 w-44 rounded-xl border border-line bg-white p-1 shadow-lg animate-fadeIn">
                           <button
                             onClick={() => handleExportDiagramImage("png")}
                             className="block w-full rounded-lg px-2.5 py-1.5 text-left text-[10px] font-bold text-ink-muted hover:bg-paper hover:text-ink"
                           >
-                            As PNG (image)
+                            Download as PNG
                           </button>
                           <button
                             onClick={() => handleExportDiagramImage("svg")}
                             className="block w-full rounded-lg px-2.5 py-1.5 text-left text-[10px] font-bold text-ink-muted hover:bg-paper hover:text-ink"
                           >
-                            As SVG (vector)
+                            Download as SVG
+                          </button>
+                          <div className="my-1 border-t border-line" />
+                          <button
+                            onClick={() => handleEmailImage("png")}
+                            disabled={emailBusy === "image"}
+                            className="block w-full rounded-lg px-2.5 py-1.5 text-left text-[10px] font-bold text-ink-muted hover:bg-paper hover:text-ink disabled:opacity-50"
+                          >
+                            {emailBusy === "image" ? "Sending…" : emailSuccess === "image" ? "✅ Sent" : "✉️ Email PNG to me"}
                           </button>
                         </div>
                       )}
@@ -3393,6 +3527,14 @@ export default function ArchitectureWorkspace({
                         <span>📄</span> {docsExportBusy ? "Exporting..." : "Export Docs"}
                       </button>
                       <InfoTooltip text="Downloads a Markdown file with the project summary, this provider's flow story, and the full component list with reasoning — real documentation, not just a picture or raw code." />
+                      <button
+                        onClick={handleEmailDocs}
+                        disabled={emailBusy === "docs"}
+                        title="Email this to me"
+                        className="rounded-xl border border-line-strong bg-panel hover:bg-paper text-ink-muted px-2 py-1.5 text-[10px] transition shadow-sm active:scale-95 disabled:opacity-50"
+                      >
+                        {emailBusy === "docs" ? "…" : emailSuccess === "docs" ? "✅" : "✉️"}
+                      </button>
                     </span>
 
                     {/* Executive Summary Export (Workstream T2) -- the only export meant for a
@@ -3407,6 +3549,14 @@ export default function ArchitectureWorkspace({
                         <span>📊</span> {execSummaryExportBusy ? "Generating..." : "Executive Summary"}
                       </button>
                       <InfoTooltip text="Downloads a one-page PDF in plain business language for a non-technical reader (investor, exec) — cost, scalability story, compliance posture, and top risks. No diagrams, no code, no service names." />
+                      <button
+                        onClick={handleEmailExecutiveSummary}
+                        disabled={emailBusy === "executive-summary"}
+                        title="Email this to me"
+                        className="rounded-xl border border-line-strong bg-panel hover:bg-paper text-ink-muted px-2 py-1.5 text-[10px] transition shadow-sm active:scale-95 disabled:opacity-50"
+                      >
+                        {emailBusy === "executive-summary" ? "…" : emailSuccess === "executive-summary" ? "✅" : "✉️"}
+                      </button>
                     </span>
 
                     {/* Deployment Target Toggle */}

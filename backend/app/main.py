@@ -99,6 +99,11 @@ FIELD_LABELS: dict[str, str] = {
     "gcp": "GCP configuration",
     "kubernetes": "Kubernetes configuration",
     "private": "private cloud configuration",
+    "format": "export format",
+    "attachment": "attachment",
+    "filename": "file name",
+    "contentBase64": "attachment content",
+    "mimeType": "attachment type",
 }
 
 

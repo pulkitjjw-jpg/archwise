@@ -96,7 +96,28 @@ function triggerDownload(blob: Blob, filename: string) {
   URL.revokeObjectURL(url);
 }
 
-export function exportDiagramAsSvg(svgEl: SVGSVGElement, filenameBase: string) {
+// Used by "Email to me" export actions (see ArchitectureWorkspace.tsx) to turn a client-generated
+// Blob (diagram image, docs markdown) into the base64 string the backend's email-export endpoint
+// expects as an attachment -- the backend never sees these blobs any other way, since it never
+// generated them in the first place.
+export function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const result = reader.result as string;
+      // reader.result is a data: URL ("data:<mime>;base64,<data>") -- only the part after the
+      // comma is the base64 payload itself.
+      resolve(result.split(",")[1] || "");
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+// Returns the generated Blob (in addition to still triggering the download) so callers -- like
+// ArchitectureWorkspace.tsx's "Email to me" action -- can reuse the exact same generated image
+// as an email attachment without re-deriving it from the DOM a second time.
+export function exportDiagramAsSvg(svgEl: SVGSVGElement, filenameBase: string, download = true): Blob {
   const clone = svgEl.cloneNode(true) as SVGSVGElement;
   inlineComputedStyles(svgEl, clone);
   clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
@@ -117,7 +138,8 @@ export function exportDiagramAsSvg(svgEl: SVGSVGElement, filenameBase: string) {
   const blob = new Blob([`<?xml version="1.0" encoding="UTF-8"?>\n${serialized}`], {
     type: "image/svg+xml;charset=utf-8",
   });
-  triggerDownload(blob, `${filenameBase}.svg`);
+  if (download) triggerDownload(blob, `${filenameBase}.svg`);
+  return blob;
 }
 
 // --- PNG export -----------------------------------------------------------------------------
@@ -223,14 +245,17 @@ function buildPlainDiagramSvg(
   return parts.join("");
 }
 
+// Resolves with the generated Blob (in addition to still triggering the download) -- same reuse
+// reason as exportDiagramAsSvg above.
 export function exportDiagramAsPng(
   nodes: PngExportNode[],
   edges: PngExportEdge[],
   width: number,
   height: number,
   filenameBase: string,
-  scale = 2
-): Promise<void> {
+  scale = 2,
+  download = true
+): Promise<Blob> {
   const svgString = buildPlainDiagramSvg(nodes, edges, width, height);
   const svgBlob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
   const svgUrl = URL.createObjectURL(svgBlob);
@@ -269,8 +294,8 @@ export function exportDiagramAsPng(
           reject(new Error("Failed to render PNG"));
           return;
         }
-        triggerDownload(blob, `${filenameBase}.png`);
-        resolve();
+        if (download) triggerDownload(blob, `${filenameBase}.png`);
+        resolve(blob);
       }, "image/png");
     };
     img.onerror = () => {
