@@ -45,7 +45,7 @@ export default function ForgotPasswordPage() {
     >
       {submitted ? (
         <p className="rounded-2xl border border-success/25 bg-success-soft px-4 py-3 text-sm text-ink">
-          If an account exists for that email, a reset link has been generated.
+          If an account exists for that email, we&apos;ve sent a password reset link to it. Check your inbox.
         </p>
       ) : (
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">

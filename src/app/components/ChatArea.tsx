@@ -229,7 +229,7 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
     stageLabel = "Brainstorming Architecture Details";
   } else if (latestStage === "growth_trigger") {
     progressPercent = 85;
-    stageLabel = "Refining Growth Triggers / Changes";
+    stageLabel = "Reviewing your requested changes";
   } else if (latestStage === "requirement_gathering") {
     progressPercent = 100;
     stageLabel = "Discovery & Updates Concluded";
@@ -380,8 +380,8 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
       <div className="border-t border-line bg-paper/50 p-4 space-y-3">
         {latestStage === "requirement_gathering" && (
           <div className="flex items-center justify-center gap-1.5 rounded-xl bg-success-soft/70 border border-success/25 p-2 text-center text-xs">
-            <span className="font-semibold text-success">Discovery concluded.</span>{" "}
-            <span className="text-success">Need to report changes? Type a growth trigger below.</span>
+            <span className="font-semibold text-success">Discovery complete.</span>{" "}
+            <span className="text-success">Need to make a change — bigger scale, a new feature, a different budget? Just describe it below.</span>
             <InfoTooltip text="A 'growth trigger' just means describing a change to your product — new scale, a new feature, a bigger budget. Typing one here updates your requirements and lets you regenerate an updated architecture, without starting over." />
           </div>
         )}

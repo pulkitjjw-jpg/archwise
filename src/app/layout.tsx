@@ -39,7 +39,7 @@ export async function generateMetadata(): Promise<Metadata> {
   return {
     title: appName,
     description:
-      "An AI-powered SaaS that generates HLD, LLD, cloud mappings, cost estimates, IaC, and living architecture versions from a plain-language product idea.",
+      "Archwise turns a plain-language product idea into a complete cloud architecture — with diagrams, cost estimates, security checks, and ready-to-deploy infrastructure code — for AWS, Azure, Google Cloud, and Kubernetes.",
   };
 }
 

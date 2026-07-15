@@ -378,7 +378,7 @@ export default function RequirementsPanel({
     return (
       <div className="flex h-full flex-col items-center justify-center p-8 text-ink-muted">
         <div className="h-8 w-8 animate-spin rounded-full border-4 border-accent border-t-transparent" />
-        <span className="mt-4 text-sm font-semibold">Loading system requirements...</span>
+        <span className="mt-4 text-sm font-semibold">Loading your project details...</span>
       </div>
     );
   }
@@ -400,7 +400,7 @@ export default function RequirementsPanel({
         <span className="text-4xl">🔒</span>
         <h4 className="mt-4 font-bold text-ink">Requirements Locked</h4>
         <p className="mt-2 text-sm text-ink-muted max-w-xs">
-          Please complete the discovery conversation on the left. The AI will extract requirements once brainstorming concludes.
+          Finish chatting with the AI on the left first. Once you&apos;re done, it will automatically pull together what your product needs.
         </p>
       </div>
     );
@@ -412,7 +412,7 @@ export default function RequirementsPanel({
       <div className="flex items-center justify-between border-b border-line pb-4">
         <div>
           <div className="flex items-center gap-2">
-            <h3 className="text-xl font-bold text-ink">System Requirements Workspace</h3>
+            <h3 className="text-xl font-bold text-ink">Your Project Details</h3>
             {requirements.industryContext &&
               requirements.industryContext.industry !== "none" && (
                 <span className="inline-flex items-center gap-1 rounded-full bg-accent-soft border border-accent/25 px-2.5 py-1 text-[10px] font-bold text-accent-ink uppercase tracking-wider">
@@ -422,7 +422,7 @@ export default function RequirementsPanel({
               )}
           </div>
           <p className="text-xs text-ink-muted mt-1">
-            Review and refine the system parameters before generating high-level design recommendations.
+            Review and adjust these details before we design your cloud architecture.
           </p>
         </div>
         {!editMode && (
@@ -472,7 +472,7 @@ export default function RequirementsPanel({
         <div>
           <h4 className="mb-3 flex items-center gap-2 text-sm font-bold text-ink">
             <span>📝</span> Conversation Summary
-            <InfoTooltip text="A short, readable brief of what you described and what was decided — generated once per requirements version and cached, not the raw chat transcript." />
+            <InfoTooltip text="A short summary of what you told the AI and what you both decided — not the full chat, just the highlights." />
           </h4>
           {summaryLoading ? (
             <div className="flex items-center gap-1.5 rounded-2xl bg-paper p-4 text-xs text-ink-faint italic">
@@ -492,13 +492,13 @@ export default function RequirementsPanel({
         {/* Functional Requirements */}
         <div>
           <h4 className="mb-3 flex items-center gap-2 text-sm font-bold text-ink">
-            <span>🚀</span> Functional Capabilities
+            <span>🚀</span> What It Does
             <InfoTooltip text={FIELD_EXPLANATIONS.functional} />
           </h4>
           {editMode ? (
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-ink-muted uppercase tracking-wider">
-                Capabilities (one per line)
+                Features (one per line)
               </label>
               <textarea
                 rows={5}
@@ -551,16 +551,16 @@ export default function RequirementsPanel({
         {/* Non-Functional Requirements */}
         <div>
           <h4 className="text-sm font-bold text-ink mb-4 flex items-center gap-2">
-            <span>⚙️</span> Architectural Constraints (NFRs)
-            <InfoTooltip text="Non-functional requirements: constraints on HOW the system behaves (speed, cost, scale) rather than WHAT it does. These drive most of the technical decisions in your generated architecture." />
+            <span>⚙️</span> How It Should Perform
+            <InfoTooltip text="Non-functional requirements (NFRs): constraints on HOW the system behaves (speed, cost, scale) rather than WHAT it does. These drive most of the technical decisions in your generated architecture." />
           </h4>
           <div className="grid gap-4 md:grid-cols-2">
             {renderNFRField("Expected Traffic / Scale", requirements.nonFunctional.expectedScale, "expectedScale")}
-            {renderNFRField("Read/Write Pattern", requirements.nonFunctional.readWritePattern, "readWritePattern")}
+            {renderNFRField("Mostly Saving or Looking Up Data?", requirements.nonFunctional.readWritePattern, "readWritePattern")}
             {renderNFRField("Data Types", requirements.nonFunctional.dataNature, "dataNature")}
-            {renderNFRField("Latency Sensitivity", requirements.nonFunctional.latencySensitivity, "latencySensitivity")}
+            {renderNFRField("How Fast It Needs to Feel", requirements.nonFunctional.latencySensitivity, "latencySensitivity")}
             {renderNFRField("Budget Range", requirements.nonFunctional.budget, "budget")}
-            {renderNFRField("Team Technical Maturity", requirements.nonFunctional.teamMaturity, "teamMaturity")}
+            {renderNFRField("Your Team's Cloud/Tech Experience", requirements.nonFunctional.teamMaturity, "teamMaturity")}
             {renderNFRField("Security & Compliance", requirements.nonFunctional.compliance, "compliance")}
           </div>
         </div>
@@ -589,7 +589,7 @@ export default function RequirementsPanel({
         <div className="mt-8 border-t border-line pt-6">
           <div className="mb-2 flex items-center justify-center gap-1.5 text-center text-[11px] text-ink-faint">
             <span>Takes you to the Architecture tab, where you can generate or review the design</span>
-            <InfoTooltip text="Requirements themselves aren't consumed here — generation happens on the Architecture Diagram (HLD) tab, using whatever is currently saved above." />
+            <InfoTooltip text="Nothing changes on this screen — your architecture gets built on the Architecture Diagram tab, using whatever you've saved here." />
           </div>
           <button
             className="flex w-full items-center justify-center rounded-2xl bg-accent px-5 py-3.5 text-sm font-semibold text-white shadow-md transition-all hover:bg-accent-ink active:scale-[0.98]"

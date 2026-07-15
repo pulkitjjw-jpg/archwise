@@ -13,22 +13,22 @@ const FEATURES = [
   {
     emoji: "🌐",
     title: "Multi-Cloud Architecture",
-    body: "One design, reasoned mappings across AWS, Azure, GCP, Kubernetes, and on-prem — every component choice explained, not just generated.",
+    body: "One design, matched sensibly across AWS, Azure, Google Cloud, Kubernetes, and your own servers — every component choice explained, not just generated.",
   },
   {
     emoji: "💰",
     title: "Real Cost Estimates",
-    body: "Per-provider cost bands for every component, computed from your actual scale and requirements — not a generic price list.",
+    body: "A price range for each provider for every component, computed from your actual scale and requirements — not a generic price list.",
   },
   {
     emoji: "🛡️",
     title: "Security Findings",
-    body: "A deterministic security and compliance audit runs on every design — encryption, access control, and industry-specific rules like PCI-DSS or HIPAA.",
+    body: "A rule-based security and compliance check runs on every design — encryption, access control, and industry-specific rules like PCI-DSS or HIPAA.",
   },
   {
     emoji: "📦",
     title: "Terraform & Kubernetes Export",
-    body: "Ready-to-run infrastructure code for your chosen provider — the actual deployable config, not a picture of it.",
+    body: "Ready-to-run infrastructure code for your chosen provider — the actual files that build your infrastructure, not a picture of it.",
   },
   {
     emoji: "🔄",
@@ -40,7 +40,7 @@ const FEATURES = [
 const STEPS = [
   { n: "1", title: "Describe your idea", body: "A few sentences about what you're building is enough to start." },
   { n: "2", title: "Brainstorm the details", body: "A short guided conversation fills in scale, budget, and constraints." },
-  { n: "3", title: "Get your architecture", body: "A reasoned, multi-cloud design with costs, security findings, and IaC." },
+  { n: "3", title: "Get your architecture", body: "A reasoned, multi-cloud design with costs, security findings, and ready-to-deploy infrastructure code." },
   { n: "4", title: "Iterate as things change", body: "Report a change in chat — the architecture updates, versioned, never lost." },
 ];
 

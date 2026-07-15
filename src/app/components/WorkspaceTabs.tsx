@@ -73,7 +73,7 @@ export default function WorkspaceTabs({
               : "text-ink-muted hover:bg-line/50"
           }`}
         >
-          2. Architecture Diagram (HLD)
+          2. Architecture Diagram
         </button>
       </div>
 

@@ -35,7 +35,7 @@ export default function SourceCitations({ sources }: { sources?: Citation[] | nu
       {sources.map((s, idx) => {
         const isExpanded = expandedIndex === idx;
         const isPattern = s.sourceType === "reference-architecture";
-        const label = isPattern ? "Pattern Source" : "Principle Source";
+        const label = isPattern ? "Official Guide" : "Best-Practice Reference";
         return (
           <div key={idx}>
             <button

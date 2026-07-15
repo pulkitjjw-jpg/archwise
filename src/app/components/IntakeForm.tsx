@@ -123,7 +123,7 @@ export default function IntakeForm() {
       </span>
       <h3 className="mt-3 text-2xl font-black tracking-tight text-ink">Start a New Architecture Project</h3>
       <p className="mt-2 text-sm text-ink-muted leading-relaxed">
-        Enter a project name and a brief description of the product you want to build. We will brainstorm details together, then generate a fully-reasoned multi-cloud architecture.
+        Enter a project name and a brief description of the product you want to build. We will brainstorm details together, then generate a complete technical blueprint for your app — including which cloud services to use, estimated costs, and security recommendations.
       </p>
 
       {/* Process strip -- sets expectations for what happens after submit, since the next
@@ -181,7 +181,7 @@ export default function IntakeForm() {
           {selectedTemplate && (
             <p className="mt-2 text-[11px] text-ink-muted">
               {selectedTemplate.tagline}. Pre-filled the idea below as a starting point -- edit it freely, and we&apos;ll
-              still ask about scale, budget, and compliance in the brainstorm next.
+              still ask about how many users you expect, your budget, and any legal/data-privacy requirements (e.g. HIPAA, GDPR) in the brainstorm next.
             </p>
           )}
         </div>
@@ -193,7 +193,7 @@ export default function IntakeForm() {
           <input
             type="text"
             id="project-name"
-            placeholder={selectedTemplate ? selectedTemplate.namePlaceholder : "e.g. FinTech Payment Gateway, SaaS CRM"}
+            placeholder={selectedTemplate ? selectedTemplate.namePlaceholder : "e.g. Online Bookstore, Fitness Tracking App, Payment App for Small Businesses"}
             value={name}
             onChange={(e) => setName(e.target.value)}
             disabled={loading}
@@ -212,7 +212,7 @@ export default function IntakeForm() {
           <textarea
             id="product-idea"
             rows={10}
-            placeholder="Describe what your product does, who uses it, key requirements, expected traffic scale, etc. Paste as much as you have -- a full paragraph, an AI-generated brief, whatever you've already written."
+            placeholder="Describe what your product does, who uses it, key requirements, roughly how many users you expect, etc. Paste as much as you have -- a full paragraph, an AI-generated brief, whatever you've already written."
             value={ideaText}
             onChange={(e) => setIdeaText(e.target.value)}
             disabled={loading}
@@ -245,7 +245,7 @@ export default function IntakeForm() {
                 <textarea
                   id="existing-system-text"
                   rows={7}
-                  placeholder="Tech stack, how it's deployed, and the main pain points (e.g. &quot;a monolithic PHP app on a single VM, no CI/CD, manual deploys, struggling to scale past 500 users&quot;). You can also leave this blank and we'll ask about it during the brainstorm."
+                  placeholder="What it's built with, how it currently runs (e.g. on one server, in the cloud, etc.), and what's frustrating about it (e.g. &quot;an older website that lives on a single server, updates are done by hand, and it slows down/crashes once we get more than 500 users&quot;). You can also leave this blank and we'll ask about it during the brainstorm."
                   value={existingSystemText}
                   onChange={(e) => setExistingSystemText(e.target.value)}
                   disabled={loading}

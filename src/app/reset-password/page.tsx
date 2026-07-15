@@ -43,7 +43,7 @@ function ResetPasswordForm() {
 
   if (!token) {
     return (
-      <AuthShell eyebrow="🔒 Reset Password" title="Invalid link" subtitle="This password reset link is missing its token.">
+      <AuthShell eyebrow="🔒 Reset Password" title="Invalid link" subtitle="This password reset link looks incomplete or broken.">
         <Link href="/forgot-password" className="text-sm font-bold text-accent-ink hover:underline">
           Request a new reset link
         </Link>

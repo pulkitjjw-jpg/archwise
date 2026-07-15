@@ -294,10 +294,10 @@ function getSubChoiceOptions(
 // legible instead of a single unmoving spinner.
 const GENERATION_STAGES = [
   "Analyzing your requirements...",
-  "Running architecture rules engine...",
+  "Working through your requirements...",
   "Validating decisions with AI...",
   "Mapping to cloud services (AWS/Azure/GCP)...",
-  "Computing LLD configurations...",
+  "Working out the technical details for each service...",
   "Finalizing cost estimates...",
 ];
 const GENERATION_STAGE_INTERVAL_MS = 8000;
@@ -1689,11 +1689,11 @@ export default function ArchitectureWorkspace({
   };
   const NFR_FIELD_LABELS: Record<keyof WhatIfNFR, string> = {
     expectedScale: "Expected Traffic / Scale",
-    readWritePattern: "Read/Write Pattern",
+    readWritePattern: "Mostly Saving or Looking Up Data?",
     dataNature: "Data Types",
-    latencySensitivity: "Latency Sensitivity",
+    latencySensitivity: "How Fast It Needs to Feel",
     budget: "Budget Range",
-    teamMaturity: "Team Technical Maturity",
+    teamMaturity: "Your Team's Cloud/Tech Experience",
     compliance: "Security & Compliance",
   };
   type WhatIfIndustry = "none" | "fintech" | "healthtech";
@@ -2264,7 +2264,7 @@ export default function ArchitectureWorkspace({
         </div>
         <span className="mt-4 text-base font-semibold text-ink font-bold">{generationStage}</span>
         <span className="mt-2 text-xs text-ink-muted max-w-sm">
-          Generating cost metrics and resolving senior architect cloud recommendations across AWS, Azure, and GCP.
+          Estimating costs and picking the best-fit cloud services across AWS, Azure, and GCP.
         </span>
       </div>
     );
@@ -2335,7 +2335,7 @@ export default function ArchitectureWorkspace({
     return (
       <div className="p-6 sm:p-8 flex flex-col h-full justify-between overflow-y-auto">
         <div>
-          <h3 className="text-xl font-bold text-ink">Synthesize System Architecture</h3>
+          <h3 className="text-xl font-bold text-ink">Build Your Architecture</h3>
           <p className="text-sm text-ink-muted mt-1">
             Generate an architecture diagram complete with cloud service mappings for AWS, Azure, and GCP.
           </p>
@@ -2369,10 +2369,10 @@ export default function ArchitectureWorkspace({
           {isGenerationBlocked ? (
             <div className="mt-6 rounded-3xl border border-warning/25 bg-warning-soft/50 p-5">
               <h4 className="font-semibold text-warning flex items-center gap-2">
-                <span>⚠️</span> Generation Locked
+                <span>⚠️</span> A Few Things We Still Need
               </h4>
               <p className="mt-2 text-sm text-warning leading-relaxed">
-                We are missing critical parameters required to run the architecture rules engine. Click specify on the fields below to edit them:
+                We need a bit more information before we can design your architecture. Fill in the items below:
               </p>
               <ul className="mt-4 space-y-2 text-xs">
                 {isScaleUnspecified && (
@@ -2419,7 +2419,7 @@ export default function ArchitectureWorkspace({
                 <span>✓</span> Requirements Complete
               </h4>
               <p className="mt-1 text-sm text-accent-ink leading-relaxed">
-                All critical parameters have been specified. You are ready to generate your multi-cloud architecture.
+                Everything we need has been filled in — you&apos;re ready to generate your architecture.
               </p>
             </div>
           )}
@@ -2469,7 +2469,7 @@ export default function ArchitectureWorkspace({
                 viewMode === "diagram" ? "bg-white text-ink shadow-sm" : "text-ink-muted hover:text-ink"
               }`}
             >
-              Topology View
+              Diagram
             </button>
             <button
               onClick={() => setViewMode("comparison")}
@@ -2861,6 +2861,7 @@ export default function ArchitectureWorkspace({
                           <span className="flex-none">🧭</span>
                           <span>
                             <span className="mr-1 font-bold uppercase tracking-wide text-[9px] text-warning">Domain Pattern</span>
+                            <InfoTooltip text="A practice commonly used by similar products in this industry — not specific to your stated requirements, but worth knowing." />
                             {p.domainPattern}
                           </span>
                         </div>
@@ -2945,7 +2946,7 @@ export default function ArchitectureWorkspace({
             <span className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-accent-ink">
               <Icon icon="mdi:flask-outline" width={15} height={15} />
               What-If Simulator
-              <InfoTooltip text="A sandbox for exploring a hypothetical. Pick a suggested variation (or type your own) for whichever fields you want to change -- anything left blank stays at its real current value. Running a simulation re-runs the exact same rules-engine + LLM pipeline real architecture generation uses, without saving anything." />
+              <InfoTooltip text="A sandbox for exploring a hypothetical. Pick a suggested variation (or type your own) for whichever fields you want to change -- anything left blank stays at its real current value. Running a simulation re-runs the same process the app used to build your real architecture, without saving anything." />
             </span>
             <button onClick={closeWhatIf} className="text-xs font-bold text-ink-muted transition hover:text-ink">
               Close
@@ -3128,7 +3129,7 @@ export default function ArchitectureWorkspace({
                     onChange={(e) => setWhatIfHandlesCardData(e.target.checked)}
                     className="h-3.5 w-3.5 accent-accent"
                   />
-                  Handles cardholder data directly (drives PCI-DSS components like tokenization)
+                  Handles cardholder data directly (adds PCI-DSS safeguards like tokenization)
                 </label>
               )}
               {whatIfIndustry === "healthtech" && (
@@ -3139,7 +3140,7 @@ export default function ArchitectureWorkspace({
                     onChange={(e) => setWhatIfStoresPHI(e.target.checked)}
                     className="h-3.5 w-3.5 accent-accent"
                   />
-                  Stores PHI (drives HIPAA components like a dedicated PHI vault)
+                  Stores PHI (adds HIPAA safeguards like a dedicated PHI vault)
                 </label>
               )}
             </div>
@@ -3147,7 +3148,7 @@ export default function ArchitectureWorkspace({
             <div>
               <label className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-ink">
                 Preview for Provider
-                <InfoTooltip text="Which cloud provider's service names, LLD config, and cost figures the preview below uses. Switching this doesn't change any of the fields above -- it only changes which provider's real pricing/services the simulation is shown against." />
+                <InfoTooltip text="Which cloud provider's service names, technical configuration, and cost figures the preview below uses. Switching this doesn't change any of the fields above -- it only changes which provider's real pricing/services the simulation is shown against." />
               </label>
               <div className="mt-1.5 flex w-max bg-paper/80 p-0.5 rounded-lg border border-line shadow-sm">
                 {(["aws", "azure", "gcp", "kubernetes", "private"] as const).map((p) => (
@@ -3190,7 +3191,7 @@ export default function ArchitectureWorkspace({
                 disabled={whatIfLoading}
                 className="rounded-xl bg-accent px-4 py-2 text-xs font-bold uppercase text-white shadow-sm transition hover:opacity-90 active:scale-95 disabled:opacity-50"
               >
-                {whatIfLoading ? "Simulating (running the full generation pipeline)..." : "Run Simulation"}
+                {whatIfLoading ? "Simulating (this can take 30–60 seconds)..." : "Run Simulation"}
               </button>
               {whatIfLoading && (
                 <p className="mt-1.5 text-[10.5px] text-ink-faint">
@@ -3339,8 +3340,8 @@ export default function ArchitectureWorkspace({
                         {manifestExportBusy
                           ? "Exporting..."
                           : activeProvider === "kubernetes"
-                            ? "Export Manifests"
-                            : "Export TF"}
+                            ? "Export Kubernetes Config"
+                            : "Export Terraform"}
                       </button>
                       <InfoTooltip
                         text={
@@ -3377,7 +3378,7 @@ export default function ArchitectureWorkspace({
                           </button>
                         </div>
                       )}
-                      <InfoTooltip text="Downloads the diagram as an image (PNG) or scalable vector (SVG) — for docs, slides, or sharing. This is just the picture; use Export TF for the actual deployable infrastructure code." />
+                      <InfoTooltip text="Downloads the diagram as an image (PNG) or scalable vector (SVG) — for docs, slides, or sharing. This is just the picture; use Export Terraform for the actual deployable infrastructure code." />
                     </span>
 
                     {/* Export Flow Documentation -- the one export with narrative explanation
@@ -3466,7 +3467,7 @@ export default function ArchitectureWorkspace({
                         <div>
                           <div className="flex items-center gap-1.5">
                             <span className="text-xs font-extrabold uppercase tracking-wider text-ink">Architecture Health Score</span>
-                            <InfoTooltip text="A deterministic, rule-based grade (0-100) across four dimensions -- cost efficiency, scalability readiness, security posture, and vendor lock-in risk. Not an LLM guess: every point is computed from this design's actual configuration. Click a dimension below to see exactly why it scored the way it did." />
+                            <InfoTooltip text="A deterministic, rule-based grade (0-100) across four dimensions -- cost efficiency, scalability readiness, security posture, and vendor lock-in risk (how hard it'd be to switch cloud providers later). Not an LLM guess: every point is computed from this design's actual configuration. Click a dimension below to see exactly why it scored the way it did." />
                           </div>
                           <p className="text-[11px] text-ink-muted">out of 100, for {PROVIDER_LABELS[activeProvider]}</p>
                         </div>
@@ -3629,7 +3630,7 @@ export default function ArchitectureWorkspace({
                       <span>🔄</span> What Changed in Version {architecture.version}
                     </h4>
                     <p className="text-[11px] text-ink-muted mt-1">
-                      Delta modifications generated in response to growth triggers or updates:
+                      What changed and why — generated automatically as your requirements grew or were updated:
                     </p>
                     <div className="mt-4 grid gap-4 md:grid-cols-2 lg:grid-cols-3 border-t border-line pt-4">
                       {/* Added Components */}
@@ -4673,7 +4674,7 @@ export default function ArchitectureWorkspace({
                           {explanationMode === "simple" ? TYPE_LABELS[selectedNode.type] || selectedNode.type : selectedNode.type}
                         </span>
                         <span className="rounded-full bg-line border border-line-strong px-2 py-0.5 text-[9px] font-bold text-ink-muted uppercase tracking-wider">
-                          {activeProvider} Mapped
+                          {PROVIDER_LABELS[activeProvider]} Mapped
                         </span>
                       </div>
                       <div className="flex flex-none rounded-lg border border-line-strong bg-panel p-0.5 text-[9px] font-bold uppercase tracking-wide">
@@ -4694,8 +4695,9 @@ export default function ArchitectureWorkspace({
                     <h4 className="text-base font-bold text-ink mt-2">
                       {selectedMapping?.serviceName || selectedNode.name}
                     </h4>
-                    <p className="text-[10px] text-ink-faint font-semibold uppercase mt-0.5 tracking-wider">
-                      Generic Component: {selectedNode.name}
+                    <p className="text-[10px] text-ink-faint font-semibold uppercase mt-0.5 tracking-wider inline-flex items-center gap-1">
+                      Also known as: {selectedNode.name}
+                      <InfoTooltip text="The name for this piece of your architecture that doesn't depend on any specific cloud provider." />
                     </p>
 
                     <div className="mt-3 rounded-2xl border border-accent/25 bg-accent-soft p-3.5 text-xs text-ink leading-relaxed">
@@ -5026,6 +5028,7 @@ export default function ArchitectureWorkspace({
                           <span className="flex-none text-sm">🧭</span>
                           <span>
                             <span className="mr-1 font-bold uppercase tracking-wide text-[9px] text-warning">Domain Pattern</span>
+                            <InfoTooltip text="A practice commonly used by similar products in this industry — not specific to your stated requirements, but worth knowing." />
                             <br />
                             {selectedNode.domainPattern}
                           </span>
@@ -5098,6 +5101,7 @@ export default function ArchitectureWorkspace({
                       <span className="flex-none text-sm">🧭</span>
                       <span>
                         <span className="mr-1 font-bold uppercase tracking-wide text-[9px] text-warning">Domain Pattern</span>
+                        <InfoTooltip text="A practice commonly used by similar products in this industry — not specific to your stated requirements, but worth knowing." />
                         <br />
                         {recommendation.domainPattern}
                       </span>
@@ -5129,7 +5133,7 @@ export default function ArchitectureWorkspace({
                   <thead>
                     <tr className="bg-paper border-b border-line">
                       <th className="sticky left-0 z-10 bg-paper p-4 text-xs font-bold text-ink-muted uppercase tracking-wider w-[180px] border-r border-line">
-                        Generic Component
+                        What You Need
                       </th>
                       <th className={`p-4 text-xs font-bold text-ink-muted uppercase tracking-wider ${recommendation.recommendedProvider === "aws" ? "bg-accent-soft/50" : ""}`}>
                         <span className="flex items-center gap-1.5">
@@ -5309,7 +5313,7 @@ export default function ArchitectureWorkspace({
               <div className="flex flex-wrap items-center justify-between gap-y-2">
                 <div className="flex items-center gap-2">
                   <h4 className="text-lg font-black text-ink">User Journey Architecture</h4>
-                  <InfoTooltip text="A step-by-step walkthrough from the end user's perspective -- what they do, what happens behind the scenes, and which real components are involved at each step. Synthesized from the Architecture Flow Story for this provider, restructured into discrete steps. Click a component chip to jump to it in Topology View." />
+                  <InfoTooltip text="A step-by-step walkthrough from the end user's perspective -- what they do, what happens behind the scenes, and which real components are involved at each step. Synthesized from the Architecture Flow Story for this provider, restructured into discrete steps. Click a component chip to jump to it in the Diagram." />
                   {currentJourneyVerification && (
                     <span
                       className={`flex items-center gap-1 rounded-full border px-2 py-0.5 text-[9.5px] font-extrabold uppercase tracking-wide ${
@@ -5388,7 +5392,7 @@ export default function ArchitectureWorkspace({
                       <span
                         className="absolute left-0 top-0 flex h-8 w-8 items-center justify-center rounded-full text-xs font-extrabold text-white"
                         style={{ backgroundColor: getStepColor(idx) }}
-                        title="Matches this step's color in the Topology View when 'Flow steps' is on"
+                        title="Matches this step's color in the Diagram when 'Flow steps' is on"
                       >
                         {idx + 1}
                       </span>
@@ -5502,8 +5506,9 @@ export default function ArchitectureWorkspace({
                             <span className="text-sm font-bold text-ink">{p.title}</span>
                             <div className="flex items-center gap-1.5">
                               {p.usesStranglerFig && (
-                                <span className="rounded-full border border-accent/25 bg-accent-soft px-2 py-0.5 text-[9px] font-extrabold uppercase tracking-wide text-accent-ink">
+                                <span className="inline-flex items-center gap-1 rounded-full border border-accent/25 bg-accent-soft px-2 py-0.5 text-[9px] font-extrabold uppercase tracking-wide text-accent-ink">
                                   Strangler-fig
+                                  <InfoTooltip text="Strangler-fig: gradually route traffic to the new system piece by piece, instead of switching everything over at once." />
                                 </span>
                               )}
                               <span className={`rounded-full border px-2 py-0.5 text-[9px] font-extrabold uppercase tracking-wide ${EFFORT_COLOR[p.effort]}`}>
@@ -5524,6 +5529,7 @@ export default function ArchitectureWorkspace({
                               <span className="flex-none text-sm">🧭</span>
                               <span>
                                 <span className="mr-1 font-bold uppercase tracking-wide text-[9px] text-warning">Domain Pattern</span>
+                                <InfoTooltip text="A practice commonly used by similar products in this industry — not specific to your stated requirements, but worth knowing." />
                                 <br />
                                 {p.domainPattern}
                               </span>

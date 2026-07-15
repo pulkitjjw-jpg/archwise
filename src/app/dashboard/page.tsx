@@ -114,7 +114,11 @@ export default function DashboardPage() {
       const data = await res.json();
       setProjects(data.projects || []);
     } catch (err: any) {
-      setError(err.message || "Failed to load projects.");
+      setError(
+        err.message
+          ? `We couldn't load your projects: ${err.message}`
+          : "We couldn't load your projects. Please refresh the page or try again in a moment."
+      );
       setProjects([]);
     }
   };
@@ -152,8 +156,9 @@ export default function DashboardPage() {
                 {appName}
               </h1>
               <p className="mt-2 max-w-2xl text-sm leading-6 text-ink-faint">
-                Describe a product idea, brainstorm requirements, and generate a genuinely-reasoned
-                multi-cloud architecture — with cost estimates, LLD detail, and Terraform export.
+                Describe a product idea in plain English and get a full cloud architecture —
+                diagrams, cost estimates, detailed technical specs, and ready-to-deploy
+                infrastructure code.
               </p>
             </div>
             <div className="flex shrink-0 items-center gap-3">
@@ -206,9 +211,10 @@ export default function DashboardPage() {
                 No projects yet
               </h2>
               <p className="mt-3 text-sm leading-6 text-ink-muted">
-                Create your first project to start the discovery brainstorm. Once requirements are
-                gathered, you&apos;ll get a rule-engine-driven architecture with AWS, Azure, and GCP
-                mappings, cost bands, and a full reasoning trace for every decision.
+                Create your first project to answer a few quick questions about what you&apos;re
+                building. We&apos;ll turn your answers into a complete architecture — showing you
+                exactly which AWS, Azure, or Google Cloud services to use, what it&apos;ll cost, and
+                a plain-English explanation for every decision.
               </p>
             </div>
             <IntakeForm />

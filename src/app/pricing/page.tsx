@@ -5,21 +5,21 @@ import Link from "next/link";
 import SiteFooter from "@/app/components/SiteFooter";
 
 const FREE_FEATURES = [
-  "3 brainstorm + requirements sessions",
+  "3 planning conversations (brainstorming + requirements)",
   "1 architecture generation",
-  "1 growth-trigger enhancement",
+  "1 architecture update when your app needs to scale up",
   "Cost estimates & security findings",
   "Terraform / Kubernetes export",
 ];
 
 const PAID_FEATURES = [
-  "Unlimited brainstorm + requirements sessions",
+  "Unlimited planning conversations",
   "Unlimited architecture generations",
-  "Unlimited growth-trigger enhancements",
+  "Unlimited architecture updates as your app grows",
   "Cost estimates & security findings",
   "Terraform / Kubernetes export",
   "Executive summary PDF & shareable links",
-  "A dedicated model — never queued behind free-tier limits",
+  "Priority AI access — never wait behind free-plan users",
 ];
 
 function Check() {

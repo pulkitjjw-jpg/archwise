@@ -20,8 +20,8 @@ export default function AboutPage() {
         architecture for it&quot; usually means either hours of manual design work or a generic
         diagram tool that can&apos;t explain its own choices. Archwise runs a real discovery
         conversation first — scale, budget, team size, compliance needs — then generates a design
-        that&apos;s reasoned against that specific context, across AWS, Azure, GCP, Kubernetes, or
-        on-prem.
+        that&apos;s reasoned against that specific context, across AWS, Azure, Google Cloud,
+        Kubernetes, or your own servers.
       </p>
 
       <h2>Who&apos;s behind it</h2>
