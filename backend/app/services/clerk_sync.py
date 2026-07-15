@@ -46,7 +46,17 @@ async def get_or_create_user_by_clerk_id(db: AsyncSession, clerk_user_id: str) -
     user = User(clerk_user_id=clerk_user_id, email=email)
     db.add(user)
     try:
-        await db.flush()
+        # commit(), not flush() -- get_db()'s session has no auto-commit-on-clean-exit (see
+        # app/db.py), so a bare flush() here is only visible within THIS request's own
+        # transaction and gets silently rolled back the moment the request ends, unless the
+        # route handler itself happens to commit something else later. That's true for a
+        # write endpoint like POST /projects, but not for a plain read like GET /projects/{id}
+        # -- confirmed live: a user whose first authenticated request was read-only got a
+        # working response for that one request (the flushed row was visible to the SAME
+        # transaction's queries) but never actually persisted, silently re-created and
+        # re-discarded on every subsequent request, invisible to GET /admin/users forever.
+        # This must commit unconditionally, independent of whatever the calling route does.
+        await db.commit()
     except IntegrityError:
         # Two concurrent first-requests from the same brand-new user (e.g. a double-fired
         # effect, or two tabs) can both reach here before either commits -- the unique

@@ -2,11 +2,24 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { useSignIn } from "@clerk/nextjs";
 import AuthShell from "@/app/components/AuthShell";
 
-function globalErrorMessage(errors: { global: { longMessage?: string; message: string }[] | null }): string {
+type FieldError = { longMessage?: string; message: string } | null;
+
+// Checks field-specific errors first, then falls back to global -- see signup/page.tsx's
+// identical helper for why this matters (Clerk returns some real rejection reasons, like a
+// breached password, as a field error rather than a global one).
+function extractErrorMessage(
+  errors: { global: { longMessage?: string; message: string }[] | null; fields: object },
+  fieldOrder: string[]
+): string {
+  const fields = errors.fields as Record<string, FieldError | undefined>;
+  for (const field of fieldOrder) {
+    const fieldError = fields[field];
+    if (fieldError) return fieldError.longMessage || fieldError.message;
+  }
   const first = errors.global?.[0];
   return first?.longMessage || first?.message || "Something went wrong. Please try again.";
 }
@@ -16,7 +29,7 @@ function globalErrorMessage(errors: { global: { longMessage?: string; message: s
 // page here: Clerk's reset flow is code-based (email a code, verify it, set a new password), not
 // link-based like the old system, so it's a natural fit as three extra steps of this same form
 // rather than two more route files.
-type Mode = "signin" | "forgot-request" | "forgot-verify" | "forgot-reset";
+type Mode = "signin" | "verify-device" | "forgot-request" | "forgot-verify" | "forgot-reset";
 
 function LoginForm() {
   const router = useRouter();
@@ -31,69 +44,144 @@ function LoginForm() {
   const [newPassword, setNewPassword] = useState("");
   const [error, setError] = useState("");
 
-  const finalizeAndGo = async () => {
-    await signIn.finalize({
-      navigate: () => {
-        router.push(searchParams.get("next") || "/dashboard");
+  // `signIn` read synchronously right after an `await signIn.password(...)`/`verifyEmailCode(...)`
+  // is NOT reliable with this SDK version: confirmed live (via the raw network response body vs.
+  // signIn.status logged immediately afterward) that the closure can still read a stale snapshot
+  // -- e.g. "needs_identifier" -- even though the API response for the SAME call already says
+  // "needs_client_trust" or "complete". signInRef is kept pointed at the latest object via this
+  // effect (which DOES fire on every real update, confirmed live), and both waitForSignInUpdate
+  // below and the finalize effect read through the ref instead of the closure value.
+  const signInRef = useRef(signIn);
+  useEffect(() => {
+    signInRef.current = signIn;
+  }, [signIn]);
+
+  // Polls the ref (not the closure) for a small number of animation-frame-ish ticks -- give
+  // pending re-renders a chance to land and update the ref before giving up. 3s max.
+  const waitForSignInUpdate = async (predicate: (s: typeof signIn) => boolean) => {
+    for (let i = 0; i < 20; i++) {
+      if (predicate(signInRef.current)) return signInRef.current;
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+    return signInRef.current;
+  };
+
+  const finalizedRef = useRef(false);
+  const finalizeAndGo = () => {
+    if (finalizedRef.current) return;
+    finalizedRef.current = true;
+    signInRef.current.finalize({
+      // decorateUrl (not a plain router.push) is required, not optional -- it's what makes Clerk
+      // refresh the session cookie correctly before navigating (Safari ITP, and observed live to
+      // matter on Chromium too: skipping it left the freshly-created session invisible to
+      // clerkMiddleware's very next request, bouncing straight back to /login as if signed out).
+      navigate: ({ decorateUrl }) => {
+        const url = decorateUrl(searchParams.get("next") || "/dashboard");
+        if (url.startsWith("http")) {
+          window.location.href = url;
+        } else {
+          router.push(url);
+        }
       },
     });
   };
+  // Belt-and-suspenders: also finalize reactively if signIn.status reaches "complete" via a
+  // render this component sees directly (covers the case where a render happens outside of
+  // waitForSignInUpdate's polling window, e.g. right as the poll loop gives up).
+  useEffect(() => {
+    if (signIn.status === "complete") finalizeAndGo();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signIn.status]);
 
-  const handleSignIn = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSignIn = async () => {
     setError("");
     const { error: signInError } = await signIn.password({ emailAddress: email, password });
     if (signInError) {
-      setError(globalErrorMessage(errors) || "Incorrect email or password.");
+      setError(extractErrorMessage(errors, ["identifier", "password"]));
       return;
     }
-    if (signIn.status === "complete") {
-      await finalizeAndGo();
+    const current = await waitForSignInUpdate((s) => s.status !== "needs_identifier");
+    if (current.status === "complete") {
+      finalizeAndGo();
+      return;
+    }
+    // "needs_client_trust" -- Clerk's new-device check, distinct from "complete": signing in from
+    // a browser/device Clerk hasn't seen before for this account requires one extra emailed-code
+    // step before the session actually activates. Confirmed live: without this branch, a sign-in
+    // from a new device silently did nothing (no error, no navigation) -- the password itself was
+    // correct and the API call succeeded, there was just an unhandled intermediate status.
+    if (current.status === "needs_client_trust") {
+      const emailCodeFactor = current.supportedSecondFactors.find((f) => f.strategy === "email_code");
+      if (emailCodeFactor) {
+        const { error: sendError } = await signIn.mfa.sendEmailCode();
+        if (sendError) {
+          setError(extractErrorMessage(errors, ["code"]));
+          return;
+        }
+        setMode("verify-device");
+      } else {
+        setError("This device isn't recognized and no verification method is available. Please try again.");
+      }
+      return;
+    }
+    setError("We couldn't sign you in. Please try again.");
+  };
+
+  const handleVerifyDevice = async () => {
+    setError("");
+    const { error: verifyError } = await signIn.mfa.verifyEmailCode({ code });
+    if (verifyError) {
+      setError(extractErrorMessage(errors, ["code"]));
+      return;
+    }
+    const current = await waitForSignInUpdate((s) => s.status === "complete");
+    if (current.status === "complete") {
+      finalizeAndGo();
     } else {
-      setError("We couldn't sign you in. Please try again.");
+      setError("We couldn't verify this device. Please try again.");
     }
   };
 
-  const handleForgotRequest = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleForgotRequest = async () => {
     setError("");
     const { error: createError } = await signIn.create({ identifier: email });
     if (createError) {
-      setError(globalErrorMessage(errors) || "We couldn't find an account with that email.");
+      setError(extractErrorMessage(errors, ["identifier"]));
       return;
     }
     const { error: sendError } = await signIn.resetPasswordEmailCode.sendCode();
     if (sendError) {
-      setError(globalErrorMessage(errors) || "We couldn't send a reset code. Please try again.");
+      setError(extractErrorMessage(errors, ["identifier"]));
       return;
     }
     setMode("forgot-verify");
   };
 
-  const handleForgotVerify = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleForgotVerify = async () => {
     setError("");
     const { error: verifyError } = await signIn.resetPasswordEmailCode.verifyCode({ code });
     if (verifyError) {
-      setError(globalErrorMessage(errors) || "That code isn't right. Please check and try again.");
+      setError(extractErrorMessage(errors, ["code"]));
       return;
     }
     setMode("forgot-reset");
   };
 
-  const handleForgotReset = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleForgotReset = async () => {
     setError("");
     const { error: submitError } = await signIn.resetPasswordEmailCode.submitPassword({
       password: newPassword,
       signOutOfOtherSessions: true,
     });
     if (submitError) {
-      setError(globalErrorMessage(errors) || "We couldn't update your password. Please try again.");
+      setError(extractErrorMessage(errors, ["password"]));
       return;
     }
-    if (signIn.status === "complete") {
-      await finalizeAndGo();
+    const current = await waitForSignInUpdate((s) => s.status === "complete");
+    if (current.status === "complete") {
+      finalizeAndGo();
+    } else {
+      setError("We couldn't sign you in. Please try again.");
     }
   };
 
@@ -104,6 +192,54 @@ function LoginForm() {
     setNewPassword("");
     setError("");
   };
+
+  if (mode === "verify-device") {
+    return (
+      <AuthShell
+        eyebrow="🔑 Verify Device"
+        title="Confirm it's you"
+        subtitle={`We don't recognize this device. We sent a code to ${email} -- enter it below to finish signing in.`}
+        footer={
+          <button onClick={startOver} className="font-bold text-accent-ink hover:underline">
+            Back to sign in
+          </button>
+        }
+      >
+        <form action={handleVerifyDevice} className="flex flex-col gap-4">
+          <div>
+            <label htmlFor="code" className="block text-xs font-semibold uppercase tracking-wider text-ink-muted">
+              Verification code
+            </label>
+            <input
+              type="text"
+              id="code"
+              inputMode="numeric"
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              disabled={busy}
+              className="mt-2 w-full rounded-2xl border border-line bg-white px-4 py-3 text-sm text-ink shadow-sm focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
+              required
+            />
+          </div>
+          {error && <p className="text-xs font-medium text-danger">{error}</p>}
+          <button
+            type="submit"
+            disabled={busy}
+            className="mt-2 flex w-full items-center justify-center rounded-2xl bg-accent px-5 py-3 text-sm font-semibold text-white shadow-md transition-all hover:bg-accent-ink active:scale-[0.98] disabled:opacity-50"
+          >
+            {busy ? "Verifying..." : "Verify & Sign In"}
+          </button>
+          <button
+            type="button"
+            onClick={() => signIn.mfa.sendEmailCode()}
+            className="text-xs font-semibold text-accent-ink hover:underline"
+          >
+            Didn&apos;t get a code? Send another
+          </button>
+        </form>
+      </AuthShell>
+    );
+  }
 
   if (mode === "forgot-request") {
     return (
@@ -117,7 +253,7 @@ function LoginForm() {
           </button>
         }
       >
-        <form onSubmit={handleForgotRequest} className="flex flex-col gap-4">
+        <form action={handleForgotRequest} className="flex flex-col gap-4">
           <div>
             <label htmlFor="email" className="block text-xs font-semibold uppercase tracking-wider text-ink-muted">
               Email
@@ -158,7 +294,7 @@ function LoginForm() {
           </button>
         }
       >
-        <form onSubmit={handleForgotVerify} className="flex flex-col gap-4">
+        <form action={handleForgotVerify} className="flex flex-col gap-4">
           <div>
             <label htmlFor="code" className="block text-xs font-semibold uppercase tracking-wider text-ink-muted">
               Reset code
@@ -197,7 +333,7 @@ function LoginForm() {
   if (mode === "forgot-reset") {
     return (
       <AuthShell eyebrow="🔑 Reset Password" title="Choose a new password" subtitle="At least 8 characters.">
-        <form onSubmit={handleForgotReset} className="flex flex-col gap-4">
+        <form action={handleForgotReset} className="flex flex-col gap-4">
           <div>
             <label htmlFor="newPassword" className="block text-xs font-semibold uppercase tracking-wider text-ink-muted">
               New password
@@ -241,7 +377,7 @@ function LoginForm() {
         </>
       }
     >
-      <form onSubmit={handleSignIn} className="flex flex-col gap-4">
+      <form action={handleSignIn} className="flex flex-col gap-4">
         <div>
           <label htmlFor="email" className="block text-xs font-semibold uppercase tracking-wider text-ink-muted">
             Email

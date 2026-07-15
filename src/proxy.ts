@@ -74,14 +74,19 @@ const PUBLIC_PAGE_PREFIXES = [
 // project is ever moved to a custom Clerk domain (a paid-plan feature), this needs updating to
 // match it exactly -- verify against the browser console for CSP violations after any Clerk
 // domain change, same as this file's own iconify lesson below.
+//
+// *.challenges.cloudflare.com, not the bare domain -- live-tested the sign-up bot-protection
+// widget and observed it actually load from a randomized subdomain (e.g.
+// hagen.challenges.cloudflare.com), not challenges.cloudflare.com itself. The bare domain alone
+// silently failed every challenge request under a real CSP.
 const CSP_PRODUCTION =
   "default-src 'self'; " +
-  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.clerk.accounts.dev https://challenges.cloudflare.com; " +
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.clerk.accounts.dev https://*.challenges.cloudflare.com; " +
   "style-src 'self' 'unsafe-inline'; " +
   "img-src 'self' data: blob: https://img.clerk.com; " +
   "font-src 'self' data:; " +
   "worker-src 'self' blob:; " +
-  "frame-src 'self' https://challenges.cloudflare.com; " +
+  "frame-src 'self' https://*.challenges.cloudflare.com; " +
   // @iconify/react's <Icon> component -- used all over the diagram/component sidebar, per-
   // service icons, etc. -- fetches icon SVG data from these three domains (a documented 3-way
   // failover CDN, same vendor as the @iconify-json/* build dependency) at RUNTIME, not from a

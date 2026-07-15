@@ -2,11 +2,24 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSignUp } from "@clerk/nextjs";
 import AuthShell from "@/app/components/AuthShell";
 
-function globalErrorMessage(errors: { global: { longMessage?: string; message: string }[] | null }): string {
+type FieldError = { longMessage?: string; message: string } | null;
+
+// Checks field-specific errors first (e.g. Clerk's "this password has appeared in a data breach"
+// rejection comes back as a password FIELD error, not a global one -- missing this meant real
+// rejection reasons were silently replaced with a generic "Something went wrong" message).
+function extractErrorMessage(
+  errors: { global: { longMessage?: string; message: string }[] | null; fields: object },
+  fieldOrder: string[]
+): string {
+  const fields = errors.fields as Record<string, FieldError | undefined>;
+  for (const field of fieldOrder) {
+    const fieldError = fields[field];
+    if (fieldError) return fieldError.longMessage || fieldError.message;
+  }
   const first = errors.global?.[0];
   return first?.longMessage || first?.message || "Something went wrong. Please try again.";
 }
@@ -22,37 +35,52 @@ export default function SignupPage() {
   const [code, setCode] = useState("");
   const [error, setError] = useState("");
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  // Reacts to signUp.status becoming "complete" via an effect rather than reading it synchronously
+  // right after `await signUp.verifications.verifyEmailCode(...)` -- see login/page.tsx's
+  // identical, more detailed comment on its finalizedRef effect: confirmed live that a synchronous
+  // post-await read of this SDK's Signal-based resource returns a stale value even though the API
+  // call itself already completed successfully. finalizedRef stops this firing more than once.
+  const finalizedRef = useRef(false);
+  useEffect(() => {
+    if (signUp.status !== "complete" || finalizedRef.current) return;
+    finalizedRef.current = true;
+    signUp.finalize({
+      navigate: ({ decorateUrl }) => {
+        const url = decorateUrl("/dashboard");
+        if (url.startsWith("http")) {
+          window.location.href = url;
+        } else {
+          router.push(url);
+        }
+      },
+    });
+    // Deliberately depends only on signUp.status, not [signUp, router] -- see login/page.tsx's
+    // identical effect for why.
+  }, [signUp.status]);
+
+  const handleSubmit = async () => {
     setError("");
     const { error: signUpError } = await signUp.password({ emailAddress: email, password });
     if (signUpError) {
-      setError(globalErrorMessage(errors) || "Failed to create an account.");
+      setError(extractErrorMessage(errors, ["emailAddress", "password"]));
       return;
     }
     const { error: codeError } = await signUp.verifications.sendEmailCode();
     if (codeError) {
-      setError(globalErrorMessage(errors) || "We couldn't send a verification code. Please try again.");
+      setError(extractErrorMessage(errors, ["emailAddress"]));
       return;
     }
     setStep("verify");
   };
 
-  const handleVerify = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleVerify = async () => {
     setError("");
     const { error: verifyError } = await signUp.verifications.verifyEmailCode({ code });
     if (verifyError) {
-      setError(globalErrorMessage(errors) || "That code isn't right. Please check and try again.");
-      return;
+      setError(extractErrorMessage(errors, ["code"]));
     }
-    if (signUp.status === "complete") {
-      await signUp.finalize({
-        navigate: () => router.push("/dashboard"),
-      });
-    } else {
-      setError("We couldn't finish creating your account. Please try again.");
-    }
+    // No explicit success branch -- the useEffect above reacts once signUp.status becomes
+    // "complete" and React re-renders with the updated resource.
   };
 
   if (step === "verify") {
@@ -62,7 +90,7 @@ export default function SignupPage() {
         title="Check your email"
         subtitle={`We sent a verification code to ${email}. Enter it below to finish creating your account.`}
       >
-        <form onSubmit={handleVerify} className="flex flex-col gap-4">
+        <form action={handleVerify} className="flex flex-col gap-4">
           <div>
             <label htmlFor="code" className="block text-xs font-semibold uppercase tracking-wider text-ink-muted">
               Verification code
@@ -114,7 +142,7 @@ export default function SignupPage() {
         </>
       }
     >
-      <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+      <form action={handleSubmit} className="flex flex-col gap-4">
         <div>
           <label htmlFor="email" className="block text-xs font-semibold uppercase tracking-wider text-ink-muted">
             Email
@@ -149,6 +177,12 @@ export default function SignupPage() {
         </div>
 
         {error && <p className="text-xs font-medium text-danger">{error}</p>}
+
+        {/* Clerk's bot-protection CAPTCHA widget -- required placeholder for custom (headless)
+            sign-up flows. Without it, Clerk silently falls back to an invisible widget that
+            blocks suspected bots with no way for a real user to prove otherwise, rather than
+            rendering a real challenge -- see Clerk's bot-sign-up-protection docs. */}
+        <div id="clerk-captcha" />
 
         <button
           type="submit"
