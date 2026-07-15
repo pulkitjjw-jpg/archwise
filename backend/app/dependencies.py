@@ -16,16 +16,16 @@ async def get_current_user(
     db: AsyncSession = Depends(get_db),
 ) -> User:
     if not x_session_token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+        raise HTTPException(status_code=401, detail="You need to be logged in to do that. Please sign in and try again.")
     user_id = await get_user_id_from_session(x_session_token)
     if not user_id:
-        raise HTTPException(status_code=401, detail="Session expired or invalid")
+        raise HTTPException(status_code=401, detail="Your session has expired. Please sign in again.")
     user = await db.get(User, user_id)
     if not user:
         # The session outlived the user (e.g. deleted between login and this request) -- treat
         # exactly like any other invalid session rather than a distinct error, nothing useful to
         # tell the caller differently.
-        raise HTTPException(status_code=401, detail="Not authenticated")
+        raise HTTPException(status_code=401, detail="You need to be logged in to do that. Please sign in and try again.")
     # Stashed so app/rate_limit.py's key function can rate-limit by user instead of by
     # connection -- every request arrives from the same Next.js proxy IP otherwise.
     request.state.user_id = user.id
@@ -34,7 +34,7 @@ async def get_current_user(
 
 async def require_admin(user: User = Depends(get_current_user)) -> User:
     if not user.is_admin:
-        raise HTTPException(status_code=403, detail="Admin access required")
+        raise HTTPException(status_code=403, detail="You don't have permission to access this.")
     return user
 
 

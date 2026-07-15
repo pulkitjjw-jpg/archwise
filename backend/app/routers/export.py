@@ -28,7 +28,10 @@ async def export_architecture(
     provider: str = "aws", project: Project = Depends(get_owned_project), db: AsyncSession = Depends(get_db)
 ):
     if provider not in VALID_PROVIDERS:
-        raise HTTPException(status_code=400, detail="Invalid provider specified")
+        raise HTTPException(
+            status_code=400,
+            detail="That cloud provider isn't supported. Please choose AWS, Azure, GCP, Kubernetes, or Private Cloud.",
+        )
 
     # 1. Fetch the latest generated architecture
     record = (
@@ -102,7 +105,10 @@ async def export_executive_summary(
     one-page synthesis, so a fresh LLM call each download is an acceptable trade for not needing
     a new persisted column -- rate-limited above since that also makes it trivially repeatable."""
     if provider not in VALID_PROVIDERS:
-        raise HTTPException(status_code=400, detail="Invalid provider specified")
+        raise HTTPException(
+            status_code=400,
+            detail="That cloud provider isn't supported. Please choose AWS, Azure, GCP, Kubernetes, or Private Cloud.",
+        )
 
     record = (
         await db.execute(

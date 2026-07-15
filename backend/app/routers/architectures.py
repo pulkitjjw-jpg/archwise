@@ -226,7 +226,10 @@ async def get_flow_story(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     if provider not in VALID_FLOW_STORY_PROVIDERS:
-        raise HTTPException(status_code=400, detail="Invalid provider specified")
+        raise HTTPException(
+            status_code=400,
+            detail="That cloud provider isn't supported. Please choose AWS, Azure, GCP, Kubernetes, or Private Cloud.",
+        )
 
     record = (
         await db.execute(
@@ -234,7 +237,10 @@ async def get_flow_story(
         )
     ).scalar_one_or_none()
     if not record:
-        raise HTTPException(status_code=404, detail="Architecture version not found")
+        raise HTTPException(
+            status_code=404,
+            detail="We couldn't find that architecture design. It may have been deleted or the link is out of date.",
+        )
 
     story = await _get_or_generate_flow_story(db, record, project.id, provider)
     return {"story": story, "sources": record.flow_story_sources.get(provider, [])}
@@ -253,7 +259,10 @@ async def get_user_journey(
     here-first) flow story into discrete end-user-facing steps. Deliberately downstream of
     flow-story, never an independent regeneration of request flow."""
     if provider not in VALID_FLOW_STORY_PROVIDERS:
-        raise HTTPException(status_code=400, detail="Invalid provider specified")
+        raise HTTPException(
+            status_code=400,
+            detail="That cloud provider isn't supported. Please choose AWS, Azure, GCP, Kubernetes, or Private Cloud.",
+        )
 
     record = (
         await db.execute(
@@ -261,7 +270,10 @@ async def get_user_journey(
         )
     ).scalar_one_or_none()
     if not record:
-        raise HTTPException(status_code=404, detail="Architecture version not found")
+        raise HTTPException(
+            status_code=404,
+            detail="We couldn't find that architecture design. It may have been deleted or the link is out of date.",
+        )
 
     provider_components = _provider_components(record.hld.get("components", []), provider)
     connections = record.hld.get("connections", [])
@@ -302,7 +314,10 @@ async def get_migration_roadmap(
     brainstorm actually captured something) -- 400s otherwise rather than fabricating a legacy
     system to migrate from. Lazily generated and cached per provider, same pattern as flow-story."""
     if provider not in VALID_FLOW_STORY_PROVIDERS:
-        raise HTTPException(status_code=400, detail="Invalid provider specified")
+        raise HTTPException(
+            status_code=400,
+            detail="That cloud provider isn't supported. Please choose AWS, Azure, GCP, Kubernetes, or Private Cloud.",
+        )
 
     record = (
         await db.execute(
@@ -310,7 +325,10 @@ async def get_migration_roadmap(
         )
     ).scalar_one_or_none()
     if not record:
-        raise HTTPException(status_code=404, detail="Architecture version not found")
+        raise HTTPException(
+            status_code=404,
+            detail="We couldn't find that architecture design. It may have been deleted or the link is out of date.",
+        )
 
     if record.migration_roadmap.get(provider):
         return {"phases": record.migration_roadmap[provider]}
@@ -326,7 +344,10 @@ async def get_migration_roadmap(
     if not reqs or not reqs.existing_system:
         raise HTTPException(
             status_code=400,
-            detail="No existing system was captured for this project -- the Migration Roadmap only applies when starting from an existing system.",
+            detail=(
+                "The Migration Roadmap is only available for projects that started from an existing system. "
+                "This project was set up as a brand-new build, so there's nothing to migrate from."
+            ),
         )
 
     provider_components = _provider_components(record.hld.get("components", []), provider)
@@ -366,7 +387,10 @@ async def update_layout_override(
         )
     ).scalar_one_or_none()
     if not record:
-        raise HTTPException(status_code=404, detail="Architecture version not found")
+        raise HTTPException(
+            status_code=404,
+            detail="We couldn't find that architecture design. It may have been deleted or the link is out of date.",
+        )
 
     record.layout_overrides = {**record.layout_overrides, payload.componentId: {"x": payload.x, "y": payload.y}}
     await db.commit()
@@ -388,7 +412,10 @@ async def propose_architecture_changes(
     persisted here -- the frontend applies only the user-approved subset via the existing
     /architectures/manual endpoint, reusing its versioning/diff/validation exactly as-is."""
     if payload.provider not in VALID_PROPOSE_CHANGES_PROVIDERS:
-        raise HTTPException(status_code=400, detail="Invalid provider specified")
+        raise HTTPException(
+            status_code=400,
+            detail="That cloud provider isn't supported. Please choose AWS, Azure, GCP, Kubernetes, or Private Cloud.",
+        )
 
     record = (
         await db.execute(
@@ -396,7 +423,10 @@ async def propose_architecture_changes(
         )
     ).scalar_one_or_none()
     if not record:
-        raise HTTPException(status_code=404, detail="Architecture version not found")
+        raise HTTPException(
+            status_code=404,
+            detail="We couldn't find that architecture design. It may have been deleted or the link is out of date.",
+        )
 
     reqs = (
         await db.execute(
@@ -407,7 +437,9 @@ async def propose_architecture_changes(
         )
     ).scalar_one_or_none()
     if not reqs:
-        raise HTTPException(status_code=400, detail="Requirements must exist before proposing changes")
+        raise HTTPException(
+            status_code=400, detail="Please finish setting up your requirements before proposing changes."
+        )
 
     reqs_context = {"functional": reqs.functional, "nonFunctional": reqs.non_functional}
     industry_context = reqs.industry_context or DEFAULT_INDUSTRY_CONTEXT
@@ -452,7 +484,9 @@ async def get_whatif_suggestions(
         )
     ).scalar_one_or_none()
     if not reqs:
-        raise HTTPException(status_code=400, detail="Requirements must exist before exploring what-if scenarios")
+        raise HTTPException(
+            status_code=400, detail="Please finish setting up your requirements before trying What-If scenarios."
+        )
 
     suggestions = await generate_whatif_suggestions(
         reqs.functional,
@@ -491,7 +525,9 @@ async def get_component_suggestions(
         )
     ).scalar_one_or_none()
     if not reqs:
-        raise HTTPException(status_code=400, detail="Requirements must exist before suggesting components")
+        raise HTTPException(
+            status_code=400, detail="Please finish setting up your requirements before getting component suggestions."
+        )
 
     suggestions = await generate_component_suggestions(
         [c.model_dump() for c in payload.components],
@@ -566,7 +602,10 @@ async def refine_proposal(
     plus a conversational reply for the mini chat thread; nothing is persisted until the user
     accepts and the batch is applied via the existing manual-save endpoint."""
     if payload.provider not in VALID_PROPOSE_CHANGES_PROVIDERS:
-        raise HTTPException(status_code=400, detail="Invalid provider specified")
+        raise HTTPException(
+            status_code=400,
+            detail="That cloud provider isn't supported. Please choose AWS, Azure, GCP, Kubernetes, or Private Cloud.",
+        )
 
     record = (
         await db.execute(
@@ -574,7 +613,10 @@ async def refine_proposal(
         )
     ).scalar_one_or_none()
     if not record:
-        raise HTTPException(status_code=404, detail="Architecture version not found")
+        raise HTTPException(
+            status_code=404,
+            detail="We couldn't find that architecture design. It may have been deleted or the link is out of date.",
+        )
 
     reqs = (
         await db.execute(
@@ -585,7 +627,9 @@ async def refine_proposal(
         )
     ).scalar_one_or_none()
     if not reqs:
-        raise HTTPException(status_code=400, detail="Requirements must exist before refining a proposal")
+        raise HTTPException(
+            status_code=400, detail="Please finish setting up your requirements before refining this proposal."
+        )
 
     reqs_context = {"functional": reqs.functional, "nonFunctional": reqs.non_functional}
     industry_context = reqs.industry_context or DEFAULT_INDUSTRY_CONTEXT
@@ -604,7 +648,9 @@ async def refine_proposal(
         result["proposal"], payload.provider, existing_components, reqs_context, industry_context
     )
     if not enriched:
-        raise HTTPException(status_code=422, detail="Could not resolve the refined proposal to a valid component")
+        raise HTTPException(
+            status_code=422, detail="We couldn't apply that change. Please try rephrasing your request."
+        )
 
     return {"proposal": enriched, "assistantReply": result["assistantReply"]}
 
@@ -624,7 +670,10 @@ async def generate_architecture(
         )
     ).scalar_one_or_none()
     if not reqs:
-        raise HTTPException(status_code=400, detail="Requirements must be generated before architecture")
+        raise HTTPException(
+            status_code=400,
+            detail="Please complete your requirements first — we need those before we can generate your architecture.",
+        )
 
     reqs_context = {"functional": reqs.functional, "nonFunctional": reqs.non_functional}
     industry_context = reqs.industry_context or DEFAULT_INDUSTRY_CONTEXT
@@ -730,7 +779,8 @@ async def save_manual_architecture(
     ).scalar_one_or_none()
     if not reqs:
         raise HTTPException(
-            status_code=400, detail="Requirements must exist before saving manual architecture modifications"
+            status_code=400,
+            detail="Please finish setting up your requirements before saving changes to your architecture.",
         )
 
     reqs_context = {"functional": reqs.functional, "nonFunctional": reqs.non_functional}
@@ -776,7 +826,9 @@ async def save_manual_architecture(
     validation = validate_architecture_layout(compiled_components, connections, reqs_context, aws_costs)
 
     if not validation["isValid"]:
-        raise HTTPException(status_code=400, detail=f"Validation blocked save: {'; '.join(validation['errors'])}")
+        raise HTTPException(
+            status_code=400, detail=f"We couldn't save your changes: {'; '.join(validation['errors'])}"
+        )
 
     # 4b. Fetch previous version to compute diff and calculate next version
     latest_arch = await _latest_architecture(db, project.id)

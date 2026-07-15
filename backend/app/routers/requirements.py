@@ -144,7 +144,10 @@ async def get_conversation_summary(
 ) -> dict:
     latest = await _latest_requirement(db, project.id)
     if not latest:
-        raise HTTPException(status_code=400, detail="No requirements yet -- complete the discovery conversation first")
+        raise HTTPException(
+            status_code=400,
+            detail="We don't have your requirements yet. Please finish the brainstorm conversation first, then try again.",
+        )
 
     # Cached on the requirements row it describes -- regenerating only happens when a NEW
     # requirements version is created (a fresh row with conversation_summary NULL), never on
@@ -195,7 +198,9 @@ async def save_requirements(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     if not payload.functional or not payload.nonFunctional:
-        raise HTTPException(status_code=400, detail="functional and nonFunctional are required")
+        raise HTTPException(
+            status_code=400, detail="Please fill in your functional and non-functional requirements before saving."
+        )
 
     # Get current latest version to increment
     latest = await _latest_requirement(db, project.id)

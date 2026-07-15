@@ -97,7 +97,9 @@ async def create_project(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     if not payload.name or not payload.ideaText:
-        raise HTTPException(status_code=400, detail="name and ideaText are required")
+        raise HTTPException(
+            status_code=400, detail="Please give your project a name and describe your idea before continuing."
+        )
 
     project = Project(
         name=payload.name,

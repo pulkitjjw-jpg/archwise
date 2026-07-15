@@ -51,7 +51,8 @@ def validate_architecture_layout(
             is_connected = any(conn["from"] == c["id"] or conn["to"] == c["id"] for conn in connections)
             if not is_connected:
                 errors.append(
-                    f'"{c["name"]}" is orphaned. Every component must be connected to at least one other component.'
+                    f'"{c["name"]}" isn\'t connected to anything else on the canvas. '
+                    "Please connect it to at least one other component."
                 )
 
     # 2. Broken DB Dependency Check (Hard Error)
@@ -59,7 +60,8 @@ def validate_architecture_layout(
     has_database = any(c["type"] in ("db", "database", "storage") for c in components)
     if has_compute and not has_database:
         errors.append(
-            "Broken dependency: Compute components are present, but there is no Database or Object Storage component configured in the layout."
+            "Your design has one or more servers but nowhere to store data. "
+            "Please add a database or storage component so your app has somewhere to keep its information."
         )
 
     # 3. Circular Dependency Check (Hard Error)
@@ -68,7 +70,8 @@ def validate_architecture_layout(
         name_by_id = {c["id"]: c["name"] for c in components}
         path_names = [name_by_id.get(id_, id_) for id_ in cycle_path]
         errors.append(
-            f"Structural violation: circular dependency detected ({' → '.join(path_names)}). Connections must form a directed acyclic graph."
+            f"These components form a loop that depends on itself ({' → '.join(path_names)}). "
+            "Please rearrange the connections so information flows in one direction, without looping back."
         )
 
     # 4. Bypass Checks (Soft Warnings)

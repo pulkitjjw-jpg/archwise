@@ -41,7 +41,7 @@ async def create_conversation_turn(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     if not payload.role or not payload.message or not payload.stage:
-        raise HTTPException(status_code=400, detail="role, message, and stage are required")
+        raise HTTPException(status_code=400, detail="We couldn't send your message. Please try again.")
 
     # 1. Insert user message
     user_turn = Conversation(project_id=project.id, role=payload.role, message=payload.message, stage=payload.stage)
