@@ -50,7 +50,7 @@ export default function PrivacyPage() {
 
       <h2>Cookies</h2>
       <p>
-        We use one essential cookie to keep you signed in. See our{" "}
+        We use a small set of essential cookies to keep you signed in. See our{" "}
         <a href="/cookie-policy">Cookie Policy</a>{" "}
         for the full picture — it&apos;s short, because that&apos;s genuinely all we use today.
       </p>

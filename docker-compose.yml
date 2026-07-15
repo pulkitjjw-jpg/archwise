@@ -60,12 +60,18 @@ services:
   # this one explicitly with `docker compose up frontend` when you want to test the real
   # production build end-to-end.
   frontend:
-    build: .
+    build:
+      context: .
+      # Build-time only -- see the Dockerfile's own comment on why this can't just be a runtime
+      # `environment:` entry like the vars below.
+      args:
+        NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: "${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}"
     environment:
       # backend:8000 -- the service name IS the hostname on the internal docker network, no
       # published port needed for this hop (unlike the host-dev-server case above).
       BACKEND_URL: "http://backend:8000"
       INTERNAL_AUTH_SECRET: "${INTERNAL_AUTH_SECRET}"
+      CLERK_SECRET_KEY: "${CLERK_SECRET_KEY}"
       NODE_ENV: production
     depends_on:
       - backend

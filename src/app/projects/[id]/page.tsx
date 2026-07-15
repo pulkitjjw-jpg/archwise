@@ -1,4 +1,4 @@
-import { cookies } from "next/headers";
+import { auth } from "@clerk/nextjs/server";
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import ChatArea from "@/app/components/ChatArea";
@@ -21,20 +21,21 @@ type ConversationRecord = {
 
 // Server component -- runs on the Next.js server itself, so it reaches the backend directly
 // over the same private path the catch-all proxy uses (BACKEND_URL + X-Internal-Auth), rather
-// than looping back through its own proxy route over HTTP. Since this bypasses the proxy, it
-// has to do the proxy's cookie->header translation itself too (see src/app/api/[...path]/route.ts).
+// than looping back through its own proxy route over HTTP. Since this bypasses the proxy, it has
+// to do the proxy's Clerk-token->header translation itself too (see
+// src/app/api/[...path]/route.ts).
 async function backendFetch(path: string) {
   const backendUrl = process.env.BACKEND_URL;
   const internalAuthSecret = process.env.INTERNAL_AUTH_SECRET;
   if (!backendUrl || !internalAuthSecret) {
     throw new Error("Backend is not configured");
   }
-  const cookieStore = await cookies();
-  const sessionToken = cookieStore.get("session_token")?.value;
+  const { getToken } = await auth();
+  const sessionToken = await getToken();
   return fetch(`${backendUrl}${path}`, {
     headers: {
       "x-internal-auth": internalAuthSecret,
-      ...(sessionToken ? { "x-session-token": sessionToken } : {}),
+      ...(sessionToken ? { authorization: `Bearer ${sessionToken}` } : {}),
     },
     cache: "no-store",
   });

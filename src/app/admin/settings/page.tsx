@@ -2,9 +2,10 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import AdminGuard from "@/app/components/AdminGuard";
 import AdminNav from "@/app/components/AdminNav";
 
-export default function AdminSettingsPage() {
+function AdminSettingsPageInner() {
   const [appName, setAppName] = useState("");
   const [saved, setSaved] = useState("");
   const [loading, setLoading] = useState(true);
@@ -96,5 +97,13 @@ export default function AdminSettingsPage() {
         )}
       </div>
     </main>
+  );
+}
+
+export default function AdminSettingsPage() {
+  return (
+    <AdminGuard>
+      <AdminSettingsPageInner />
+    </AdminGuard>
   );
 }

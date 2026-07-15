@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import AdminGuard from "@/app/components/AdminGuard";
 import AdminNav from "@/app/components/AdminNav";
 
 // Workstream Z1 -- the app's first admin surface, deliberately its own top-level /admin route
@@ -121,7 +122,7 @@ function TimeseriesChart({ data }: { data: Timeseries | null }) {
   );
 }
 
-export default function AdminPage() {
+function AdminPageInner() {
   const [summary, setSummary] = useState<UsageSummary | null>(null);
   const [timeseries, setTimeseries] = useState<Timeseries | null>(null);
   const [granularity, setGranularity] = useState<"hour" | "day">("day");
@@ -397,5 +398,13 @@ export default function AdminPage() {
         )}
       </div>
     </main>
+  );
+}
+
+export default function AdminPage() {
+  return (
+    <AdminGuard>
+      <AdminPageInner />
+    </AdminGuard>
   );
 }

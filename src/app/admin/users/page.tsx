@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import AdminGuard from "@/app/components/AdminGuard";
 import AdminNav from "@/app/components/AdminNav";
 
 type AdminUser = {
@@ -16,7 +17,7 @@ function formatDate(value: string) {
   return new Date(value).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
 }
 
-export default function AdminUsersPage() {
+function AdminUsersPageInner() {
   const [users, setUsers] = useState<AdminUser[] | null>(null);
   const [error, setError] = useState("");
   const [pendingId, setPendingId] = useState<string | null>(null);
@@ -133,5 +134,13 @@ export default function AdminUsersPage() {
         )}
       </div>
     </main>
+  );
+}
+
+export default function AdminUsersPage() {
+  return (
+    <AdminGuard>
+      <AdminUsersPageInner />
+    </AdminGuard>
   );
 }

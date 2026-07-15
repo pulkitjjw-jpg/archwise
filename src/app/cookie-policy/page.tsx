@@ -13,17 +13,18 @@ export default function CookiePolicyPage() {
 
       <h2>What we use</h2>
       <p>
-        One cookie: <strong>session_token</strong>. It&apos;s what keeps you signed in between page
-        loads. It&apos;s <strong>essential</strong> — the Service can&apos;t recognize that
-        you&apos;re logged in without it. It&apos;s set as <strong>httpOnly</strong> (JavaScript on
-        the page can&apos;t read it) and is cleared when you log out.
+        A small set of cookies set by <strong>Clerk</strong>, the service that handles signing in,
+        signing up, and staying signed in for us. They&apos;re <strong>essential</strong> — the
+        Service can&apos;t recognize that you&apos;re logged in without them — and they exist only
+        to keep your session working, not to track you across other sites. They&apos;re cleared
+        when you log out.
       </p>
 
       <h2>What we don&apos;t use</h2>
       <p>
-        No advertising cookies, no third-party tracking or analytics cookies, and no cross-site
-        tracking of any kind. If that ever changes as Archwise grows, this page will be updated to
-        say so honestly and in advance, not silently.
+        No advertising cookies, no analytics cookies, and no cross-site tracking of any kind. If
+        that ever changes as Archwise grows, this page will be updated to say so honestly and in
+        advance, not silently.
       </p>
 
       <h2>Questions</h2>

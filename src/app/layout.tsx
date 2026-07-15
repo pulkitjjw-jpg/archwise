@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
-import { AuthProvider } from "@/app/contexts/AuthContext";
+import { ClerkProvider } from "@clerk/nextjs";
 import "./globals.css";
 
 const DEFAULT_APP_NAME = "Archwise";
@@ -45,10 +45,10 @@ export async function generateMetadata(): Promise<Metadata> {
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en">
-      <body className="bg-paper text-ink antialiased">
-        <AuthProvider>{children}</AuthProvider>
-      </body>
-    </html>
+    <ClerkProvider>
+      <html lang="en">
+        <body className="bg-paper text-ink antialiased">{children}</body>
+      </html>
+    </ClerkProvider>
   );
 }

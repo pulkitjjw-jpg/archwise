@@ -14,9 +14,10 @@ export default function SecurityPage() {
 
       <h2>Passwords and sessions</h2>
       <p>
-        Passwords are hashed with bcrypt — we never store or can see your actual password. Signing
-        in issues a random, high-entropy session token stored server-side, not a token that encodes
-        your identity in a way that could be forged or decoded.
+        Sign-in, sign-up, and password storage are handled entirely by Clerk, a dedicated
+        authentication provider — we never see or store your actual password ourselves. Every
+        request to our servers is verified using a signed session token, checked independently on
+        our end before anything about your account is accessed.
       </p>
 
       <h2>Your data stays yours</h2>

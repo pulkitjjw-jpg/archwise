@@ -1,3 +1,4 @@
+import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 
 // Thin gateway to the FastAPI backend. Next.js never implements business logic itself here --
@@ -48,12 +49,16 @@ async function proxy(req: NextRequest, { params }: { params: Promise<{ path: str
     forwardHeaders.set("x-real-ip", realIp);
   }
   // The backend has no concept of cookies (it's never called directly by a browser) -- it reads
-  // per-user identity from x-session-token instead. This is the one place that translates between
-  // the two: read the httpOnly cookie the browser actually sent, forward it as the header the
-  // backend's get_current_user dependency expects.
-  const sessionToken = req.cookies.get("session_token")?.value;
+  // per-user identity from a Bearer token instead. This is the one place that translates between
+  // the two: mint the current Clerk session's JWT server-side (auth().getToken() -- cheap, Clerk's
+  // own SDK caches it and only re-mints near expiry, not a network call on every proxied request)
+  // and forward it as the header the backend's get_current_user dependency verifies with
+  // clerk_backend_api.verify_token. Exactly Clerk's documented pattern for a frontend calling a
+  // separate backend service, not a custom reimplementation.
+  const { getToken } = await auth();
+  const sessionToken = await getToken();
   if (sessionToken) {
-    forwardHeaders.set("x-session-token", sessionToken);
+    forwardHeaders.set("authorization", `Bearer ${sessionToken}`);
   }
 
   let upstreamRes: Response;

@@ -1,11 +1,13 @@
+import { clerkMiddleware } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
 // Redirects unauthenticated page navigation to /login. This is a UX optimization, NOT the
-// security boundary -- it only checks whether a session_token cookie is PRESENT (the Edge runtime
-// has no cheap way to validate it against Redis). The real authorization happens per-request in
-// the backend's get_current_user dependency (see backend/app/dependencies.py), which is what
-// actually protects data even if this proxy were bypassed entirely.
+// security boundary -- it only checks Clerk's own session state via auth(), which clerkMiddleware
+// resolves from the request's Clerk cookie. The real authorization happens per-request in the
+// backend's get_current_user dependency (see backend/app/dependencies.py), which independently
+// verifies the Clerk JWT itself and is what actually protects data even if this proxy were
+// bypassed entirely.
 //
 // Deliberately does NOT gate /api/* -- API auth is enforced entirely by the backend, per route,
 // so there's exactly one place that knows which endpoints need auth instead of two that could
@@ -18,8 +20,6 @@ import type { NextRequest } from "next/server";
 const PUBLIC_PAGE_PREFIXES = [
   "/login",
   "/signup",
-  "/forgot-password",
-  "/reset-password",
   "/share",
   "/pricing",
   // Legal/trust pages -- must be readable by anyone, logged in or not (a visitor deciding
@@ -67,12 +67,21 @@ const PUBLIC_PAGE_PREFIXES = [
 // Gated to production only -- Turbopack dev mode and Fast Refresh have their own script/eval
 // needs that aren't worth chasing down for a header with no benefit against a threat model that
 // doesn't include the developer's own machine; local `npm run dev` behavior is unaffected.
+// Clerk additions (script-src/connect-src/img-src/worker-src/frame-src) per Clerk's own documented
+// CSP guidance -- 'unsafe-eval' and the Cloudflare challenge host are both required for Clerk's
+// bot-protection widget, img.clerk.com serves user avatars, worker-src blob: is Clerk's own
+// requirement. *.clerk.accounts.dev covers Clerk's default free-tier Frontend API domain; if this
+// project is ever moved to a custom Clerk domain (a paid-plan feature), this needs updating to
+// match it exactly -- verify against the browser console for CSP violations after any Clerk
+// domain change, same as this file's own iconify lesson below.
 const CSP_PRODUCTION =
   "default-src 'self'; " +
-  "script-src 'self' 'unsafe-inline'; " +
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.clerk.accounts.dev https://challenges.cloudflare.com; " +
   "style-src 'self' 'unsafe-inline'; " +
-  "img-src 'self' data: blob:; " +
+  "img-src 'self' data: blob: https://img.clerk.com; " +
   "font-src 'self' data:; " +
+  "worker-src 'self' blob:; " +
+  "frame-src 'self' https://challenges.cloudflare.com; " +
   // @iconify/react's <Icon> component -- used all over the diagram/component sidebar, per-
   // service icons, etc. -- fetches icon SVG data from these three domains (a documented 3-way
   // failover CDN, same vendor as the @iconify-json/* build dependency) at RUNTIME, not from a
@@ -80,24 +89,27 @@ const CSP_PRODUCTION =
   // is a network call inside the library's own code) and only surfaced by live-testing: every
   // icon in the app silently rendered blank under a bare 'self' connect-src. Confirmed these are
   // the only three; no other external host is contacted anywhere in the app.
-  "connect-src 'self' https://api.iconify.design https://api.unisvg.com https://api.simplesvg.com; " +
+  "connect-src 'self' https://api.iconify.design https://api.unisvg.com https://api.simplesvg.com https://*.clerk.accounts.dev; " +
   "frame-ancestors 'none'; " +
   "base-uri 'self'; " +
   "form-action 'self'; " +
   "object-src 'none'";
 
-export function proxy(req: NextRequest) {
+// Named export `proxy`, not `export default` -- this project's Next.js 16 convention (the file
+// is named proxy.ts, not middleware.ts) expects a named export, which clerkMiddleware()'s
+// returned handler is a drop-in match for regardless of how it's wired up.
+export const proxy = clerkMiddleware(async (auth, req: NextRequest) => {
   const { pathname } = req.nextUrl;
   const isApi = pathname.startsWith("/api/");
   const isPublicPage = PUBLIC_PAGE_PREFIXES.some((p) => pathname === p || pathname.startsWith(`${p}/`));
-  const hasSession = !!req.cookies.get("session_token");
+  const { isAuthenticated } = await auth();
 
   let response: NextResponse;
   if (pathname === "/") {
     // The public landing page -- but a logged-in user shouldn't land on a sales pitch for a
     // product they already use, so send them straight to their dashboard instead.
-    response = hasSession ? NextResponse.redirect(new URL("/dashboard", req.url)) : NextResponse.next();
-  } else if (!isApi && !isPublicPage && !hasSession) {
+    response = isAuthenticated ? NextResponse.redirect(new URL("/dashboard", req.url)) : NextResponse.next();
+  } else if (!isApi && !isPublicPage && !isAuthenticated) {
     const loginUrl = new URL("/login", req.url);
     loginUrl.searchParams.set("next", pathname);
     response = NextResponse.redirect(loginUrl);
@@ -113,7 +125,7 @@ export function proxy(req: NextRequest) {
   }
 
   return response;
-}
+});
 
 export const config = {
   matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],

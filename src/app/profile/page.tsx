@@ -1,47 +1,15 @@
 "use client";
 
-import { useState } from "react";
 import Link from "next/link";
-import { useAuth } from "@/app/contexts/AuthContext";
+import { useClerk, useUser } from "@clerk/nextjs";
 
-function formatDate(value: string) {
-  return new Date(value).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+function formatDate(value: Date) {
+  return value.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
 }
 
 export default function ProfilePage() {
-  const { user, loading } = useAuth();
-  const [currentPassword, setCurrentPassword] = useState("");
-  const [newPassword, setNewPassword] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
-  const [success, setSuccess] = useState(false);
-
-  const handleChangePassword = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (newPassword.length < 8) {
-      setError("New password must be at least 8 characters.");
-      return;
-    }
-    setSaving(true);
-    setError("");
-    setSuccess(false);
-    try {
-      const res = await fetch("/api/auth/change-password", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ currentPassword, newPassword }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to change password");
-      setSuccess(true);
-      setCurrentPassword("");
-      setNewPassword("");
-    } catch (err: any) {
-      setError(err.message || "Failed to change password.");
-    } finally {
-      setSaving(false);
-    }
-  };
+  const { user, isLoaded } = useUser();
+  const { openUserProfile } = useClerk();
 
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_top_left,var(--color-accent-soft),transparent_36%)] bg-paper px-6 py-8 text-ink sm:py-12">
@@ -59,7 +27,7 @@ export default function ProfilePage() {
           </span>
           <h1 className="mt-3 text-2xl font-black tracking-tight text-ink">Your account</h1>
 
-          {loading || !user ? (
+          {!isLoaded || !user ? (
             <div className="mt-6 flex justify-center">
               <div className="h-6 w-6 animate-spin rounded-full border-2 border-accent border-t-transparent" />
             </div>
@@ -68,61 +36,29 @@ export default function ProfilePage() {
               <dl className="mt-5 space-y-3 border-t border-line pt-5">
                 <div>
                   <dt className="text-xs font-semibold uppercase tracking-wider text-ink-faint">Email</dt>
-                  <dd className="mt-1 text-sm text-ink">{user.email}</dd>
+                  <dd className="mt-1 text-sm text-ink">{user.primaryEmailAddress?.emailAddress}</dd>
                 </div>
                 <div>
                   <dt className="text-xs font-semibold uppercase tracking-wider text-ink-faint">Member since</dt>
-                  <dd className="mt-1 text-sm text-ink">{formatDate(user.createdAt)}</dd>
+                  <dd className="mt-1 text-sm text-ink">{user.createdAt ? formatDate(user.createdAt) : "—"}</dd>
                 </div>
               </dl>
 
+              {/* Password, sessions, and any other security settings are managed entirely by
+                  Clerk now -- this app has no password of its own to change anymore. Opens
+                  Clerk's own account-management UI rather than reimplementing it. */}
               <div className="mt-7 border-t border-line pt-6">
-                <h2 className="text-sm font-bold uppercase tracking-wider text-ink-muted">Change password</h2>
-                <form onSubmit={handleChangePassword} className="mt-3 flex flex-col gap-3">
-                  <div>
-                    <label htmlFor="currentPassword" className="block text-xs font-semibold uppercase tracking-wider text-ink-muted">
-                      Current password
-                    </label>
-                    <input
-                      type="password"
-                      id="currentPassword"
-                      value={currentPassword}
-                      onChange={(e) => setCurrentPassword(e.target.value)}
-                      disabled={saving}
-                      autoComplete="current-password"
-                      className="mt-2 w-full rounded-2xl border border-line bg-white px-4 py-3 text-sm text-ink shadow-sm focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
-                      required
-                    />
-                  </div>
-                  <div>
-                    <label htmlFor="newPassword" className="block text-xs font-semibold uppercase tracking-wider text-ink-muted">
-                      New password
-                    </label>
-                    <input
-                      type="password"
-                      id="newPassword"
-                      value={newPassword}
-                      onChange={(e) => setNewPassword(e.target.value)}
-                      disabled={saving}
-                      autoComplete="new-password"
-                      minLength={8}
-                      className="mt-2 w-full rounded-2xl border border-line bg-white px-4 py-3 text-sm text-ink shadow-sm focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
-                      required
-                    />
-                    <p className="mt-1.5 text-[11px] text-ink-faint">At least 8 characters.</p>
-                  </div>
-
-                  {error && <p className="text-xs font-medium text-danger">{error}</p>}
-                  {success && !error && <p className="text-xs font-medium text-success">Password updated.</p>}
-
-                  <button
-                    type="submit"
-                    disabled={saving}
-                    className="mt-1 flex items-center justify-center rounded-2xl bg-accent px-5 py-3 text-sm font-semibold text-white shadow-md transition-all hover:bg-accent-ink active:scale-[0.98] disabled:opacity-50"
-                  >
-                    {saving ? "Saving..." : "Update Password"}
-                  </button>
-                </form>
+                <h2 className="text-sm font-bold uppercase tracking-wider text-ink-muted">Account & security</h2>
+                <p className="mt-2 text-xs leading-relaxed text-ink-faint">
+                  Change your password or manage sign-in security from your account settings.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => openUserProfile()}
+                  className="mt-4 flex items-center justify-center rounded-2xl bg-accent px-5 py-3 text-sm font-semibold text-white shadow-md transition-all hover:bg-accent-ink active:scale-[0.98]"
+                >
+                  Manage Account
+                </button>
               </div>
             </>
           )}
