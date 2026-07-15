@@ -1,231 +1,186 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
-import IntakeForm from "@/app/components/IntakeForm";
-import { useAuth } from "@/app/contexts/AuthContext";
+import Link from "next/link";
 
-type ProjectStatus =
-  | "just_started"
-  | "brainstorm_in_progress"
-  | "requirements_complete"
-  | "architecture_ready";
-
-type ProjectSummary = {
-  id: string;
-  name: string;
-  owner: string | null;
-  createdAt: string;
-  currentVersion: string;
-  lastUpdated: string;
-  conversationCount: number;
-  requirementCount: number;
-  architectureCount: number;
-  status: ProjectStatus;
-};
-
-const STATUS_META: Record<ProjectStatus, { label: string; classes: string }> = {
-  just_started: {
-    label: "Just Started",
-    classes: "bg-paper text-ink-muted border-line",
+const FEATURES = [
+  {
+    emoji: "🧠",
+    title: "AI Brainstorm Chat",
+    body: "Describe your idea in plain language. A guided conversation asks the right questions — scale, budget, team size, compliance — before any design work starts.",
   },
-  brainstorm_in_progress: {
-    label: "Brainstorm In Progress",
-    classes: "bg-accent-soft text-accent-ink border-accent/25",
+  {
+    emoji: "🌐",
+    title: "Multi-Cloud Architecture",
+    body: "One design, reasoned mappings across AWS, Azure, GCP, Kubernetes, and on-prem — every component choice explained, not just generated.",
   },
-  requirements_complete: {
-    label: "Requirements Complete",
-    classes: "bg-warning-soft text-warning border-warning/25",
+  {
+    emoji: "💰",
+    title: "Real Cost Estimates",
+    body: "Per-provider cost bands for every component, computed from your actual scale and requirements — not a generic price list.",
   },
-  architecture_ready: {
-    label: "Architecture Ready",
-    classes: "bg-success-soft text-success border-success/25",
+  {
+    emoji: "🛡️",
+    title: "Security Findings",
+    body: "A deterministic security and compliance audit runs on every design — encryption, access control, and industry-specific rules like PCI-DSS or HIPAA.",
   },
-};
+  {
+    emoji: "📦",
+    title: "Terraform & Kubernetes Export",
+    body: "Ready-to-run infrastructure code for your chosen provider — the actual deployable config, not a picture of it.",
+  },
+  {
+    emoji: "🔄",
+    title: "Living Architecture",
+    body: "Requirements change. Report an update in chat and the architecture evolves with full version history — nothing is ever silently overwritten.",
+  },
+];
 
-function StatusBadge({ status }: { status: ProjectStatus }) {
-  const meta = STATUS_META[status];
-  return (
-    <span
-      className={`inline-flex items-center rounded-full border px-3 py-1 text-[10px] font-bold uppercase tracking-wider ${meta.classes}`}
-    >
-      {meta.label}
-    </span>
-  );
-}
+const STEPS = [
+  { n: "1", title: "Describe your idea", body: "A few sentences about what you're building is enough to start." },
+  { n: "2", title: "Brainstorm the details", body: "A short guided conversation fills in scale, budget, and constraints." },
+  { n: "3", title: "Get your architecture", body: "A reasoned, multi-cloud design with costs, security findings, and IaC." },
+  { n: "4", title: "Iterate as things change", body: "Report a change in chat — the architecture updates, versioned, never lost." },
+];
 
-function formatDate(value: string) {
-  // Locale pinned explicitly -- an unspecified locale can resolve differently between the Node
-  // SSR pass and the browser, causing a hydration mismatch even with the same format options.
-  return new Date(value).toLocaleDateString("en-US", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
-}
-
-function ProjectCard({ project, onOpen }: { project: ProjectSummary; onOpen: (id: string) => void }) {
-  return (
-    <button
-      type="button"
-      onClick={() => onOpen(project.id)}
-      className="group flex flex-col gap-4 rounded-[2rem] border border-line bg-white/85 p-6 text-left shadow-sm backdrop-blur transition hover:-translate-y-0.5 hover:shadow-xl hover:shadow-ink/80"
-    >
-      <div className="flex items-start justify-between gap-3">
-        <h3 className="text-lg font-bold tracking-tight text-ink">{project.name}</h3>
-        <span className="shrink-0 rounded-full bg-ink px-2.5 py-1 font-mono text-[10px] font-semibold text-white">
-          v{project.currentVersion}
-        </span>
-      </div>
-
-      <StatusBadge status={project.status} />
-
-      <dl className="mt-auto grid grid-cols-2 gap-3 border-t border-line pt-4 text-xs">
-        <div>
-          <dt className="font-semibold uppercase tracking-wider text-ink-faint">Created</dt>
-          <dd className="mt-1 font-mono text-ink-muted">{formatDate(project.createdAt)}</dd>
-        </div>
-        <div>
-          <dt className="font-semibold uppercase tracking-wider text-ink-faint">Last Updated</dt>
-          <dd className="mt-1 font-mono text-ink-muted">{formatDate(project.lastUpdated)}</dd>
-        </div>
-      </dl>
-
-      <div className="flex items-center justify-end text-xs font-semibold text-accent-ink opacity-0 transition group-hover:opacity-100">
-        Open workspace ➜
-      </div>
-    </button>
-  );
-}
-
-export default function HomePage() {
-  const router = useRouter();
-  const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
-  const [error, setError] = useState("");
-  const [showIntake, setShowIntake] = useState(false);
-
-  const loadProjects = async () => {
-    try {
-      setError("");
-      const res = await fetch("/api/projects");
-      if (!res.ok) throw new Error("Failed to load projects");
-      const data = await res.json();
-      setProjects(data.projects || []);
-    } catch (err: any) {
-      setError(err.message || "Failed to load projects.");
-      setProjects([]);
-    }
-  };
+export default function LandingPage() {
+  const [appName, setAppName] = useState("Archwise");
 
   useEffect(() => {
-    loadProjects();
+    fetch("/api/settings")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => data?.appName && setAppName(data.appName))
+      .catch(() => {});
   }, []);
 
-  const openProject = (id: string) => router.push(`/projects/${id}`);
-
-  const { user, logout } = useAuth();
-  const handleLogout = async () => {
-    await logout();
-    router.push("/login");
-  };
-
-  const loading = projects === null;
-  const isEmpty = !loading && projects.length === 0;
-
   return (
-    <main className="min-h-screen bg-[radial-gradient(circle_at_top_left,var(--color-accent-soft),transparent_36%)] bg-paper px-6 py-8 text-ink sm:py-12">
-      <div className="mx-auto max-w-6xl">
-        {/* Header */}
-        <div className="overflow-hidden rounded-[2.5rem] border border-white/70 bg-ink shadow-2xl shadow-ink/40">
-          <div className="flex flex-col gap-4 p-8 sm:flex-row sm:items-center sm:justify-between sm:p-10">
-            <div>
-              <span className="rounded-full bg-white/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-accent-on-dark">
-                Workspace Dashboard
-              </span>
-              <h1 className="mt-4 text-3xl font-black tracking-tight text-white sm:text-4xl">
-                AI Cloud Architecture Generator
-              </h1>
-              <p className="mt-2 max-w-2xl text-sm leading-6 text-ink-faint">
-                Describe a product idea, brainstorm requirements, and generate a genuinely-reasoned
-                multi-cloud architecture — with cost estimates, LLD detail, and Terraform export.
-              </p>
-            </div>
-            <div className="flex shrink-0 items-center gap-3">
-              {!isEmpty && (
-                <button
-                  onClick={() => setShowIntake((v) => !v)}
-                  className="flex items-center justify-center rounded-2xl bg-accent px-5 py-3 text-sm font-semibold text-white shadow-md transition-all hover:bg-accent-ink active:scale-[0.98]"
-                >
-                  {showIntake ? "Cancel" : "+ New Project"}
-                </button>
-              )}
-              {user && (
-                <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-2">
-                  <span className="text-xs font-semibold text-ink-faint">{user.email}</span>
-                  <button
-                    onClick={handleLogout}
-                    className="text-xs font-bold text-accent-on-dark transition hover:underline"
-                  >
-                    Log out
-                  </button>
-                </div>
-              )}
-            </div>
+    <main className="min-h-screen bg-[radial-gradient(circle_at_top_left,var(--color-accent-soft),transparent_36%)] bg-paper text-ink">
+      <div className="mx-auto max-w-6xl px-6 py-8 sm:py-10">
+        {/* Nav */}
+        <nav className="flex items-center justify-between">
+          <span className="text-lg font-black tracking-tight text-ink">{appName}</span>
+          <div className="flex items-center gap-3">
+            <Link
+              href="/login"
+              className="rounded-2xl px-4 py-2 text-sm font-semibold text-ink-muted transition hover:text-ink"
+            >
+              Log In
+            </Link>
+            <Link
+              href="/signup"
+              className="rounded-2xl bg-accent px-5 py-2.5 text-sm font-semibold text-white shadow-md transition-all hover:bg-accent-ink active:scale-[0.98]"
+            >
+              Get Started Free
+            </Link>
+          </div>
+        </nav>
+
+        {/* Hero */}
+        <div className="mt-16 sm:mt-24 sm:text-center">
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-accent/25 bg-accent-soft px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-accent-ink">
+            🧭 AI-Powered Architecture
+          </span>
+          <h1 className="mx-auto mt-5 max-w-3xl text-4xl font-black tracking-tight text-ink sm:text-5xl">
+            Describe your idea. Get a real cloud architecture.
+          </h1>
+          <p className="mx-auto mt-5 max-w-xl text-base leading-7 text-ink-muted sm:text-lg">
+            {appName} turns a plain-language product idea into a genuinely-reasoned multi-cloud
+            architecture — with cost estimates, security findings, and ready-to-run Terraform, in
+            minutes, not weeks.
+          </p>
+          <div className="mt-8 flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
+            <Link
+              href="/signup"
+              className="w-full rounded-2xl bg-accent px-7 py-3.5 text-center text-sm font-semibold text-white shadow-md transition-all hover:bg-accent-ink active:scale-[0.98] sm:w-auto"
+            >
+              Get Started Free
+            </Link>
+            <a
+              href="#pricing"
+              className="w-full rounded-2xl border border-line bg-white/70 px-7 py-3.5 text-center text-sm font-semibold text-ink transition hover:border-line-strong sm:w-auto"
+            >
+              See pricing
+            </a>
           </div>
         </div>
 
-        {error && (
-          <div className="mt-6 rounded-2xl border border-danger/25 bg-danger-soft p-4 text-sm text-danger shadow-sm">
-            {error}
+        {/* Feature grid */}
+        <div className="mt-20 sm:mt-28">
+          <h2 className="text-center text-2xl font-black tracking-tight text-ink sm:text-3xl">
+            What it actually does
+          </h2>
+          <div className="mt-8 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+            {FEATURES.map((f) => (
+              <div
+                key={f.title}
+                className="rounded-[2rem] border border-white/70 bg-white/80 p-6 shadow-xl backdrop-blur-md"
+              >
+                <span className="text-3xl">{f.emoji}</span>
+                <h3 className="mt-3 text-lg font-bold tracking-tight text-ink">{f.title}</h3>
+                <p className="mt-2 text-sm leading-relaxed text-ink-muted">{f.body}</p>
+              </div>
+            ))}
           </div>
-        )}
+        </div>
 
-        {/* Loading */}
-        {loading && (
-          <div className="mt-16 flex flex-col items-center justify-center text-ink-muted">
-            <div className="h-8 w-8 animate-spin rounded-full border-4 border-accent border-t-transparent" />
-            <span className="mt-4 text-sm font-semibold">Loading projects...</span>
+        {/* How it works */}
+        <div className="mt-20 sm:mt-28">
+          <h2 className="text-center text-2xl font-black tracking-tight text-ink sm:text-3xl">How it works</h2>
+          <div className="mt-8 grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
+            {STEPS.map((s) => (
+              <div key={s.n} className="rounded-2xl border border-line bg-white/70 p-5">
+                <span className="flex h-7 w-7 items-center justify-center rounded-full bg-ink text-xs font-bold text-white">
+                  {s.n}
+                </span>
+                <h3 className="mt-3 text-sm font-bold tracking-tight text-ink">{s.title}</h3>
+                <p className="mt-1.5 text-xs leading-relaxed text-ink-muted">{s.body}</p>
+              </div>
+            ))}
           </div>
-        )}
+        </div>
 
-        {/* Empty state */}
-        {isEmpty && (
-          <div className="mt-8 grid gap-8 lg:grid-cols-[1fr_1.1fr] lg:items-center">
-            <div className="rounded-[2rem] border-2 border-dashed border-line bg-white/60 p-10 text-center lg:text-left">
-              <span className="text-4xl">🧭</span>
-              <h2 className="mt-4 text-2xl font-black tracking-tight text-ink">
-                No projects yet
-              </h2>
-              <p className="mt-3 text-sm leading-6 text-ink-muted">
-                Create your first project to start the discovery brainstorm. Once requirements are
-                gathered, you&apos;ll get a rule-engine-driven architecture with AWS, Azure, and GCP
-                mappings, cost bands, and a full reasoning trace for every decision.
+        {/* Pricing teaser */}
+        <div id="pricing" className="mt-20 scroll-mt-8 sm:mt-28">
+          <h2 className="text-center text-2xl font-black tracking-tight text-ink sm:text-3xl">
+            Simple, honest pricing
+          </h2>
+          <p className="mx-auto mt-3 max-w-md text-center text-sm text-ink-muted">
+            Try the full product once, free. Upgrade when you&apos;re ready to build for real.
+          </p>
+          <div className="mx-auto mt-8 grid max-w-2xl gap-5 sm:grid-cols-2">
+            <div className="rounded-[2rem] border border-line bg-white/80 p-6 shadow-sm">
+              <h3 className="text-sm font-bold uppercase tracking-wider text-ink-muted">Free</h3>
+              <p className="mt-2 text-3xl font-black tracking-tight text-ink">$0</p>
+              <p className="mt-3 text-xs leading-relaxed text-ink-muted">
+                Enough to fully experience the product: a few brainstorm sessions, one architecture
+                generation, one enhancement.
               </p>
             </div>
-            <IntakeForm />
-          </div>
-        )}
-
-        {/* New project panel (toggle, only when projects already exist) */}
-        {!loading && !isEmpty && showIntake && (
-          <div className="mt-8 max-w-xl">
-            <IntakeForm />
-          </div>
-        )}
-
-        {/* Project grid */}
-        {!loading && !isEmpty && (
-          <div className="mt-8">
-            <h2 className="text-sm font-bold uppercase tracking-wider text-ink-muted">
-              {projects.length} {projects.length === 1 ? "Project" : "Projects"}
-            </h2>
-            <div className="mt-4 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-              {projects.map((project) => (
-                <ProjectCard key={project.id} project={project} onOpen={openProject} />
-              ))}
+            <div className="rounded-[2rem] border-2 border-accent bg-accent-soft/60 p-6 shadow-md">
+              <h3 className="text-sm font-bold uppercase tracking-wider text-accent-ink">Paid</h3>
+              <p className="mt-2 text-3xl font-black tracking-tight text-ink">
+                $10<span className="text-sm font-semibold text-ink-muted">/mo</span>
+              </p>
+              <p className="mt-3 text-xs leading-relaxed text-ink-muted">
+                Everything, unlimited — brainstorming, architectures, enhancements, exports.
+              </p>
             </div>
           </div>
-        )}
+          <div className="mt-6 text-center">
+            <Link href="/pricing" className="text-sm font-semibold text-accent-ink hover:underline">
+              See full pricing breakdown →
+            </Link>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <footer className="mt-24 flex flex-col items-center gap-3 border-t border-line pt-8 pb-4 text-xs text-ink-faint sm:flex-row sm:justify-between">
+          <span className="font-semibold">{appName}</span>
+          <div className="flex items-center gap-4">
+            <Link href="/login" className="hover:text-ink-muted">Log In</Link>
+            <Link href="/signup" className="hover:text-ink-muted">Sign Up</Link>
+          </div>
+        </footer>
       </div>
     </main>
   );

@@ -166,3 +166,16 @@ class ForgotPasswordRequest(BaseModel):
 class ResetPasswordRequest(BaseModel):
     token: str
     newPassword: str = Field(min_length=8)
+
+
+class ChangePasswordRequest(BaseModel):
+    currentPassword: str
+    newPassword: str = Field(min_length=8)
+
+
+class UpdateAppSettingsRequest(BaseModel):
+    appName: str = Field(min_length=1, max_length=80)
+
+
+class UpdateUserAdminRequest(BaseModel):
+    isAdmin: bool

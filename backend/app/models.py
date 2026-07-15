@@ -372,3 +372,20 @@ class LlmUsageLog(Base):
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
     )
+
+
+class AppSetting(Base):
+    """Deliberately a single-row table, not a key/value store -- the only setting that exists
+    right now is the app's display name, and it doesn't need a generic schema until a second
+    setting actually shows up. Public read (GET /settings, no auth) since the landing page and
+    <title> need it before anyone has logged in; admin-only write (PUT /admin/settings)."""
+
+    __tablename__ = "app_settings"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    app_name: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'Archwise'"))
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("clock_timestamp()")
+    )

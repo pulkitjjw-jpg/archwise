@@ -12,6 +12,9 @@ from app.config import settings
 from app.logging_config import configure_logging, request_id_var
 from app.rate_limit import limiter
 from app.routers import admin, architectures, auth, conversations, export, health, projects, requirements, share
+# Aliased -- `settings` at module scope is already app.config's Settings singleton (line above);
+# this is the unrelated /settings (app-name) router, not to be confused with it.
+from app.routers import settings as settings_router
 
 # Root logger defaults to WARNING with no handler configured, which would silently drop the
 # INFO-level "served by <model>" logs app/services/llm.py emits on every successful fallback-chain
@@ -117,6 +120,7 @@ async def request_context(request: Request, call_next):
 
 
 app.include_router(health.router, prefix="/api")
+app.include_router(settings_router.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
 app.include_router(projects.router, prefix="/api")
 app.include_router(conversations.router, prefix="/api")

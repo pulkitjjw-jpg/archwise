@@ -21,7 +21,7 @@ function LoginForm() {
     setError("");
     try {
       await login(email, password);
-      router.push(searchParams.get("next") || "/");
+      router.push(searchParams.get("next") || "/dashboard");
     } catch (err: any) {
       setError(err.message || "Failed to log in.");
       setLoading(false);

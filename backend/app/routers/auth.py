@@ -9,7 +9,7 @@ from app.db import get_db
 from app.dependencies import get_current_user
 from app.models import User
 from app.rate_limit import limiter
-from app.schemas import ForgotPasswordRequest, LoginRequest, RegisterRequest, ResetPasswordRequest
+from app.schemas import ChangePasswordRequest, ForgotPasswordRequest, LoginRequest, RegisterRequest, ResetPasswordRequest
 from app.security import (
     consume_reset_token,
     create_reset_token,
@@ -95,5 +95,19 @@ async def reset_password(payload: ResetPasswordRequest, db: AsyncSession = Depen
         raise HTTPException(status_code=400, detail="This reset link is invalid or has expired")
 
     user.password_hash = hash_password(payload.newPassword)
+    await db.commit()
+    return {"ok": True}
+
+
+@router.post("/auth/change-password")
+async def change_password(
+    payload: ChangePasswordRequest, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+) -> dict:
+    """The self-service counterpart to reset-password -- requires knowing the CURRENT password
+    (proves you're the account holder, not just someone with an active session on a shared/left-
+    open browser) rather than a mailed reset token."""
+    if not verify_password(payload.currentPassword, current_user.password_hash):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    current_user.password_hash = hash_password(payload.newPassword)
     await db.commit()
     return {"ok": True}

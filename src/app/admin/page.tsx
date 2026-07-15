@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import AdminNav from "@/app/components/AdminNav";
 
 // Workstream Z1 -- the app's first admin surface, deliberately its own top-level /admin route
 // (not mixed into user-facing pages) so gating this behind an admin-only check once the app has
@@ -176,14 +177,15 @@ export default function AdminPage() {
   return (
     <main className="min-h-screen bg-paper px-6 py-10">
       <div className="mx-auto max-w-6xl space-y-8">
-        <header className="flex items-center justify-between">
+        <header className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <Link href="/" className="text-xs font-semibold text-ink-faint hover:text-ink">
+            <Link href="/dashboard" className="text-xs font-semibold text-ink-faint hover:text-ink">
               &larr; Back to projects
             </Link>
             <h1 className="mt-1 text-2xl font-bold text-ink">Admin</h1>
             <p className="text-sm text-ink-muted">LLM usage across the model fallback chain</p>
           </div>
+          <AdminNav />
         </header>
 
         {error && (

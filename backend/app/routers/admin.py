@@ -1,6 +1,7 @@
 import logging
+import uuid
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -8,6 +9,8 @@ from app.config import settings
 from app.db import get_db
 from app.dependencies import require_admin
 from app.models import User
+from app.routers.settings import _get_or_create_settings
+from app.schemas import UpdateAppSettingsRequest, UpdateUserAdminRequest
 
 logger = logging.getLogger("app.routers.admin")
 
@@ -267,3 +270,68 @@ async def get_usage_calls(
         for row in rows
     ]
     return {"calls": calls, "total": total, "limit": limit, "offset": offset}
+
+
+@router.put("/admin/settings")
+async def update_settings(
+    payload: UpdateAppSettingsRequest, db: AsyncSession = Depends(get_db), _admin: User = Depends(require_admin)
+) -> dict:
+    setting = await _get_or_create_settings(db)
+    setting.app_name = payload.appName
+    await db.commit()
+    return {"appName": setting.app_name}
+
+
+@router.get("/admin/users")
+async def list_users(db: AsyncSession = Depends(get_db), _admin: User = Depends(require_admin)) -> dict:
+    """Project count via a LEFT JOIN + GROUP BY (not a per-user N+1 query) -- same aggregation
+    shape as projects.py's list_projects, just keyed by user instead of by project."""
+    rows = (
+        await db.execute(
+            text(
+                """
+                SELECT
+                    u.id,
+                    u.email,
+                    u.is_admin,
+                    u.created_at,
+                    COUNT(p.id) AS project_count
+                FROM users u
+                LEFT JOIN projects p ON p.user_id = u.id
+                GROUP BY u.id, u.email, u.is_admin, u.created_at
+                ORDER BY u.created_at DESC
+                """
+            )
+        )
+    ).mappings().all()
+    return {
+        "users": [
+            {
+                "id": str(row["id"]),
+                "email": row["email"],
+                "isAdmin": row["is_admin"],
+                "createdAt": row["created_at"],
+                "projectCount": int(row["project_count"]),
+            }
+            for row in rows
+        ]
+    }
+
+
+@router.patch("/admin/users/{user_id}")
+async def update_user_admin_status(
+    user_id: uuid.UUID,
+    payload: UpdateUserAdminRequest,
+    db: AsyncSession = Depends(get_db),
+    admin_user: User = Depends(require_admin),
+) -> dict:
+    if user_id == admin_user.id and not payload.isAdmin:
+        # A lone admin demoting themselves would lock the whole admin panel behind a manual
+        # DB UPDATE again -- the exact one-off step this endpoint exists to avoid repeating.
+        raise HTTPException(status_code=400, detail="You cannot remove your own admin access")
+    target = await db.get(User, user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    target.is_admin = payload.isAdmin
+    await db.commit()
+    return {"id": str(target.id), "email": target.email, "isAdmin": target.is_admin}

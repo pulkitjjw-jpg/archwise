@@ -10,7 +10,12 @@ import type { NextRequest } from "next/server";
 // Deliberately does NOT gate /api/* -- API auth is enforced entirely by the backend, per route,
 // so there's exactly one place that knows which endpoints need auth instead of two that could
 // drift out of sync.
-const PUBLIC_PAGE_PREFIXES = ["/login", "/signup", "/forgot-password", "/reset-password", "/share"];
+//
+// "/" is handled separately below, NOT added here -- every path starts with "/", so adding it to
+// this prefix-matching array would make everything public. It also needs different treatment
+// than a plain public page: a logged-in user hitting "/" should be redirected to /dashboard
+// (skip the marketing page), not just be let through.
+const PUBLIC_PAGE_PREFIXES = ["/login", "/signup", "/forgot-password", "/reset-password", "/share", "/pricing"];
 
 // Surveyed the whole app before writing this: no external fonts (system stack, no next/font
 // Google Fonts import), no external scripts, no dangerouslySetInnerHTML anywhere, react-markdown
@@ -68,9 +73,14 @@ export function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
   const isApi = pathname.startsWith("/api/");
   const isPublicPage = PUBLIC_PAGE_PREFIXES.some((p) => pathname === p || pathname.startsWith(`${p}/`));
+  const hasSession = !!req.cookies.get("session_token");
 
   let response: NextResponse;
-  if (!isApi && !isPublicPage && !req.cookies.get("session_token")) {
+  if (pathname === "/") {
+    // The public landing page -- but a logged-in user shouldn't land on a sales pitch for a
+    // product they already use, so send them straight to their dashboard instead.
+    response = hasSession ? NextResponse.redirect(new URL("/dashboard", req.url)) : NextResponse.next();
+  } else if (!isApi && !isPublicPage && !hasSession) {
     const loginUrl = new URL("/login", req.url);
     loginUrl.searchParams.set("next", pathname);
     response = NextResponse.redirect(loginUrl);
