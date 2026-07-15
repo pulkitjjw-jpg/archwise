@@ -29,8 +29,8 @@ export default function AcceptableUsePage() {
       <p>
         We may suspend or terminate access for violations of this policy. For anything ambiguous,
         we&apos;d rather talk it through than jump straight to enforcement — reach out at{" "}
-        <a href={`mailto:${SUPPORT_EMAIL}`}>{SUPPORT_EMAIL}</a> if you&apos;re not sure whether
-        something&apos;s okay.
+        <a href={`mailto:${SUPPORT_EMAIL}`}>{SUPPORT_EMAIL}</a>{" "}
+        if you&apos;re not sure whether something&apos;s okay.
       </p>
     </LegalPageShell>
   );

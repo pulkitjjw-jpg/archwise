@@ -42,15 +42,16 @@ export default function SecurityPage() {
       <p>
         The Service runs on established third-party cloud infrastructure providers rather than
         self-hosted hardware, and traffic is encrypted in transit. See our{" "}
-        <a href="/privacy">Privacy Policy</a> for more on how and where data is hosted.
+        <a href="/privacy">Privacy Policy</a>{" "}
+        for more on how and where data is hosted.
       </p>
 
       <h2>Found a security issue?</h2>
       <p>
         We take reports seriously and will respond promptly. Please email{" "}
-        <a href={`mailto:${SUPPORT_EMAIL}`}>{SUPPORT_EMAIL}</a> with details rather than disclosing
-        it publicly first — we&apos;re a small, independently-run team and a direct heads-up gives
-        us the best chance to fix it quickly.
+        <a href={`mailto:${SUPPORT_EMAIL}`}>{SUPPORT_EMAIL}</a>{" "}
+        with details rather than disclosing it publicly first — we&apos;re a small, independently-run
+        team and a direct heads-up gives us the best chance to fix it quickly.
       </p>
     </LegalPageShell>
   );

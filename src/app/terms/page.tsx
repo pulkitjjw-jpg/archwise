@@ -24,16 +24,17 @@ export default function TermsPage() {
       <p>
         You&apos;re responsible for keeping your login credentials secure and for all activity
         under your account. Let us know at{" "}
-        <a href={`mailto:${SUPPORT_EMAIL}`}>{SUPPORT_EMAIL}</a> if you believe your account has been
-        compromised.
+        <a href={`mailto:${SUPPORT_EMAIL}`}>{SUPPORT_EMAIL}</a>{" "}
+        if you believe your account has been compromised.
       </p>
 
       <h2>Free and paid access</h2>
       <p>
         Archwise offers a free tier with limited usage so you can fully try the product, and a paid
         subscription with unlimited usage. Current limits and pricing are described on our{" "}
-        <a href="/pricing">Pricing</a> page. Payment terms, billing cycles, and cancellation are
-        covered in our <a href="/refund-policy">Refund Policy</a>.
+        <a href="/pricing">Pricing</a>{" "}
+        page. Payment terms, billing cycles, and cancellation are covered in our{" "}
+        <a href="/refund-policy">Refund Policy</a>.
       </p>
 
       <h2>AI-generated content — please review before relying on it</h2>
@@ -50,7 +51,8 @@ export default function TermsPage() {
       <p>
         Using the Service to break the law, abuse or circumvent usage limits, attack or disrupt the
         Service, or generate content for harmful purposes is not allowed. See our full{" "}
-        <a href="/acceptable-use">Acceptable Use Policy</a> for details.
+        <a href="/acceptable-use">Acceptable Use Policy</a>{" "}
+        for details.
       </p>
 
       <h2>Your content</h2>
@@ -81,9 +83,10 @@ export default function TermsPage() {
         Because Archwise is currently operated by an individual without a registered legal entity,
         these Terms don&apos;t designate the courts of a specific country as having sole
         jurisdiction. If a dispute arises, we ask that you reach out to{" "}
-        <a href={`mailto:${SUPPORT_EMAIL}`}>{SUPPORT_EMAIL}</a> first so we can try to resolve it
-        directly and amicably. This section will be updated with formal jurisdiction and dispute-
-        resolution terms once Archwise operates under a registered business entity.
+        <a href={`mailto:${SUPPORT_EMAIL}`}>{SUPPORT_EMAIL}</a>{" "}
+        first so we can try to resolve it directly and amicably. This section will be updated with
+        formal jurisdiction and dispute-resolution terms once Archwise operates under a registered
+        business entity.
       </p>
 
       <h2>Contact</h2>

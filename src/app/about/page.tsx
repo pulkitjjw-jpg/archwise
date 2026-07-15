@@ -28,8 +28,8 @@ export default function AboutPage() {
       <p>
         Archwise is currently built and operated by one person, not a company — an early-stage,
         independently-run product. That&apos;s reflected honestly across the site (our{" "}
-        <a href="/terms">Terms</a> and <a href="/privacy">Privacy Policy</a> say so directly) rather
-        than dressed up to look bigger than it is.
+        <a href="/terms">Terms</a> and <a href="/privacy">Privacy Policy</a>{" "}
+        say so directly) rather than dressed up to look bigger than it is.
       </p>
 
       <h2>Get in touch</h2>

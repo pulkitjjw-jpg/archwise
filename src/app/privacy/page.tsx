@@ -34,8 +34,8 @@ export default function PrivacyPage() {
       <p>
         To operate the Service: authenticating you, generating your architectures, saving your
         project history and versions, and enforcing the usage limits described on our{" "}
-        <a href="/pricing">Pricing</a> page. We don&apos;t sell your data, and we don&apos;t use it
-        for advertising.
+        <a href="/pricing">Pricing</a>{" "}
+        page. We don&apos;t sell your data, and we don&apos;t use it for advertising.
       </p>
 
       <h2>Third-party services we rely on</h2>
@@ -51,8 +51,8 @@ export default function PrivacyPage() {
       <h2>Cookies</h2>
       <p>
         We use one essential cookie to keep you signed in. See our{" "}
-        <a href="/cookie-policy">Cookie Policy</a> for the full picture — it&apos;s short, because
-        that&apos;s genuinely all we use today.
+        <a href="/cookie-policy">Cookie Policy</a>{" "}
+        for the full picture — it&apos;s short, because that&apos;s genuinely all we use today.
       </p>
 
       <h2>Data retention</h2>

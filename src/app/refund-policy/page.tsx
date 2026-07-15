@@ -31,15 +31,17 @@ export default function RefundPolicyPage() {
       <p>
         If you were charged due to a billing error or a Service outage that genuinely prevented you
         from using Archwise, email us at{" "}
-        <a href={`mailto:${SUPPORT_EMAIL}`}>{SUPPORT_EMAIL}</a> and we&apos;ll look into it and make
-        it right on a case-by-case basis. This policy describes our standard terms, not a promise
-        that we won&apos;t ever help — just that refunds aren&apos;t automatic.
+        <a href={`mailto:${SUPPORT_EMAIL}`}>{SUPPORT_EMAIL}</a>{" "}
+        and we&apos;ll look into it and make it right on a case-by-case basis. This policy describes
+        our standard terms, not a promise that we won&apos;t ever help — just that refunds aren&apos;t
+        automatic.
       </p>
 
       <h2>Free tier</h2>
       <p>
         The free tier has no payment involved, so there&apos;s nothing to refund there — see our{" "}
-        <a href="/pricing">Pricing</a> page for what&apos;s included.
+        <a href="/pricing">Pricing</a>{" "}
+        page for what&apos;s included.
       </p>
     </LegalPageShell>
   );
