@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import SiteFooter from "@/app/components/SiteFooter";
 
 const FEATURES = [
   {
@@ -173,14 +174,7 @@ export default function LandingPage() {
           </div>
         </div>
 
-        {/* Footer */}
-        <footer className="mt-24 flex flex-col items-center gap-3 border-t border-line pt-8 pb-4 text-xs text-ink-faint sm:flex-row sm:justify-between">
-          <span className="font-semibold">{appName}</span>
-          <div className="flex items-center gap-4">
-            <Link href="/login" className="hover:text-ink-muted">Log In</Link>
-            <Link href="/signup" className="hover:text-ink-muted">Sign Up</Link>
-          </div>
-        </footer>
+        <SiteFooter appName={appName} />
       </div>
     </main>
   );

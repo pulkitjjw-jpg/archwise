@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import SiteFooter from "@/app/components/SiteFooter";
 
 const FREE_FEATURES = [
   "3 brainstorm + requirements sessions",
@@ -112,8 +113,14 @@ export default function PricingPage() {
         </div>
 
         <p className="mt-10 text-center text-xs text-ink-faint">
-          Have questions? Sign up and reach out from inside the app — we read every message.
+          Have questions?{" "}
+          <Link href="/contact" className="font-semibold text-accent-ink hover:underline">
+            Get in touch
+          </Link>{" "}
+          — we read every message.
         </p>
+
+        <SiteFooter appName={appName} />
       </div>
     </main>
   );
