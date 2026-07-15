@@ -15,7 +15,24 @@ import type { NextRequest } from "next/server";
 // this prefix-matching array would make everything public. It also needs different treatment
 // than a plain public page: a logged-in user hitting "/" should be redirected to /dashboard
 // (skip the marketing page), not just be let through.
-const PUBLIC_PAGE_PREFIXES = ["/login", "/signup", "/forgot-password", "/reset-password", "/share", "/pricing"];
+const PUBLIC_PAGE_PREFIXES = [
+  "/login",
+  "/signup",
+  "/forgot-password",
+  "/reset-password",
+  "/share",
+  "/pricing",
+  // Legal/trust pages -- must be readable by anyone, logged in or not (a visitor deciding
+  // whether to sign up needs to read the Terms before creating an account).
+  "/terms",
+  "/privacy",
+  "/refund-policy",
+  "/cookie-policy",
+  "/contact",
+  "/about",
+  "/acceptable-use",
+  "/security",
+];
 
 // Surveyed the whole app before writing this: no external fonts (system stack, no next/font
 // Google Fonts import), no external scripts, no dangerouslySetInnerHTML anywhere, react-markdown
