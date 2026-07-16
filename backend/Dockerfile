@@ -12,11 +12,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
 COPY . .
 RUN pip install --no-cache-dir -e .
 
-# Run as a non-root user. The app never needs to write outside its own process (no local file
-# writes at runtime), so there's no reason to run as root -- this limits blast radius if the
-# process is ever compromised via a dependency or request-handling bug.
+# Run as a non-root user -- limits blast radius if the process is ever compromised via a
+# dependency or request-handling bug. One real local-write need exists despite the app being
+# otherwise stateless: app/services/knowledge_embeddings.py's fastembed model is downloaded and
+# cached on first use (via huggingface_hub, no cache_dir configured so it uses HF_HOME/$HOME's
+# default resolution) -- confirmed live as a 500 on architecture generation (Permission denied)
+# the first time this ran as a --no-create-home user with no HOME set.
+#
+# HF_HOME is deliberately OUTSIDE /app, not just a subdirectory of it: docker-compose.yml
+# bind-mounts the host's ./backend directory over /app unconditionally (`volumes: - ./backend:/app`,
+# not gated to dev), which shadows anything created under /app at image-build time with the host
+# directory's own contents/ownership -- a cache dir chowned to appuser here would still 403 at
+# runtime under that mount. /opt/hf-cache isn't touched by any bind mount, so it survives.
+ENV HF_HOME=/opt/hf-cache
 RUN groupadd --system appuser && useradd --system --gid appuser --no-create-home appuser \
-    && chown -R appuser:appuser /app
+    && mkdir -p "$HF_HOME" \
+    && chown -R appuser:appuser /app "$HF_HOME"
 USER appuser
 
 EXPOSE 8000
