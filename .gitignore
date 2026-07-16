@@ -48,3 +48,6 @@ next-env.d.ts
 .windsurfrules
 AGENT.md
 .github/copilot-instructions.md
+
+# clerk configuration (can include secrets)
+/.clerk/

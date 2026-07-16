@@ -6,6 +6,7 @@ import { Suspense, useEffect, useRef, useState } from "react";
 import { useSignIn } from "@clerk/nextjs";
 import AuthShell from "@/app/components/AuthShell";
 import GoogleAuthButton from "@/app/components/GoogleAuthButton";
+import EnterpriseSSOButton from "@/app/components/EnterpriseSSOButton";
 
 type FieldError = { longMessage?: string; message: string } | null;
 
@@ -111,6 +112,32 @@ function LoginForm() {
     if (ssoError) {
       console.error("[login] signIn.sso() error:", ssoError);
       setError(extractErrorMessage(errors, []));
+    }
+  };
+
+  // Enterprise SSO (SAML) -- same signIn.sso() call as Google, but the "enterprise_sso" strategy
+  // additionally requires an identifier (the user's work email) so Clerk can resolve which
+  // Enterprise Connection/IdP to redirect to; there's no single "SSO" redirect target the way
+  // there is for oauth_google. Also always a signIn.sso() call, even for a brand-new user -- same
+  // "sign-in first, /sso-callback transfers to a real sign-up if needed" design as Google. On
+  // success this never returns -- the browser navigates away to the customer's IdP -- so the only
+  // real outcome to handle here is the error case, most commonly no Enterprise Connection
+  // matching this email's domain (e.g. the admin hasn't configured/enabled one in the Clerk
+  // dashboard yet). "identifier" is included in extractErrorMessage's field order because Clerk
+  // returns that specific rejection as an identifier field error, not a global one -- confirmed
+  // against handleForgotRequest below, which resolves an identifier the same way and already
+  // relies on this same field-error convention.
+  const handleEnterpriseSSO = async (ssoEmail: string) => {
+    setError("");
+    const { error: ssoError } = await signIn.sso({
+      strategy: "enterprise_sso",
+      identifier: ssoEmail,
+      redirectCallbackUrl: "/sso-callback",
+      redirectUrl: "/dashboard",
+    });
+    if (ssoError) {
+      console.error("[login] signIn.sso() enterprise_sso error:", ssoError);
+      setError(extractErrorMessage(errors, ["identifier"]));
     }
   };
 
@@ -474,6 +501,12 @@ function LoginForm() {
           )}
         </button>
       </form>
+
+      {/* Deliberately outside the <form> above -- see EnterpriseSSOButton's own comment for why
+          it needs its own <form> rather than sharing this one. */}
+      <div className="mt-4">
+        <EnterpriseSSOButton onSubmit={handleEnterpriseSSO} disabled={busy} />
+      </div>
     </AuthShell>
   );
 }

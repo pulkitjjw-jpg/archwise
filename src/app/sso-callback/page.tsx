@@ -7,13 +7,16 @@ import AuthShell from "@/app/components/AuthShell";
 
 type NavigateArgs = { decorateUrl: (path: string) => string };
 
-// The shared landing page for Google's OAuth redirect back into this app, reached from both
-// login and signup's identical signIn.sso() calls (see their handleGoogleAuth). Google doesn't
-// distinguish "sign in" from "sign up" up front -- Clerk always starts the redirect as a sign-in
-// attempt, and this page's job is to figure out, from the resulting signIn/signUp resource
-// state, whether that's a returning user (finalize the sign-in), a brand-new one (transfer into
-// a real sign-up and finalize that), or an account that already has an active session in this
-// browser tab (e.g. the user picked the same Google account in a second tab).
+// The shared landing page for every signIn.sso() redirect back into this app -- Google OAuth
+// (see handleGoogleAuth in login/signup) and Enterprise SSO/SAML (see handleEnterpriseSSO in the
+// same two files) both redirect here, since neither distinguishes "sign in" from "sign up" up
+// front -- Clerk always starts the redirect as a sign-in attempt, and this page's job is to
+// figure out, from the resulting signIn/signUp resource state, whether that's a returning user
+// (finalize the sign-in), a brand-new one (transfer into a real sign-up and finalize that), or an
+// account that already has an active session in this browser tab (e.g. the user picked the same
+// account in a second tab). This logic operates entirely on signIn/signUp resource STATE
+// (isTransferable, status, existingSession), never branching on which strategy produced that
+// state, so it works identically for both -- no enterprise_sso-specific branch needed here.
 export default function SsoCallbackPage() {
   const clerk = useClerk();
   const { signIn } = useSignIn();
@@ -65,10 +68,11 @@ export default function SsoCallbackPage() {
       }
     };
 
-    // Diagnostic only -- prefixed so it's easy to filter for in devtools. Remove once the OAuth
-    // flow has been confirmed working end-to-end against a real Google account; left in for now
-    // because this branch can only be exercised with real Google credentials, not the
-    // +clerk_test@ convention used everywhere else in this app's automated testing.
+    // Diagnostic only -- prefixed so it's easy to filter for in devtools. Remove once both the
+    // Google OAuth and Enterprise SSO flows have been confirmed working end-to-end against a real
+    // account; left in for now because these branches can only be exercised with real Google/IdP
+    // credentials, not the +clerk_test@ convention used everywhere else in this app's automated
+    // testing.
     const log = (...args: unknown[]) => console.log("[sso-callback]", ...args);
 
     // Bounds the "Finishing sign-in..." spinner -- without this, any unhandled state (or a
@@ -130,7 +134,7 @@ export default function SsoCallbackPage() {
 
       log("no branch matched. Final signIn:", signInRef.current, "signUp:", signUpRef.current);
       clearTimeout(giveUpTimer);
-      setError("We couldn't finish signing you in with Google. Please try again.");
+      setError("We couldn't finish signing you in. Please try again.");
     })();
 
     return () => clearTimeout(giveUpTimer);
@@ -147,7 +151,7 @@ export default function SsoCallbackPage() {
     <AuthShell
       eyebrow="🔑 Sign In"
       title="Finishing sign-in..."
-      subtitle="Just a moment while we confirm your Google account."
+      subtitle="Just a moment while we confirm your account."
     >
       {/* Turnstile can require this even mid-transfer (a sign-in transferred into a sign-up hits
           the same bot-protection check as a normal sign-up) -- see signup/page.tsx's identical

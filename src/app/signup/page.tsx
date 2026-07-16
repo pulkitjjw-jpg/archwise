@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { useSignIn, useSignUp } from "@clerk/nextjs";
 import AuthShell from "@/app/components/AuthShell";
 import GoogleAuthButton from "@/app/components/GoogleAuthButton";
+import EnterpriseSSOButton from "@/app/components/EnterpriseSSOButton";
 
 type FieldError = { longMessage?: string; message: string } | null;
 
@@ -76,6 +77,24 @@ export default function SignupPage() {
     if (ssoError) {
       console.error("[signup] signIn.sso() error:", ssoError);
       setError(extractErrorMessage(signInErrors, []));
+    }
+  };
+
+  // Same handler as login/page.tsx's identical one -- enterprise_sso needs an identifier (work
+  // email) so Clerk can resolve which Enterprise Connection/IdP to route to, unlike Google's
+  // single no-input redirect. Always a signIn.sso() call, even from signup -- see handleGoogleAuth
+  // above for why. Doesn't return on success -- the browser navigates away to the customer's IdP.
+  const handleEnterpriseSSO = async (ssoEmail: string) => {
+    setError("");
+    const { error: ssoError } = await signIn.sso({
+      strategy: "enterprise_sso",
+      identifier: ssoEmail,
+      redirectCallbackUrl: "/sso-callback",
+      redirectUrl: "/dashboard",
+    });
+    if (ssoError) {
+      console.error("[signup] signIn.sso() enterprise_sso error:", ssoError);
+      setError(extractErrorMessage(signInErrors, ["identifier"]));
     }
   };
 
@@ -221,6 +240,12 @@ export default function SignupPage() {
           )}
         </button>
       </form>
+
+      {/* Deliberately outside the <form> above -- see EnterpriseSSOButton's own comment for why
+          it needs its own <form> rather than sharing this one. */}
+      <div className="mt-4">
+        <EnterpriseSSOButton onSubmit={handleEnterpriseSSO} disabled={busy} />
+      </div>
     </AuthShell>
   );
 }
