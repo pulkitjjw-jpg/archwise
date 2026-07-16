@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState } from "react";
 import { useSignIn } from "@clerk/nextjs";
 import AuthShell from "@/app/components/AuthShell";
+import GoogleAuthButton from "@/app/components/GoogleAuthButton";
 
 type FieldError = { longMessage?: string; message: string } | null;
 
@@ -93,11 +94,45 @@ function LoginForm() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [signIn.status]);
 
+  // signIn.sso() is the same call whether the user clicks this from the sign-in or the sign-up
+  // page (see signup/page.tsx's identical handler) -- Google OAuth doesn't distinguish "sign in"
+  // from "sign up" up front, so Clerk always starts it as a sign-in attempt and /sso-callback
+  // decides whether to transfer it into a sign-up if no matching account exists yet. On success
+  // this never returns -- the browser navigates away to Google -- so the only real outcome to
+  // handle here is the error case (e.g. Google not yet enabled as a connection in the Clerk
+  // dashboard).
+  const handleGoogleAuth = async () => {
+    setError("");
+    const { error: ssoError } = await signIn.sso({
+      strategy: "oauth_google",
+      redirectCallbackUrl: "/sso-callback",
+      redirectUrl: "/dashboard",
+    });
+    if (ssoError) {
+      console.error("[login] signIn.sso() error:", ssoError);
+      setError(extractErrorMessage(errors, []));
+    }
+  };
+
   const handleSignIn = async () => {
     setError("");
     const { error: signInError } = await signIn.password({ emailAddress: email, password });
     if (signInError) {
-      setError(extractErrorMessage(errors, ["identifier", "password"]));
+      // signIn.password() resolves the identifier before attempting the password, so
+      // supportedFirstFactors is populated even on failure -- confirmed live: an account created
+      // via "Continue with Google" has no password on file, and Clerk correctly rejects a
+      // password attempt for it with a fairly opaque "verification strategy is not valid"
+      // message. Rather than surface that raw text, check whether password genuinely isn't a
+      // valid strategy for this identifier (vs. e.g. a real wrong-password case, which SHOULD
+      // show the generic error) and point the user at Google instead -- Clerk's own docs
+      // recommend exactly this supportedFirstFactors check over parsing error text/codes.
+      const passwordSupported = signInRef.current.supportedFirstFactors?.some((f) => f.strategy === "password");
+      const googleSupported = signInRef.current.supportedFirstFactors?.some((f) => f.strategy === "oauth_google");
+      if (passwordSupported === false && googleSupported) {
+        setError("This email is linked to a Google account. Use “Continue with Google” above instead.");
+      } else {
+        setError(extractErrorMessage(errors, ["identifier", "password"]));
+      }
       return;
     }
     const current = await waitForSignInUpdate((s) => s.status !== "needs_identifier");
@@ -378,6 +413,7 @@ function LoginForm() {
       }
     >
       <form action={handleSignIn} className="flex flex-col gap-4">
+        <GoogleAuthButton onClick={handleGoogleAuth} disabled={busy} />
         <div>
           <label htmlFor="email" className="block text-xs font-semibold uppercase tracking-wider text-ink-muted">
             Email

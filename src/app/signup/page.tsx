@@ -3,8 +3,9 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { useSignUp } from "@clerk/nextjs";
+import { useSignIn, useSignUp } from "@clerk/nextjs";
 import AuthShell from "@/app/components/AuthShell";
+import GoogleAuthButton from "@/app/components/GoogleAuthButton";
 
 type FieldError = { longMessage?: string; message: string } | null;
 
@@ -27,6 +28,9 @@ function extractErrorMessage(
 export default function SignupPage() {
   const router = useRouter();
   const { signUp, errors, fetchStatus } = useSignUp();
+  // Google (and any other OAuth) always goes through signIn.sso(), even from this page -- see
+  // handleGoogleAuth below and its identical counterpart in login/page.tsx for why.
+  const { signIn, errors: signInErrors } = useSignIn();
   const busy = fetchStatus === "fetching";
 
   const [step, setStep] = useState<"details" | "verify">("details");
@@ -57,6 +61,23 @@ export default function SignupPage() {
     // Deliberately depends only on signUp.status, not [signUp, router] -- see login/page.tsx's
     // identical effect for why.
   }, [signUp.status]);
+
+  // Same handler as login/page.tsx's -- Google OAuth doesn't distinguish sign-up from sign-in up
+  // front, so this always starts as a signIn.sso() attempt; /sso-callback transfers it into an
+  // actual sign-up if no matching Clerk account exists yet. Doesn't return on success -- the
+  // browser navigates away to Google.
+  const handleGoogleAuth = async () => {
+    setError("");
+    const { error: ssoError } = await signIn.sso({
+      strategy: "oauth_google",
+      redirectCallbackUrl: "/sso-callback",
+      redirectUrl: "/dashboard",
+    });
+    if (ssoError) {
+      console.error("[signup] signIn.sso() error:", ssoError);
+      setError(extractErrorMessage(signInErrors, []));
+    }
+  };
 
   const handleSubmit = async () => {
     setError("");
@@ -143,6 +164,7 @@ export default function SignupPage() {
       }
     >
       <form action={handleSubmit} className="flex flex-col gap-4">
+        <GoogleAuthButton onClick={handleGoogleAuth} disabled={busy} />
         <div>
           <label htmlFor="email" className="block text-xs font-semibold uppercase tracking-wider text-ink-muted">
             Email

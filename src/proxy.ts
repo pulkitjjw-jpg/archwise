@@ -20,6 +20,11 @@ import type { NextRequest } from "next/server";
 const PUBLIC_PAGE_PREFIXES = [
   "/login",
   "/signup",
+  // Google's OAuth redirect lands here before Clerk has activated a session -- auth() would see
+  // isAuthenticated: false at this point, so this must be public or the proxy would bounce the
+  // user to /login before the page's own client-side finalize logic (see sso-callback/page.tsx)
+  // ever gets to run.
+  "/sso-callback",
   "/share",
   "/pricing",
   // Legal/trust pages -- must be readable by anyone, logged in or not (a visitor deciding
