@@ -31,7 +31,16 @@ async function proxy(req: NextRequest, { params }: { params: Promise<{ path: str
     return NextResponse.json({ error: "Backend is not configured" }, { status: 500 });
   }
 
-  const targetUrl = `${backendUrl}/api/${path.join("/")}${req.nextUrl.search}`;
+  // The backend's routers are versioned under /api/v1 (see backend/app/main.py) so a future
+  // breaking change has a real migration path -- but the browser-facing surface stays the plain
+  // /api/* it always was, so no frontend call site needs to know or care about the backend's
+  // internal version. This is the one place that does the translation. /api/health is the one
+  // deliberate exception: it's mounted unversioned on the backend (health checks conventionally
+  // aren't versioned -- see main.py's comment), so it's forwarded as-is instead of gaining a
+  // /v1/ segment it doesn't have.
+  const isHealthCheck = path.length === 1 && path[0] === "health";
+  const backendPath = isHealthCheck ? `api/${path.join("/")}` : `api/v1/${path.join("/")}`;
+  const targetUrl = `${backendUrl}/${backendPath}${req.nextUrl.search}`;
 
   const forwardHeaders = new Headers();
   req.headers.forEach((value, key) => {

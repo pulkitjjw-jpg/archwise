@@ -253,13 +253,21 @@ async def request_context(request: Request, call_next):
     return response
 
 
+# /api/health is intentionally NOT versioned -- health checks are polled by infra (load
+# balancers, orchestrators, uptime monitors) that shouldn't need to track API version bumps just
+# to keep liveness checks working, and the endpoint's contract ({"ok": true}) is not expected to
+# ever have a breaking v2. Every other router IS versioned under /api/v1 so a future breaking
+# change has a real migration path (mount the same router again under /api/v2 without touching
+# v1 callers) instead of forcing a flag day. The Next.js proxy (src/app/api/[...path]/route.ts)
+# mirrors this exact split when translating the browser-facing unversioned /api/* path to the
+# backend's real, versioned one.
 app.include_router(health.router, prefix="/api")
-app.include_router(settings_router.router, prefix="/api")
-app.include_router(auth.router, prefix="/api")
-app.include_router(projects.router, prefix="/api")
-app.include_router(conversations.router, prefix="/api")
-app.include_router(requirements.router, prefix="/api")
-app.include_router(architectures.router, prefix="/api")
-app.include_router(export.router, prefix="/api")
-app.include_router(share.router, prefix="/api")
-app.include_router(admin.router, prefix="/api")
+app.include_router(settings_router.router, prefix="/api/v1")
+app.include_router(auth.router, prefix="/api/v1")
+app.include_router(projects.router, prefix="/api/v1")
+app.include_router(conversations.router, prefix="/api/v1")
+app.include_router(requirements.router, prefix="/api/v1")
+app.include_router(architectures.router, prefix="/api/v1")
+app.include_router(export.router, prefix="/api/v1")
+app.include_router(share.router, prefix="/api/v1")
+app.include_router(admin.router, prefix="/api/v1")

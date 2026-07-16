@@ -22,7 +22,10 @@ async function getAppName(): Promise<string> {
   const internalAuthSecret = process.env.INTERNAL_AUTH_SECRET;
   if (!backendUrl || !internalAuthSecret) return DEFAULT_APP_NAME;
   try {
-    const res = await fetch(`${backendUrl}/api/settings`, {
+    // /api/v1, not /api -- this bypasses the Next.js catch-all proxy (see backendFetch's comment
+    // in src/app/projects/[id]/page.tsx for why a Server Component does that), so it has to know
+    // the backend's real, versioned mount point itself instead of getting the translation for free.
+    const res = await fetch(`${backendUrl}/api/v1/settings`, {
       headers: { "x-internal-auth": internalAuthSecret },
       next: { revalidate: 60 },
     });

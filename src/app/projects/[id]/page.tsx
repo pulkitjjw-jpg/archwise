@@ -24,6 +24,10 @@ type ConversationRecord = {
 // than looping back through its own proxy route over HTTP. Since this bypasses the proxy, it has
 // to do the proxy's Clerk-token->header translation itself too (see
 // src/app/api/[...path]/route.ts).
+// `path` is the versioned backend path (e.g. "/api/v1/projects/123"), not the browser-facing
+// unversioned one -- this bypasses the Next.js catch-all proxy (see the comment above), so unlike
+// a normal frontend fetch("/api/...") call it doesn't get the proxy's /api -> /api/v1 translation
+// for free and has to be written against the backend's real, versioned mount point directly.
 async function backendFetch(path: string) {
   const backendUrl = process.env.BACKEND_URL;
   const internalAuthSecret = process.env.INTERNAL_AUTH_SECRET;
@@ -44,7 +48,7 @@ async function backendFetch(path: string) {
 export default async function ProjectPage({ params }: ProjectPageProps) {
   const { id } = await params;
 
-  const projectRes = await backendFetch(`/api/projects/${id}`);
+  const projectRes = await backendFetch(`/api/v1/projects/${id}`);
   // middleware.ts already redirects an unauthenticated page visit to /login before this ever
   // runs, but it only checks cookie PRESENCE, not validity -- an expired/invalid session cookie
   // reaches here and gets a real 401 from the backend, which belongs at /login too, not a thrown
@@ -60,7 +64,7 @@ export default async function ProjectPage({ params }: ProjectPageProps) {
   }
   const { project } = await projectRes.json();
 
-  const conversationsRes = await backendFetch(`/api/projects/${id}/conversations`);
+  const conversationsRes = await backendFetch(`/api/v1/projects/${id}/conversations`);
   if (!conversationsRes.ok) {
     throw new Error("Failed to load conversations");
   }
