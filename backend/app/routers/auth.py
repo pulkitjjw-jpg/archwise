@@ -1,3 +1,6 @@
+import hashlib
+import secrets
+import uuid
 from collections import defaultdict
 from datetime import UTC, datetime
 
@@ -8,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_db
 from app.dependencies import get_current_user
 from app.models import (
+    ApiKey,
     Architecture,
     Conversation,
     Project,
@@ -16,10 +20,12 @@ from app.models import (
     Requirement,
     ShareLink,
     User,
+    Webhook,
 )
 from app.rate_limit import limiter
-from app.schemas import DeleteAccountRequest
+from app.schemas import ApiKeyCreateRequest, DeleteAccountRequest, WebhookCreateRequest
 from app.serializers import (
+    serialize_api_key,
     serialize_architecture,
     serialize_conversation,
     serialize_project,
@@ -28,10 +34,18 @@ from app.serializers import (
     serialize_requirement,
     serialize_share_link,
     serialize_user,
+    serialize_webhook,
 )
 from app.services.audit import write_audit_log
 
 router = APIRouter()
+
+# The only event type this pass's webhook delivery mechanism actually fires (see
+# app/worker.py's generate_architecture_task / app/services/webhooks.py) -- validated against at
+# registration time so a typo'd event name doesn't silently register a webhook that can never
+# fire. A plain set (not an enum) so a future event type is a one-line addition here, same
+# "free-form but namespaced" precedent as AuditLog.action in app/models.py.
+ALLOWED_WEBHOOK_EVENT_TYPES = {"architecture.generated"}
 
 # Register/login/logout/forgot-password/reset-password/change-password all removed -- Clerk owns
 # credentials, sessions, and email verification entirely now (see app/dependencies.py's
@@ -201,3 +215,176 @@ async def delete_my_account(
             "your sign-in account -- that's managed separately by Clerk."
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# API keys -- self-service programmatic access (see app/dependencies.py's
+# get_user_from_api_key and app/routers/public_api.py, the only consumer of the keys minted
+# here). Management itself stays Clerk-authenticated (get_current_user) -- a browser session is
+# how a user proves "I'm allowed to mint/revoke keys for this account" in the first place.
+# ---------------------------------------------------------------------------
+
+
+@router.post("/auth/me/api-keys", status_code=201)
+@limiter.limit("20/hour")
+async def create_api_key(
+    request: Request,
+    payload: ApiKeyCreateRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    # secrets.token_urlsafe(32) -- a real random secret (256 bits), not a low-entropy
+    # user-chosen value, same reasoning that lets get_user_from_api_key hash it with plain
+    # sha256 instead of a slow password hash. Prefixed so a leaked key is recognizable at a
+    # glance (same convention as a GitHub `ghp_...` / Stripe `sk_...` token).
+    raw_key = f"arc_{secrets.token_urlsafe(32)}"
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    # First 12 chars (including the "arc_" prefix) -- enough to tell keys apart in the list view
+    # without re-exposing anything secret; the rest of the key is never stored anywhere.
+    key_prefix = raw_key[:12]
+
+    api_key = ApiKey(user_id=current_user.id, name=payload.name, key_hash=key_hash, key_prefix=key_prefix)
+    db.add(api_key)
+    await db.flush()
+
+    await write_audit_log(
+        db,
+        actor_user_id=current_user.id,
+        action="api_key.created",
+        target_type="api_key",
+        target_id=str(api_key.id),
+        extra_data={"name": payload.name, "keyPrefix": key_prefix},
+    )
+    await db.commit()
+
+    return {
+        "apiKey": {
+            **serialize_api_key(api_key),
+            # THE ONLY TIME the raw key is ever returned. Only key_hash is persisted -- this app
+            # can never show it again after this response, the same "shown once" UX as GitHub,
+            # Stripe, and every other real API-key issuer. Copy it now; losing it means minting a
+            # new key, there is no recovery path.
+            "key": raw_key,
+        }
+    }
+
+
+@router.get("/auth/me/api-keys")
+async def list_api_keys(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> dict:
+    keys = (
+        await db.execute(select(ApiKey).where(ApiKey.user_id == current_user.id).order_by(ApiKey.created_at.desc()))
+    ).scalars().all()
+    return {"apiKeys": [serialize_api_key(k) for k in keys]}
+
+
+@router.delete("/auth/me/api-keys/{key_id}")
+async def revoke_api_key(
+    key_id: uuid.UUID, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+) -> dict:
+    api_key = (
+        await db.execute(select(ApiKey).where(ApiKey.id == key_id, ApiKey.user_id == current_user.id))
+    ).scalar_one_or_none()
+    if not api_key:
+        raise HTTPException(status_code=404, detail="API key not found")
+
+    # Idempotent -- revoking an already-revoked key just returns its current state rather than
+    # erroring or double-logging the audit trail.
+    if api_key.revoked_at is None:
+        api_key.revoked_at = datetime.now(UTC)
+        await write_audit_log(
+            db,
+            actor_user_id=current_user.id,
+            action="api_key.revoked",
+            target_type="api_key",
+            target_id=str(api_key.id),
+            extra_data={"name": api_key.name},
+        )
+        await db.commit()
+
+    return {"apiKey": serialize_api_key(api_key)}
+
+
+# ---------------------------------------------------------------------------
+# Webhooks -- self-service outbound event subscriptions. See app/services/webhooks.py (matching +
+# enqueueing) and app/worker.py's deliver_webhook_task (the actual HTTP delivery, run as its own
+# arq job so a slow/down receiver can never block or fail the generation job that triggered it).
+# ---------------------------------------------------------------------------
+
+
+@router.post("/auth/me/webhooks", status_code=201)
+@limiter.limit("20/hour")
+async def create_webhook(
+    request: Request,
+    payload: WebhookCreateRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    unknown_event_types = set(payload.eventTypes) - ALLOWED_WEBHOOK_EVENT_TYPES
+    if unknown_event_types:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown event type(s): {', '.join(sorted(unknown_event_types))}. "
+                f"Supported event types: {', '.join(sorted(ALLOWED_WEBHOOK_EVENT_TYPES))}."
+            ),
+        )
+
+    raw_secret = secrets.token_urlsafe(32)
+    webhook = Webhook(user_id=current_user.id, url=payload.url, secret=raw_secret, event_types=payload.eventTypes)
+    db.add(webhook)
+    await db.flush()
+
+    await write_audit_log(
+        db,
+        actor_user_id=current_user.id,
+        action="webhook.created",
+        target_type="webhook",
+        target_id=str(webhook.id),
+        extra_data={"url": webhook.url, "eventTypes": webhook.event_types},
+    )
+    await db.commit()
+
+    return {
+        "webhook": {
+            **serialize_webhook(webhook),
+            # Shown exactly once, same "shown once" UX and reasoning as the API key's raw value
+            # above -- only the plaintext secret can HMAC-verify a received payload, and only the
+            # receiving end needs to keep it, so this app never needs to show it again.
+            "secret": raw_secret,
+        }
+    }
+
+
+@router.get("/auth/me/webhooks")
+async def list_webhooks(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> dict:
+    webhooks = (
+        await db.execute(select(Webhook).where(Webhook.user_id == current_user.id).order_by(Webhook.created_at.desc()))
+    ).scalars().all()
+    return {"webhooks": [serialize_webhook(w) for w in webhooks]}
+
+
+@router.delete("/auth/me/webhooks/{webhook_id}")
+async def disable_webhook(
+    webhook_id: uuid.UUID, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+) -> dict:
+    webhook = (
+        await db.execute(select(Webhook).where(Webhook.id == webhook_id, Webhook.user_id == current_user.id))
+    ).scalar_one_or_none()
+    if not webhook:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+
+    # Soft-disable, not delete -- same "revoke, don't delete" precedent as ApiKey.revoked_at
+    # above and ShareLink.revoked_at, keeps the delivery history (webhook_deliveries) intact.
+    if webhook.disabled_at is None:
+        webhook.disabled_at = datetime.now(UTC)
+        await write_audit_log(
+            db,
+            actor_user_id=current_user.id,
+            action="webhook.disabled",
+            target_type="webhook",
+            target_id=str(webhook.id),
+            extra_data={"url": webhook.url},
+        )
+        await db.commit()
+
+    return {"webhook": serialize_webhook(webhook)}

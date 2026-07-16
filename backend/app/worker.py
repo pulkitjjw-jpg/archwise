@@ -21,15 +21,18 @@ enqueue_* functions and the docstring there on why usage-cap enforcement stays i
 never here.
 """
 
+import json
 import logging
 import uuid
+from datetime import UTC, datetime
 
+import httpx
 from arq.connections import RedisSettings
 from sqlalchemy import select
 
 from app.config import settings
 from app.db import AsyncSessionLocal
-from app.models import Architecture, Project
+from app.models import Architecture, Project, Webhook, WebhookDelivery
 from app.serializers import serialize_architecture
 from app.services import export_generation, jobs
 from app.services.architecture_generation import generate_architecture_bundle
@@ -39,6 +42,12 @@ from app.services.knowledge_retrieval import (
     enrich_citations,
     retrieve_domain_pattern_knowledge,
     retrieve_relevant_knowledge,
+)
+from app.services.webhooks import (
+    RESPONSE_BODY_TRUNCATE_LENGTH,
+    WEBHOOK_DELIVERY_TIMEOUT_SECONDS,
+    enqueue_matching_webhook_deliveries,
+    sign_payload,
 )
 
 logger = logging.getLogger("app.worker")
@@ -130,6 +139,27 @@ async def generate_architecture_task(
             await db.commit()
             serialized = serialize_architecture(record)
 
+            # Webhook fan-out AFTER the architecture row is durably committed -- a delivery
+            # attempt describing this event should never be enqueued for a generation that could
+            # still roll back. Deliberately a separate arq job per matching webhook (see
+            # app/services/webhooks.py's own docstring) rather than an inline httpx call here: a
+            # slow/down webhook receiver must never block or fail architecture generation itself.
+            if project:
+                await enqueue_matching_webhook_deliveries(
+                    db,
+                    redis,
+                    project.user_id,
+                    "architecture.generated",
+                    {
+                        "event": "architecture.generated",
+                        "projectId": project_id,
+                        "projectName": project_name,
+                        "architectureId": str(record.id),
+                        "version": next_version,
+                        "createdAt": record.created_at,
+                    },
+                )
+
         await jobs.set_job_status(
             redis, "architecture", job_id, project_id=project_id, status="complete", result={"architecture": serialized}
         )
@@ -180,10 +210,74 @@ async def generate_export_task(ctx: dict, *, job_id: str, project_id: str, forma
         await jobs.set_job_status(redis, "export", job_id, project_id=project_id, status="failed", error=str(exc))
 
 
+async def deliver_webhook_task(ctx: dict, *, webhook_id: str, event_type: str, payload: dict) -> None:
+    """Enqueued by app/services/webhooks.py's enqueue_matching_webhook_deliveries, one job per
+    matching webhook per event. Makes exactly ONE HTTP attempt -- no retry-with-backoff, a known,
+    deliberate limitation for this pass (see webhooks.py's module docstring). Never raises past
+    itself for a delivery-side failure (bad URL, timeout, non-2xx, connection refused): the
+    outcome is recorded as a WebhookDelivery row either way, since arq has no business logic of
+    its own for "should this be retried" and a raised exception here would just show up as a
+    generic failed-job log line with none of that context."""
+    async with AsyncSessionLocal() as db:
+        webhook = (
+            await db.execute(select(Webhook).where(Webhook.id == uuid.UUID(webhook_id)))
+        ).scalar_one_or_none()
+        # Disabled or deleted between enqueue time and now (e.g. the user revoked it seconds
+        # after the triggering event) -- nothing to send, nothing worth recording.
+        if not webhook or webhook.disabled_at is not None:
+            return
+
+        # payload arrived here already jsonable_encoder()-normalized (see
+        # enqueue_matching_webhook_deliveries) and round-tripped through arq's own msgpack
+        # serialization -- plain str/int/float/bool/None/list/dict only, safe for json.dumps
+        # directly. Signed over these EXACT bytes, the same ones sent as the request body below.
+        body = json.dumps(payload).encode()
+        signature = sign_payload(webhook.secret, body)
+
+        status_code: int | None = None
+        response_text: str | None = None
+        delivered_at: datetime | None = None
+        try:
+            async with httpx.AsyncClient(timeout=WEBHOOK_DELIVERY_TIMEOUT_SECONDS) as client:
+                response = await client.post(
+                    webhook.url,
+                    content=body,
+                    headers={
+                        "Content-Type": "application/json",
+                        # "sha256=<hex>" -- the algorithm-prefixed format most webhook receivers
+                        # (Stripe, GitHub) already expect, so verification code a user copies from
+                        # elsewhere is likely to just work against this unchanged.
+                        "X-Webhook-Signature": f"sha256={signature}",
+                        "X-Webhook-Event": event_type,
+                    },
+                )
+            status_code = response.status_code
+            response_text = response.text[:RESPONSE_BODY_TRUNCATE_LENGTH]
+            delivered_at = datetime.now(UTC)
+        except httpx.HTTPError as exc:
+            # Network error, timeout, DNS failure, connection refused, etc. -- status_code stays
+            # None (distinct from a real non-2xx HTTP response) and delivered_at stays None, so a
+            # delivery-history view can tell "we never reached it" apart from "it reached but
+            # errored."
+            response_text = str(exc)[:RESPONSE_BODY_TRUNCATE_LENGTH]
+
+        db.add(
+            WebhookDelivery(
+                webhook_id=webhook.id,
+                event_type=event_type,
+                payload=payload,
+                status_code=status_code,
+                response_body=response_text,
+                delivered_at=delivered_at,
+            )
+        )
+        await db.commit()
+
+
 class WorkerSettings:
     """arq's entry point (see docker-compose.yml: `arq app.worker.WorkerSettings`)."""
 
-    functions = [generate_architecture_task, generate_export_task]
+    functions = [generate_architecture_task, generate_export_task, deliver_webhook_task]
     # Resolved once at import time from the same REDIS_URL the backend service already uses for
     # slowapi -- both processes share ONE Redis instance, no separate broker.
     redis_settings = RedisSettings.from_dsn(settings.redis_url)

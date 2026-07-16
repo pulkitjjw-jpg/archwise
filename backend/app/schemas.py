@@ -194,3 +194,14 @@ class DeleteAccountRequest(BaseModel):
     # server-side (see DELETE /auth/me). Prevents a stray/scripted DELETE from silently nuking an
     # account -- a plain boolean confirm=true flag is too easy to send by accident/automation.
     confirmEmail: str
+
+
+class ApiKeyCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
+class WebhookCreateRequest(BaseModel):
+    url: str = Field(min_length=1, max_length=2000)
+    # At least one -- a webhook subscribed to nothing would never fire, which is almost certainly
+    # a mistake worth rejecting up front rather than silently accepting a useless registration.
+    eventTypes: list[str] = Field(min_length=1)

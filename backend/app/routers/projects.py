@@ -1,4 +1,5 @@
 import logging
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select, text
@@ -29,8 +30,11 @@ def _derive_status(conversation_count: int, requirement_count: int, architecture
     return "just_started"
 
 
-@router.get("/projects")
-async def list_projects(db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> dict:
+async def _list_projects_for_user(db: AsyncSession, user_id: uuid.UUID) -> dict:
+    """Shared body behind GET /projects (Clerk session, app/routers/auth.py's get_current_user)
+    and GET /public/projects (API key, app/routers/public_api.py's get_user_from_api_key) -- both
+    surfaces list exactly "this caller's own projects" and should never drift into two different
+    queries/serializations of the same data."""
     # Single aggregated query (no N+1): each child table is pre-aggregated per project_id in
     # its own subquery before joining, so the join itself never fans out across tables.
     result = await db.execute(
@@ -63,7 +67,7 @@ async def list_projects(db: AsyncSession = Depends(get_db), current_user: User =
             ORDER BY "lastUpdated" DESC NULLS LAST
             """
         ),
-        {"user_id": current_user.id},
+        {"user_id": user_id},
     )
 
     projects_with_status = []
@@ -87,6 +91,11 @@ async def list_projects(db: AsyncSession = Depends(get_db), current_user: User =
         )
 
     return {"projects": projects_with_status}
+
+
+@router.get("/projects")
+async def list_projects(db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> dict:
+    return await _list_projects_for_user(db, current_user.id)
 
 
 @router.post("/projects", status_code=201)

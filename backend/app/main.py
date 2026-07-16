@@ -14,7 +14,18 @@ from app.config import settings
 from app.logging_config import configure_logging, request_id_var
 from app.observability import init_sentry
 from app.rate_limit import limiter
-from app.routers import admin, architectures, auth, conversations, export, health, projects, requirements, share
+from app.routers import (
+    admin,
+    architectures,
+    auth,
+    conversations,
+    export,
+    health,
+    projects,
+    public_api,
+    requirements,
+    share,
+)
 # Aliased -- `settings` at module scope is already app.config's Settings singleton (line above);
 # this is the unrelated /settings (app-name) router, not to be confused with it.
 from app.routers import settings as settings_router
@@ -176,7 +187,18 @@ def _validation_error_response_message(errors: list[dict]) -> str:
 async def require_internal_auth(request: Request, call_next):
     """Defense-in-depth on top of network isolation: reject anything that doesn't carry the
     shared secret only Next.js's server-side proxy knows. This is a backstop, not the primary
-    control -- the primary control is that this service has no public network path at all."""
+    control -- the primary control is that this service has no public network path at all.
+
+    Deliberately applies to EVERY route below, including app/routers/public_api.py's API-key-
+    authenticated ones -- an API key authenticates the external CALLER to the app; this header
+    authenticates the PROXY to this backend. Those are two different hops. In today's deployment
+    (see docker-compose.yml: backend's port is published to 127.0.0.1 only in dev, and not at all
+    in a real deployment), a genuinely external caller reaches /api/v1/public/* the exact same way
+    the browser reaches every other route: through src/app/api/[...path]/route.ts's proxy, which
+    always attaches x-internal-auth to whatever it forwards regardless of how the original caller
+    authenticated to it. Exempting the public routes from this header would do nothing for
+    reachability (the port still isn't public) and would only remove a real defense-in-depth
+    layer -- so this was deliberately left unchanged rather than adding an exemption."""
     if request.headers.get("x-internal-auth") != settings.internal_auth_secret:
         return JSONResponse(status_code=status.HTTP_401_UNAUTHORIZED, content={"error": "Unauthorized"})
     return await call_next(request)
@@ -282,3 +304,7 @@ app.include_router(architectures.router, prefix="/api/v1")
 app.include_router(export.router, prefix="/api/v1")
 app.include_router(share.router, prefix="/api/v1")
 app.include_router(admin.router, prefix="/api/v1")
+# API-key-authenticated, not Clerk-session-authenticated -- see public_api.py's own module
+# docstring and require_internal_auth's docstring above for why this still sits behind the same
+# /api/v1 prefix and require_internal_auth middleware as every other router.
+app.include_router(public_api.router, prefix="/api/v1")

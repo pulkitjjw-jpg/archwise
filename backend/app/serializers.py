@@ -1,4 +1,5 @@
 from app.models import (
+    ApiKey,
     Architecture,
     Conversation,
     Project,
@@ -7,6 +8,7 @@ from app.models import (
     Requirement,
     ShareLink,
     User,
+    Webhook,
 )
 
 
@@ -108,4 +110,32 @@ def serialize_project_comment(c: ProjectComment) -> dict:
         "body": c.body,
         "createdAt": c.created_at,
         "updatedAt": c.updated_at,
+    }
+
+
+def serialize_api_key(k: ApiKey) -> dict:
+    # Deliberately excludes key_hash (never useful to a caller) AND the raw key itself (never
+    # stored at all past the creation response -- see POST /auth/me/api-keys). key_prefix is the
+    # only "which key is this" hint this response ever carries.
+    return {
+        "id": str(k.id),
+        "name": k.name,
+        "keyPrefix": k.key_prefix,
+        "createdAt": k.created_at,
+        "lastUsedAt": k.last_used_at,
+        "revoked": k.revoked_at is not None,
+        "revokedAt": k.revoked_at,
+    }
+
+
+def serialize_webhook(w: Webhook) -> dict:
+    # Deliberately excludes secret -- never returned again after creation (see POST
+    # /auth/me/webhooks), same "shown once" precedent as the API key's raw value above.
+    return {
+        "id": str(w.id),
+        "url": w.url,
+        "eventTypes": w.event_types,
+        "createdAt": w.created_at,
+        "disabled": w.disabled_at is not None,
+        "disabledAt": w.disabled_at,
     }
