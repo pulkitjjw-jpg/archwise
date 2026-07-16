@@ -4,7 +4,7 @@ from decimal import Decimal
 from typing import Any
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Boolean, ForeignKey, Integer, Numeric, Text, text
+from sqlalchemy import Boolean, ForeignKey, Index, Integer, Numeric, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -500,6 +500,16 @@ class ProjectMembership(Base):
     same project."""
 
     __tablename__ = "project_memberships"
+    __table_args__ = (
+        # Mirrors alembic/versions/62aa2b5fa4cd_add_project_memberships.py's
+        # uq_project_memberships_project_id_user_id exactly -- the migration already creates this
+        # constraint on the real database, but it was missing from the ORM model itself, which is
+        # what a future `alembic revision --autogenerate` diffs against (and what a test database
+        # built via Base.metadata.create_all, see backend/tests/conftest.py, actually gets). Left
+        # undeclared here, an autogenerate would have silently proposed DROPPING this constraint.
+        UniqueConstraint("project_id", "user_id", name="uq_project_memberships_project_id_user_id"),
+        Index("ix_project_memberships_user_id", "user_id"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")

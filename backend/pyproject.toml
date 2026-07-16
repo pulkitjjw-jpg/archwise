@@ -33,6 +33,15 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Session-scoped, not the pytest-asyncio default of a fresh loop per test function -- app/db.py's
+# async engine (and its asyncpg connection pool) is a MODULE-LEVEL singleton created once at
+# import time, before any test's event loop exists. A per-function loop scope would hand that
+# same engine a pool of connections bound to test 1's loop, then try to reuse them from test 2's
+# *different* loop -- asyncpg raises "Future attached to a different loop" the moment that
+# happens. One shared loop for the whole session keeps every test on the same loop the engine
+# was (implicitly) created under.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
 
 [build-system]
 requires = ["setuptools>=68"]
