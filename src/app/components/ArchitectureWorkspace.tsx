@@ -442,6 +442,39 @@ type ArchitectureData = {
   createdAt: string;
 };
 
+// Background-job polling (architecture generation + Terraform/K8s/Executive-Summary export) --
+// both now enqueue on the backend (arq + Redis, see backend/app/services/jobs.py) instead of
+// blocking the request for up to ~35s of LLM work. Shared shape/helper so both flows poll
+// identically instead of two subtly-different copies of the same loop.
+interface JobStatusResponse {
+  jobId: string;
+  status: "pending" | "running" | "complete" | "failed";
+  error?: string;
+}
+
+const JOB_POLL_INTERVAL_MS = 2000;
+// The LLM fallback chain can legitimately take up to ~35s under load (see
+// backend/app/config.py's llm_per_model_timeout_seconds comment) -- 90s gives that comfortable
+// headroom before this gives up and shows a timeout error, rather than bailing right as a slow
+// but otherwise-healthy generation was about to finish.
+const JOB_POLL_TIMEOUT_MS = 90000;
+
+/** Polls `fetchStatus` every JOB_POLL_INTERVAL_MS until the job reaches "complete" or "failed",
+ * or throws a timeout error after JOB_POLL_TIMEOUT_MS. `fetchStatus` itself is responsible for
+ * turning a non-OK response into a thrown Error (see call sites below) -- this helper only
+ * decides when to keep polling vs. stop. */
+async function pollJob<T extends JobStatusResponse>(fetchStatus: () => Promise<T>): Promise<T> {
+  const deadline = Date.now() + JOB_POLL_TIMEOUT_MS;
+  for (;;) {
+    const data = await fetchStatus();
+    if (data.status === "complete" || data.status === "failed") return data;
+    if (Date.now() >= deadline) {
+      throw new Error("This is taking longer than expected. Please try again in a moment.");
+    }
+    await new Promise((resolve) => setTimeout(resolve, JOB_POLL_INTERVAL_MS));
+  }
+}
+
 interface ArchitectureWorkspaceProps {
   projectId: string;
   requirements: any;
@@ -603,6 +636,9 @@ export default function ArchitectureWorkspace({
       setGenerating(true);
       setError("");
       setErrorRetryAction(null);
+      // Enqueues a background job and returns immediately (202 + jobId) -- the actual rules/
+      // knowledge-RAG/LLM pipeline (up to ~35s) now runs in a separate worker process, not this
+      // request. See backend/app/routers/architectures.py's generate_architecture.
       const res = await fetch(`/api/projects/${projectId}/architectures`, {
         method: "POST",
       });
@@ -612,9 +648,24 @@ export default function ArchitectureWorkspace({
         throw new Error(errData.error || "Failed to generate architecture");
       }
 
-      const data = await res.json();
-      setArchitecture(data.architecture);
-      await loadArchitecture(data.architecture.version);
+      const { jobId } = await res.json();
+
+      const finalStatus = await pollJob(async () => {
+        const pollRes = await fetch(`/api/projects/${projectId}/architectures/jobs/${jobId}`);
+        if (!pollRes.ok) {
+          const errData = await pollRes.json().catch(() => ({}));
+          throw new Error(errData.error || "Failed to check generation status");
+        }
+        return pollRes.json();
+      });
+
+      if (finalStatus.status === "failed") {
+        throw new Error(finalStatus.error || "Failed to generate architecture");
+      }
+
+      const data = finalStatus.architecture;
+      setArchitecture(data);
+      await loadArchitecture(data.version);
       // Workstream X: "Regenerate Design" now goes through a preview step first (see
       // handlePreviewRegenerate below) -- once the real version is actually created here, that
       // preview is stale, so clear it rather than leave a confirm/discard panel referencing a
@@ -686,20 +737,49 @@ export default function ArchitectureWorkspace({
       setError("");
       setErrorRetryAction(null);
 
-      const res = await fetch(`/api/projects/${projectId}/export?provider=${activeProvider}`);
+      // Enqueues a background export job (terraform generation itself is fast, but this shares
+      // one uniform job-queue contract with executive-summary below, which isn't -- see
+      // backend/app/routers/export.py's create_export_job).
+      const res = await fetch(`/api/projects/${projectId}/export/jobs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          format: activeProvider === "kubernetes" ? "kubernetes" : "terraform",
+          provider: activeProvider,
+        }),
+      });
       if (!res.ok) {
-        // Previously a raw `window.location.href` navigation -- a backend error (404, 500, an
-        // expired session) navigated the whole tab away to a raw JSON error body with zero
-        // feedback and no way to retry without reloading. Fetching first means a failure can be
-        // caught and surfaced the same way every other export failure already is.
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || "Failed to export. Please try again.");
       }
+      const { jobId } = await res.json();
 
-      const blob = await res.blob();
+      const finalStatus = await pollJob(async () => {
+        const pollRes = await fetch(`/api/projects/${projectId}/export/jobs/${jobId}`);
+        if (!pollRes.ok) {
+          const data = await pollRes.json().catch(() => ({}));
+          throw new Error(data.error || "Failed to check export status");
+        }
+        return pollRes.json();
+      });
+      if (finalStatus.status === "failed") {
+        throw new Error(finalStatus.error || "Failed to export. Please try again.");
+      }
+
+      // Previously a raw `window.location.href` navigation -- a backend error (404, 500, an
+      // expired session) navigated the whole tab away to a raw JSON error body with zero
+      // feedback and no way to retry without reloading. Fetching first means a failure can be
+      // caught and surfaced the same way every other export failure already is.
+      const downloadRes = await fetch(`/api/projects/${projectId}/export/jobs/${jobId}/download`);
+      if (!downloadRes.ok) {
+        const data = await downloadRes.json().catch(() => ({}));
+        throw new Error(data.error || "Failed to export. Please try again.");
+      }
+
+      const blob = await downloadRes.blob();
       // Reuse the filename the backend already computed (safe_name-export_label-provider.zip)
       // rather than re-deriving it client-side -- one source of truth for the naming scheme.
-      const disposition = res.headers.get("Content-Disposition") || "";
+      const disposition = downloadRes.headers.get("Content-Disposition") || "";
       const filenameMatch = disposition.match(/filename="([^"]+)"/);
       const filename = filenameMatch ? filenameMatch[1] : `architecture-${activeProvider}.zip`;
 
@@ -874,9 +954,29 @@ export default function ArchitectureWorkspace({
       setExecSummaryExportBusy(true);
       setError("");
       setErrorRetryAction(null);
-      const res = await fetch(`/api/projects/${projectId}/export/executive-summary?provider=${activeProvider}`);
+
+      // Same job-queue contract as handleExport above -- this one always involves an LLM call
+      // (up to ~35s), which is exactly the case this job queue exists for.
+      const res = await fetch(`/api/projects/${projectId}/export/jobs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ format: "executive-summary", provider: activeProvider }),
+      });
       if (!res.ok) throw new Error("Failed to generate the executive summary");
-      const blob = await res.blob();
+      const { jobId } = await res.json();
+
+      const finalStatus = await pollJob(async () => {
+        const pollRes = await fetch(`/api/projects/${projectId}/export/jobs/${jobId}`);
+        if (!pollRes.ok) throw new Error("Failed to check export status");
+        return pollRes.json();
+      });
+      if (finalStatus.status === "failed") {
+        throw new Error(finalStatus.error || "Failed to generate the executive summary");
+      }
+
+      const downloadRes = await fetch(`/api/projects/${projectId}/export/jobs/${jobId}/download`);
+      if (!downloadRes.ok) throw new Error("Failed to generate the executive summary");
+      const blob = await downloadRes.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -885,9 +985,9 @@ export default function ArchitectureWorkspace({
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-    } catch (err) {
+    } catch (err: any) {
       console.error("Executive summary export failed:", err);
-      setError("Failed to generate the executive summary. Please try again.");
+      setError(err.message || "Failed to generate the executive summary. Please try again.");
       setErrorRetryAction(() => handleExportExecutiveSummary);
     } finally {
       setExecSummaryExportBusy(false);
@@ -2116,11 +2216,23 @@ export default function ArchitectureWorkspace({
         const errData = await archRes.json().catch(() => ({}));
         throw new Error(errData.detail || errData.error || "Failed to generate the new architecture version");
       }
-      const archData = await archRes.json();
+      const { jobId } = await archRes.json();
+
+      const finalStatus = await pollJob(async () => {
+        const pollRes = await fetch(`/api/projects/${projectId}/architectures/jobs/${jobId}`);
+        if (!pollRes.ok) {
+          const errData = await pollRes.json().catch(() => ({}));
+          throw new Error(errData.error || "Failed to check generation status");
+        }
+        return pollRes.json();
+      });
+      if (finalStatus.status === "failed") {
+        throw new Error(finalStatus.error || "Failed to generate the new architecture version");
+      }
 
       closeWhatIf();
       onRequirementsChange();
-      await loadArchitecture(archData.architecture.version);
+      await loadArchitecture(finalStatus.architecture.version);
     } catch (err: any) {
       setWhatIfError(err.message || "An error occurred while saving this scenario.");
     } finally {

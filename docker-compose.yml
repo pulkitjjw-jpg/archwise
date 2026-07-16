@@ -63,6 +63,40 @@ services:
     networks:
       - internal
 
+  # Consumes the architecture-generation and export jobs `backend` enqueues (see
+  # app/services/jobs.py / app/worker.py) -- SAME image as `backend` (identical dependencies,
+  # identical app/ code, since the job functions live right alongside the routers that enqueue
+  # them), just a different process command and no published port: arq jobs are pulled from
+  # Redis, never reached over HTTP. Shares the exact same Postgres and Redis instances `backend`
+  # already depends on -- this is not a second queue/broker, just a second consumer of the one
+  # Redis this compose file already runs.
+  #
+  # No HEALTHCHECK of its own: arq has no HTTP endpoint to poll, so there's nothing meaningful to
+  # curl the way backend/frontend's checks do. Explicitly disabled below (not just omitted) --
+  # this service builds from the SAME image as `backend`, which bakes in an HTTP-based
+  # HEALTHCHECK (backend/Dockerfile) that curls localhost:8000/api/health; left un-disabled here,
+  # Docker still runs that inherited check against this container even though `command:` below
+  # overrides what process actually runs, and since nothing serves HTTP in the worker process it
+  # would flip to "unhealthy" forever -- caught live while verifying this service actually starts
+  # (`docker compose ps` showed worker stuck in "health: starting" before this was added).
+  # Confirm it's alive with `docker compose logs worker` (arq's own "Starting worker for N
+  # functions" line) instead.
+  worker:
+    build: ./backend
+    env_file: ./backend/.env
+    command: ["arq", "app.worker.WorkerSettings"]
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    networks:
+      - internal
+
   # Production-like containerized frontend (see root Dockerfile). NOT the day-to-day dev
   # workflow -- that's still `npm run dev` on the host against this same backend on :8000,
   # unaffected by this service's existence. Bound to 3001 (not 3000) specifically so `docker

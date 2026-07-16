@@ -164,6 +164,16 @@ class EmailExportRequest(BaseModel):
     attachment: EmailExportAttachment | None = None
 
 
+class ExportJobRequest(BaseModel):
+    """Enqueues a server-generated export job (see POST /projects/{project_id}/export/jobs).
+    Deliberately only covers the SERVER_GENERATED_FORMATS subset (terraform/kubernetes/
+    executive-summary) -- docs/image exports are already generated client-side and downloaded
+    directly, no job needed."""
+
+    format: str  # "terraform" | "kubernetes" | "executive-summary"
+    provider: str = "aws"
+
+
 # RegisterRequest/LoginRequest/ForgotPasswordRequest/ResetPasswordRequest/ChangePasswordRequest
 # removed -- Clerk owns credentials, sessions, and email verification entirely now (see
 # app/dependencies.py's get_current_user).

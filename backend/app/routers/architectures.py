@@ -21,12 +21,11 @@ from app.schemas import (
 from app.serializers import serialize_architecture
 from app.services.architecture_diff import calculate_total_cost, compute_architecture_diff
 from app.services.architecture_generation import build_cloud_mapping, generate_architecture_bundle
+from app.services.jobs import enqueue_architecture_job, get_job_status
 from app.services.knowledge_retrieval import (
     build_flow_story_query,
-    build_requirements_context_query,
     chunk_to_prompt_dict,
     enrich_citations,
-    retrieve_domain_pattern_knowledge,
     retrieve_relevant_knowledge,
 )
 from app.services.llm import (
@@ -656,11 +655,28 @@ async def refine_proposal(
     return {"proposal": enriched, "assistantReply": result["assistantReply"]}
 
 
-@router.post("/projects/{project_id}/architectures", status_code=201)
+@router.post("/projects/{project_id}/architectures", status_code=202)
 @limiter.limit("10/hour")
 async def generate_architecture(
     request: Request, project: Project = Depends(get_owned_project), db: AsyncSession = Depends(get_db)
 ) -> dict:
+    """Enqueues a background architecture-generation job and returns immediately -- the actual
+    rules-engine + knowledge-RAG + LLM pipeline (which can take up to ~35s under load, see
+    app/config.py's llm_per_model_timeout_seconds comment) now runs in a separate arq worker
+    process (app/worker.py's generate_architecture_task), not inside this request. 202 Accepted,
+    not 201 Created, since nothing has been created yet -- the caller polls
+    GET .../architectures/jobs/{job_id} below until it has.
+
+    Everything that's cheap and needs to happen before a job is even queued still happens
+    synchronously, right here, exactly where it always did:
+      1. Requirements must exist (400 otherwise) -- no point queuing a job that can't run.
+      2. Version numbering and the prev-architecture diff baseline are resolved from the CURRENT
+         DB state now, not re-derived inside the worker later, so what the worker persists is
+         exactly what this request observed and validated.
+      3. The free-tier usage cap (check_and_increment) is enforced now, synchronously, so a
+         request that would exceed the cap gets an immediate 402 and never queues a job at all --
+         see this function's own commit() call below for why that increment can no longer ride on
+         a later commit the way it used to when generation was still synchronous."""
     # 1. Fetch the latest requirements
     reqs = (
         await db.execute(
@@ -684,93 +700,66 @@ async def generate_architecture(
     latest_arch = await _latest_architecture(db, project.id)
     next_version = _next_version(latest_arch)
 
-    # 2b. Free-tier cap check BEFORE the real work (knowledge retrieval + the LLM generation call
-    # below) so a request that would exceed the cap never touches either. Whether this is the
-    # project's first-ever architecture (the free "architecture generation") or a later one on a
-    # project that already has ≥1 architectures row (a "growth-trigger update") is determined by
-    # latest_arch, fetched just above -- these are the same versioned `architectures` row type,
-    # distinguished only by whether one already exists for this project. Not committed here --
-    # rides in the same transaction as this route's own commit below.
+    # 2b. Free-tier cap check BEFORE the real work (knowledge retrieval + the LLM generation call,
+    # both of which now happen in the background worker) so a request that would exceed the cap
+    # never even gets a job queued. Whether this is the project's first-ever architecture (the
+    # free "architecture generation") or a later one on a project that already has ≥1
+    # architectures row (a "growth-trigger update") is determined by latest_arch, fetched just
+    # above -- these are the same versioned `architectures` row type, distinguished only by
+    # whether one already exists for this project.
     usage_field = "architecture_generations" if latest_arch is None else "growth_trigger_updates"
     await check_and_increment(db, project.user_id, usage_field)
-
-    # 3b. Knowledge-base RAG (highest-value touchpoint per the rollout plan: monolith-vs-
-    # microservices, layering, component-boundary reasoning). Retrieval happens HERE, not inside
-    # generate_architecture_bundle, since that module deliberately has no database access -- this
-    # is the one place in the whole pipeline with both a DB session and the requirements context
-    # available before the LLM call. An empty list (nothing cleared the similarity threshold) is
-    # passed through unchanged; validate_and_generate_architecture treats that as "no grounding
-    # available" and never fabricates a citation.
-    #
-    # Part 2: reference-architecture chunks (AWS/Azure/GCP's own published guides for this
-    # project's classified domain) are retrieved ALONGSIDE the general-principles chunks, never
-    # instead of them -- retrieve_domain_pattern_knowledge returns [] immediately when no domain
-    # was classified, so this is a no-op for any project that predates the domain-awareness feature
-    # or whose brainstorm genuinely didn't reveal a specific domain.
-    knowledge_chunks = await retrieve_relevant_knowledge(db, build_requirements_context_query(reqs_context, industry_context))
-    domain_pattern_chunks = await retrieve_domain_pattern_knowledge(db, product_domain)
-    knowledge_context = [chunk_to_prompt_dict(c) for c in knowledge_chunks + domain_pattern_chunks]
-
-    # 4. The shared rules-engine + LLM-validation + cloud-mapping pipeline (architecture_
-    # generation.py) -- identical to what the What-If preview endpoint below calls, just against
-    # this project's real saved requirements instead of hypothetical ones.
-    bundle = await generate_architecture_bundle(
-        project.name,
-        reqs_context,
-        industry_context,
-        settings.openrouter_api_key,
-        latest_arch.hld["components"] if latest_arch else None,
-        knowledge_context,
-        product_domain,
-    )
-
-    # Attach the real stored excerpt text to whichever citations the LLM actually cited -- see
-    # enrich_citations' docstring. A citation with no matching retrieved chunk is dropped rather
-    # than shown without backing content.
-    for c in bundle["components"]:
-        if c.get("sources"):
-            c["sources"] = enrich_citations(c["sources"], knowledge_context)
-            if not c["sources"]:
-                del c["sources"]
-    if bundle.get("recommendation", {}).get("sources"):
-        bundle["recommendation"]["sources"] = enrich_citations(bundle["recommendation"]["sources"], knowledge_context)
-        if not bundle["recommendation"]["sources"]:
-            del bundle["recommendation"]["sources"]
-
-    # 5. Save new architecture version with all five cloud mappings, recommendations, LLD specs,
-    # and security findings.
-    record = Architecture(
-        project_id=project.id,
-        version=next_version,
-        hld={"components": bundle["components"], "connections": bundle["connections"]},
-        reasoning={
-            "decisions": [
-                {
-                    "component": "system",
-                    "choice": rule,
-                    "rationale": "Matched deterministic rule pattern in system requirements.",
-                    "tradeoffs": [],
-                    "alternatives": [],
-                }
-                for rule in bundle["rulesTrace"]
-            ],
-            "assumptions": bundle["assumptions"],
-            "risks": bundle["risks"],
-            "recommendation": bundle["recommendation"],
-            "diff": bundle["diff"],
-        },
-        cloud_provider="aws",
-        security_findings=bundle["securityFindings"],
-    )
-    db.add(record)
-    await db.flush()
-
-    # 6. Update project's current version
-    project.current_version = next_version
-
+    # Committed HERE, immediately -- unlike before this endpoint went async, there's no later
+    # commit in THIS request for the increment to ride on (see check_and_increment's own
+    # docstring for that original "rides in the same transaction" reasoning): the generation work
+    # that used to follow it in this same request/transaction now happens in a background worker
+    # process with its own, separate session. Committing now is what makes the cap enforcement
+    # itself synchronous/immediate even though generation no longer is.
     await db.commit()
 
-    return {"architecture": serialize_architecture(record)}
+    # 3. Enqueue the background job. Everything passed here is plain, already-resolved data (no
+    # ORM instances, no DB session) since it has to survive an arq serialization round-trip to a
+    # completely separate worker process -- see app/worker.py's generate_architecture_task, which
+    # does the knowledge-RAG retrieval + rules/LLM pipeline + persistence this endpoint used to do
+    # inline.
+    job_id = await enqueue_architecture_job(
+        project_id=str(project.id),
+        project_name=project.name,
+        reqs_context=reqs_context,
+        industry_context=industry_context,
+        product_domain=product_domain,
+        prev_components=latest_arch.hld["components"] if latest_arch else None,
+        next_version=next_version,
+    )
+
+    return {"jobId": job_id, "status": "pending"}
+
+
+@router.get("/projects/{project_id}/architectures/jobs/{job_id}")
+async def get_architecture_job(job_id: str, project: Project = Depends(get_owned_project)) -> dict:
+    """Polling endpoint for the job enqueued by POST /projects/{project_id}/architectures above.
+    Meant to be polled every couple of seconds by the frontend until status is "complete" or
+    "failed" -- see ArchitectureWorkspace.tsx's handleGenerate. A job that's unknown to Redis
+    (never existed, or its TTL expired -- see app/services/jobs.py) and a job that belongs to a
+    DIFFERENT project this user owns both 404 identically, same "don't distinguish not-found from
+    not-yours" precedent as get_owned_project itself."""
+    status_doc = await get_job_status("architecture", job_id)
+    if not status_doc or status_doc.get("projectId") != str(project.id):
+        raise HTTPException(
+            status_code=404,
+            detail="We couldn't find that generation job. It may have expired -- please try generating again.",
+        )
+
+    response: dict = {"jobId": job_id, "status": status_doc["status"]}
+    if status_doc["status"] == "failed":
+        # The exact message _call_llm_with_fallback_chain (app/services/llm.py) raised when every
+        # model in the fallback chain failed, or any other real exception from the pipeline --
+        # never a generic "failed" with no detail, see app/worker.py's generate_architecture_task.
+        response["error"] = status_doc.get("error") or "Architecture generation failed. Please try again."
+    elif status_doc["status"] == "complete":
+        result = status_doc.get("result") or {}
+        response["architecture"] = result.get("architecture")
+    return response
 
 
 @router.post("/projects/{project_id}/architectures/manual", status_code=201)
