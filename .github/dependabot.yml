@@ -1,0 +1,19 @@
+version: 2
+updates:
+  # Frontend (Next.js) — root package.json / package-lock.json
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # Backend (FastAPI) — backend/pyproject.toml
+  - package-ecosystem: "pip"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+
+  # Keep the CI workflow's own actions (checkout, setup-node, setup-python, ...) current.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

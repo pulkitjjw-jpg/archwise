@@ -24,10 +24,29 @@ RUN npm run build
 FROM node:22-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
+
+# Non-root user/group, following Next.js's own documented convention for `output: standalone`
+# images (nextjs:nodejs, both fixed system IDs) -- runs the server process with no more
+# privilege than it needs.
+RUN addgroup --system --gid 1001 nodejs \
+    && adduser --system --uid 1001 nextjs
+
 # No public/ directory exists in this project (confirmed -- nothing to copy); standalone output
 # already includes everything else `next build` decided the server actually needs.
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+
+USER nextjs
 
 EXPOSE 3000
+
+# src/proxy.ts (this project's Next.js 16 middleware, via clerkMiddleware) redirects an
+# AUTHENTICATED "/" request to /dashboard, but always lets an unauthenticated one through as a
+# plain 200 -- and a cookie-less container healthcheck request is never authenticated, so this is
+# a reliable, unfaked-session way to prove the Next.js server is actually up and serving. (The
+# real backend health check already lives on the FastAPI container -- see backend/Dockerfile --
+# this just confirms the gateway itself is alive.)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD wget -q -O /dev/null --spider http://localhost:3000/ || exit 1
+
 CMD ["node", "server.js"]

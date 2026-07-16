@@ -50,6 +50,16 @@ services:
       - "127.0.0.1:8000:8000"
     volumes:
       - ./backend:/app
+    healthcheck:
+      # Mirrors backend/Dockerfile's HEALTHCHECK -- compose-level checks are what
+      # `depends_on: condition: service_healthy` actually reads, so this needs to exist here too,
+      # not just in the image. /api/health sits behind require_internal_auth like every other
+      # route, so the shared secret must be sent the same way a real caller would.
+      test: ["CMD-SHELL", "curl -f -H \"x-internal-auth: $$INTERNAL_AUTH_SECRET\" http://localhost:8000/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
     networks:
       - internal
 
@@ -77,6 +87,15 @@ services:
       - backend
     ports:
       - "127.0.0.1:3001:3000"
+    healthcheck:
+      # Mirrors the root Dockerfile's HEALTHCHECK -- plain unauthenticated GET on "/". src/proxy.ts
+      # (Clerk middleware) only redirects "/" away for an AUTHENTICATED request; a cookie-less
+      # request from this healthcheck always gets a plain 200.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "--spider", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
     networks:
       - internal
 
