@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import RequirementsPanel from "./RequirementsPanel";
 import ArchitectureWorkspace from "./ArchitectureWorkspace";
+import ArchitectureWorkspaceErrorBoundary from "./ArchitectureWorkspaceErrorBoundary";
 
 interface WorkspaceTabsProps {
   projectId: string;
@@ -89,14 +90,16 @@ export default function WorkspaceTabs({
             onGoToArchitecture={() => setActiveTab("hld")}
           />
         ) : (
-          <ArchitectureWorkspace
-            projectId={projectId}
-            requirements={requirements}
-            onRequirementsChange={loadRequirements}
-            onSwitchTab={handleSwitchTab}
-            focusMode={focusMode}
-            onToggleFocusMode={onToggleFocusMode}
-          />
+          <ArchitectureWorkspaceErrorBoundary>
+            <ArchitectureWorkspace
+              projectId={projectId}
+              requirements={requirements}
+              onRequirementsChange={loadRequirements}
+              onSwitchTab={handleSwitchTab}
+              focusMode={focusMode}
+              onToggleFocusMode={onToggleFocusMode}
+            />
+          </ArchitectureWorkspaceErrorBoundary>
         )}
       </div>
     </div>

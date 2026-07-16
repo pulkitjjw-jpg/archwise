@@ -3,6 +3,7 @@ import re
 import time
 import uuid
 
+import sentry_sdk
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -11,6 +12,7 @@ from slowapi.middleware import SlowAPIMiddleware
 
 from app.config import settings
 from app.logging_config import configure_logging, request_id_var
+from app.observability import init_sentry
 from app.rate_limit import limiter
 from app.routers import admin, architectures, auth, conversations, export, health, projects, requirements, share
 # Aliased -- `settings` at module scope is already app.config's Settings singleton (line above);
@@ -24,6 +26,11 @@ from app.routers import settings as settings_router
 # JSON-structured (see app/logging_config.py), not plain text -- parseable by whatever log
 # aggregator a real deployment ships to, and every line carries the request that produced it.
 configure_logging(level=logging.INFO)
+
+# Inert unless SENTRY_DSN is set (see app/observability.py and app/config.py) -- must run before
+# the app/middleware below so an exception raised during startup itself would still be captured
+# once a real DSN is configured; today it's simply a no-op.
+init_sentry()
 
 logger = logging.getLogger("app")
 
@@ -193,6 +200,9 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
+    # No-op when Sentry was never initialized (unset SENTRY_DSN) -- sentry_sdk's own
+    # capture_exception is a safe no-op in that case, same as every other sentry_sdk.* call.
+    sentry_sdk.capture_exception(exc)
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={

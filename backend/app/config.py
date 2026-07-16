@@ -79,5 +79,15 @@ class Settings(BaseSettings):
 
     environment: str = "development"
 
+    # Sentry error tracking (see app/observability.py). Optional/empty-string default -- the app
+    # has no real Sentry account/DSN yet, so this must stay fully inert (sentry_sdk.init() is
+    # simply never called) until a real DSN is provided. Never crash/fail startup over this being
+    # unset; just skip initialization the same way resend_api_key is skipped above.
+    sentry_dsn: str = ""
+
+    @property
+    def sentry_enabled(self) -> bool:
+        return bool(self.sentry_dsn.strip())
+
 
 settings = Settings()  # type: ignore[call-arg]

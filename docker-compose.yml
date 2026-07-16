@@ -76,6 +76,13 @@ services:
       # `environment:` entry like the vars below.
       args:
         NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: "${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}"
+        # Same build-time-inlining requirement as the Clerk key above. Empty/unset by default
+        # (no real Sentry account exists for this app yet) -- an empty string here still keeps
+        # Sentry fully inert, see next.config.ts and src/instrumentation-client.ts.
+        NEXT_PUBLIC_SENTRY_DSN: "${NEXT_PUBLIC_SENTRY_DSN}"
+        SENTRY_ORG: "${SENTRY_ORG}"
+        SENTRY_PROJECT: "${SENTRY_PROJECT}"
+        SENTRY_AUTH_TOKEN: "${SENTRY_AUTH_TOKEN}"
     environment:
       # backend:8000 -- the service name IS the hostname on the internal docker network, no
       # published port needed for this hop (unlike the host-dev-server case above).

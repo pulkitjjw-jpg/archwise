@@ -20,6 +20,7 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "clerk-backend-api>=3.0",
     "resend>=2.5",
+    "sentry-sdk[fastapi]>=2.65",
 ]
 
 [project.optional-dependencies]
