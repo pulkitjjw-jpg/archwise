@@ -307,6 +307,7 @@ function AdminPageInner() {
                   <select
                     value={statusFilter}
                     onChange={(e) => setStatusFilter(e.target.value as "" | "success" | "failure")}
+                    aria-label="Filter by status"
                     className="rounded-lg border border-line bg-panel px-2.5 py-1.5 text-xs text-ink"
                   >
                     <option value="">All statuses</option>
@@ -316,6 +317,7 @@ function AdminPageInner() {
                   <select
                     value={modelFilter}
                     onChange={(e) => setModelFilter(e.target.value)}
+                    aria-label="Filter by model"
                     className="rounded-lg border border-line bg-panel px-2.5 py-1.5 text-xs text-ink"
                   >
                     <option value="">All models</option>
@@ -332,6 +334,7 @@ function AdminPageInner() {
                       setSort(s);
                       setOrder(o);
                     }}
+                    aria-label="Sort order"
                     className="rounded-lg border border-line bg-panel px-2.5 py-1.5 text-xs text-ink"
                   >
                     <option value="started_at:desc">Newest first</option>

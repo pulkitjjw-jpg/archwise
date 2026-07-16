@@ -10,6 +10,8 @@ interface NumericInputProps {
   maxLength?: number;
   id?: string;
   allowDecimal?: boolean;
+  /** Extra id(s) to merge into the input's own aria-describedby (e.g. a caller's helper text). */
+  "aria-describedby"?: string;
 }
 
 const REJECT_MESSAGE_MS = 1800;
@@ -29,6 +31,7 @@ export default function NumericInput({
   maxLength = 15,
   id,
   allowDecimal = true,
+  "aria-describedby": ariaDescribedBy,
 }: NumericInputProps) {
   const [rejected, setRejected] = useState(false);
 
@@ -49,6 +52,9 @@ export default function NumericInput({
     onChange(cleaned);
   };
 
+  const rejectMessageId = id ? `${id}-reject-message` : undefined;
+  const describedBy = [ariaDescribedBy, rejected ? rejectMessageId : null].filter(Boolean).join(" ") || undefined;
+
   return (
     <div>
       <input
@@ -59,9 +65,15 @@ export default function NumericInput({
         placeholder={placeholder}
         maxLength={maxLength}
         onChange={(e) => handleChange(e.target.value)}
+        aria-invalid={rejected || undefined}
+        aria-describedby={describedBy}
         className={`${className} ${rejected ? "border-danger focus:border-danger focus:ring-danger" : ""}`}
       />
-      {rejected && <p className="mt-1 text-xs text-danger">Numbers only.</p>}
+      {rejected && (
+        <p id={rejectMessageId} role="alert" className="mt-1 text-xs text-danger">
+          Numbers only.
+        </p>
+      )}
     </div>
   );
 }

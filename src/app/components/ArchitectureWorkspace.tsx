@@ -1558,14 +1558,40 @@ export default function ArchitectureWorkspace({
   const [isDiagramFullscreen, setIsDiagramFullscreen] = useState(false);
   useEffect(() => {
     if (!isDiagramFullscreen) return;
+    // Dialog focus management: move focus into the fullscreen surface on open, trap Tab inside
+    // it while open (it's portaled to document.body, so nothing about the underlying page's tab
+    // order does this for free), and restore focus to whatever triggered fullscreen on close --
+    // all standard dialog behavior, added here rather than a new shared component since this is
+    // the only real dialog-like surface in the app (see the role="dialog" on diagramViewportRef).
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const container = diagramViewportRef.current;
+    container?.focus();
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setIsDiagramFullscreen(false);
+      if (e.key === "Escape") {
+        setIsDiagramFullscreen(false);
+        return;
+      }
+      if (e.key !== "Tab" || !container) return;
+      const focusable = container.querySelectorAll<HTMLElement>(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+      );
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     document.body.style.overflow = "hidden";
     return () => {
       window.removeEventListener("keydown", onKeyDown);
       document.body.style.overflow = "";
+      previouslyFocused?.focus();
     };
   }, [isDiagramFullscreen]);
 
@@ -3866,6 +3892,13 @@ export default function ArchitectureWorkspace({
                       : "relative mt-6 rounded-2xl border border-line bg-paper shadow-inner overflow-hidden"
                   }
                   style={isDiagramFullscreen ? undefined : { height: "min(780px, calc(100vh - 260px))" }}
+                  // Fullscreen mode is a genuine full-viewport takeover with Escape-to-dismiss
+                  // (see the isDiagramFullscreen effect above) -- give it real dialog semantics
+                  // only while it's actually acting like a dialog, not in its normal inline-card
+                  // state where none of this applies.
+                  {...(isDiagramFullscreen
+                    ? { role: "dialog", "aria-modal": true, "aria-label": "Architecture diagram, fullscreen view", tabIndex: -1 }
+                    : {})}
                 >
                   <TransformWrapper ref={diagramTransformRef} initialScale={1} minScale={0.15} maxScale={2.5}>
                     {({ zoomIn, zoomOut }) => (
@@ -4191,7 +4224,17 @@ export default function ArchitectureWorkspace({
                                   height={coord.height}
                                 >
                                   <div
+                                    role="button"
+                                    tabIndex={0}
+                                    aria-pressed={isSelected}
+                                    aria-label={`${node.name} (${serviceName})${isSelected ? ", selected" : ""}`}
                                     onClick={() => setSelectedNodeId(node.id)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter" || e.key === " ") {
+                                        e.preventDefault();
+                                        setSelectedNodeId(node.id);
+                                      }
+                                    }}
                                     onPointerDown={(e) => handleNodePointerDown(e, node.id)}
                                     onPointerMove={handleNodePointerMove}
                                     onPointerUp={(e) => handleNodePointerUp(e, node.id)}

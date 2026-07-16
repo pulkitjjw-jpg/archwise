@@ -61,6 +61,8 @@ export default function InfoTooltip({ text, variant = "default" }: InfoTooltipPr
         type="button"
         onMouseEnter={show}
         onMouseLeave={hide}
+        onFocus={show}
+        onBlur={hide}
         onClick={(e) => {
           e.stopPropagation();
           e.preventDefault();

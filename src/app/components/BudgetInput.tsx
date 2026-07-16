@@ -46,11 +46,16 @@ export default function BudgetInput({ value, onChange, id, className = "" }: Bud
 
   const numericAmount = parseFloat(amount);
   const showUsdHint = currency !== "USD" && Number.isFinite(numericAmount) && amount.trim() !== "";
+  const unparsedHintId = id ? `${id}-unparsed-hint` : undefined;
+  const usdHintId = id ? `${id}-usd-hint` : undefined;
+  const describedBy = [unparsedOriginal && amount === "" ? unparsedHintId : null, showUsdHint ? usdHintId : null]
+    .filter(Boolean)
+    .join(" ") || undefined;
 
   return (
     <div className={className}>
       {unparsedOriginal && amount === "" && (
-        <p className="mb-1.5 text-[11px] italic text-ink-faint">
+        <p id={unparsedHintId} className="mb-1.5 text-[11px] italic text-ink-faint">
           Current value: &ldquo;{unparsedOriginal}&rdquo; — enter an amount below to replace it.
         </p>
       )}
@@ -65,6 +70,7 @@ export default function BudgetInput({ value, onChange, id, className = "" }: Bud
           placeholder="Amount"
           maxLength={12}
           className="w-full rounded-xl border border-line bg-white px-3 py-2 text-xs text-ink shadow-sm focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent transition-all duration-200"
+          aria-describedby={describedBy}
         />
         <select
           value={currency}
@@ -73,6 +79,7 @@ export default function BudgetInput({ value, onChange, id, className = "" }: Bud
             setCurrency(next);
             emit(amount, next);
           }}
+          aria-label="Currency"
           className="shrink-0 rounded-xl border border-line bg-white px-2 py-2 text-xs text-ink shadow-sm focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
         >
           {CURRENCIES.map((c) => (
@@ -83,7 +90,7 @@ export default function BudgetInput({ value, onChange, id, className = "" }: Bud
         </select>
       </div>
       {showUsdHint && (
-        <p className="mt-1 text-[11px] text-ink-faint">
+        <p id={usdHintId} className="mt-1 text-[11px] text-ink-faint">
           ≈ {formatCurrency(toUsd(numericAmount, currency), "USD")}/month USD — all cost estimates use this figure.
         </p>
       )}

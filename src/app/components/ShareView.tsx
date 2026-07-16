@@ -208,7 +208,17 @@ export default function ShareView({ token }: { token: string }) {
                           height={coord.height}
                         >
                           <div
+                            role="button"
+                            tabIndex={0}
+                            aria-pressed={isSelected}
+                            aria-label={`${node.type} (${mapping?.serviceName || node.name})${isSelected ? ", selected" : ""}`}
                             onClick={() => setSelectedNodeId(node.id)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" || e.key === " ") {
+                                e.preventDefault();
+                                setSelectedNodeId(node.id);
+                              }
+                            }}
                             className={`flex h-full w-full cursor-pointer items-center gap-2.5 rounded-2xl border bg-panel px-3 py-2 shadow-sm transition ${
                               isSelected ? "border-accent ring-2 ring-accent-soft" : "border-line-strong hover:border-ink-faint"
                             }`}

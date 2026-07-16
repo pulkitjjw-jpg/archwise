@@ -408,6 +408,7 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
           <div className="flex gap-2">
             <input
               type="text"
+              aria-label="Chat message"
               placeholder={
                 latestStage === "requirement_gathering"
                   ? "Report a change (e.g. 'scale increased to 50k users')..."

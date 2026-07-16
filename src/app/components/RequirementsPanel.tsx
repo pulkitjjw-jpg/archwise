@@ -290,7 +290,10 @@ export default function RequirementsPanel({
       const suggestions = fieldSuggestions[fieldName] || [];
       return (
         <div className="space-y-1.5">
-          <label className="flex items-center gap-1.5 text-xs font-semibold text-ink-muted uppercase tracking-wider">
+          <label
+            htmlFor={`nfr-input-${fieldName}`}
+            className="flex items-center gap-1.5 text-xs font-semibold text-ink-muted uppercase tracking-wider"
+          >
             {label}
             {FIELD_EXPLANATIONS[fieldName] && <InfoTooltip text={FIELD_EXPLANATIONS[fieldName]} />}
           </label>
@@ -497,10 +500,11 @@ export default function RequirementsPanel({
           </h4>
           {editMode ? (
             <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-ink-muted uppercase tracking-wider">
+              <label htmlFor="nfr-functional" className="text-xs font-semibold text-ink-muted uppercase tracking-wider">
                 Features (one per line)
               </label>
               <textarea
+                id="nfr-functional"
                 rows={5}
                 value={editedFunctional}
                 onChange={(e) => setEditedFunctional(e.target.value)}

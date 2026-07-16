@@ -74,6 +74,8 @@ function AdminSettingsPageInner() {
             <form onSubmit={handleSave} className="mt-4 flex flex-col gap-3">
               <input
                 type="text"
+                aria-label="App name"
+                aria-describedby={error ? "app-name-error" : success && !error ? "app-name-success" : undefined}
                 value={appName}
                 onChange={(e) => setAppName(e.target.value)}
                 maxLength={80}
@@ -81,9 +83,15 @@ function AdminSettingsPageInner() {
                 className="w-full rounded-2xl border border-line bg-white px-4 py-3 text-sm text-ink shadow-sm focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
                 required
               />
-              {error && <p className="text-xs font-medium text-danger">{error}</p>}
+              {error && (
+                <p id="app-name-error" role="alert" className="text-xs font-medium text-danger">
+                  {error}
+                </p>
+              )}
               {success && !error && (
-                <p className="text-xs font-medium text-success">Saved — now showing as &quot;{saved}&quot;.</p>
+                <p id="app-name-success" role="status" className="text-xs font-medium text-success">
+                  Saved — now showing as &quot;{saved}&quot;.
+                </p>
               )}
               <button
                 type="submit"
