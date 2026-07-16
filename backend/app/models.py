@@ -57,6 +57,12 @@ class User(Base):
     )
 
     projects: Mapped[list["Project"]] = relationship(back_populates="user", passive_deletes=True)
+    usage_counter: Mapped["UsageCounter | None"] = relationship(back_populates="user", uselist=False)
+    api_keys: Mapped[list["ApiKey"]] = relationship(back_populates="user", passive_deletes=True)
+    project_memberships: Mapped[list["ProjectMembership"]] = relationship(
+        back_populates="user", passive_deletes=True, foreign_keys="ProjectMembership.user_id"
+    )
+    webhooks: Mapped[list["Webhook"]] = relationship(back_populates="user", passive_deletes=True)
 
 
 class Project(Base):
@@ -67,12 +73,13 @@ class Project(Base):
     )
     name: Mapped[str] = mapped_column(Text, nullable=False)
     owner: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Nullable: added after the app already had projects with no concept of a user (see User
-    # above). Existing pre-auth rows keep user_id=NULL and become invisible once every router
-    # filters on ownership -- there's no real owner to backfill them to. Every project created
-    # from here on always sets this at creation time.
-    user_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=True
+    # Was nullable pre-Clerk (pre-auth projects had no concept of a user). Backfilled to NOT NULL
+    # once Clerk auth was fully rolled out -- the cleanup migration deleted the remaining orphaned
+    # pre-auth rows (see add_project_memberships.../projects_user_id_not_null migration for the
+    # exact count) rather than leaving a permanent nullable escape hatch. Every project has a real
+    # owning user from here on.
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
@@ -89,11 +96,13 @@ class Project(Base):
     # deployment/pain points instead of (or alongside) the usual greenfield checklist.
     has_existing_system: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
 
-    user: Mapped["User | None"] = relationship(back_populates="projects")
+    user: Mapped["User"] = relationship(back_populates="projects")
     conversations: Mapped[list["Conversation"]] = relationship(back_populates="project", passive_deletes=True)
     requirements: Mapped[list["Requirement"]] = relationship(back_populates="project", passive_deletes=True)
     architectures: Mapped[list["Architecture"]] = relationship(back_populates="project", passive_deletes=True)
     share_links: Mapped[list["ShareLink"]] = relationship(back_populates="project", passive_deletes=True)
+    memberships: Mapped[list["ProjectMembership"]] = relationship(back_populates="project", passive_deletes=True)
+    comments: Mapped[list["ProjectComment"]] = relationship(back_populates="project", passive_deletes=True)
 
 
 class ShareLink(Base):
@@ -398,3 +407,203 @@ class AppSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=text("clock_timestamp()")
     )
+
+
+class AuditLog(Base):
+    """Records who did what, for admin actions and any future destructive/sensitive action (e.g.
+    "user.promoted_to_admin", "project.deleted", "app_setting.updated"). `action` is a free-form,
+    namespaced string rather than an enum since this list will grow indefinitely as new sensitive
+    actions are added -- same reasoning as `plan`/`role` elsewhere in this file. `target_type` +
+    `target_id` are plain text, not a typed FK: a single log spans many different target entity
+    types (user, project, app_setting, ...) with different PK types, so one untyped pair avoids a
+    maze of mutually-exclusive nullable FK columns, one per possible target kind. Pure audit trail
+    -- no relationships back to User/Project, same precedent as LlmUsageLog."""
+
+    __tablename__ = "audit_logs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    # SET NULL (not CASCADE): keep the log entry even once the actor is later deleted -- "someone
+    # did this" should still be visible, distinct from a log row that never existed.
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    target_type: Mapped[str] = mapped_column(Text, nullable=False)
+    target_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Mapped to the DB column "metadata" under a different Python attribute name -- `metadata` is
+    # reserved on every SQLAlchemy declarative class (it's `Base.metadata`, the schema registry).
+    extra_data: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class UsageCounter(Base):
+    """Lifetime usage against the free-tier caps, one row per user -- for the future billing-
+    enforcement pass (not yet read/written anywhere; this pass only lands the schema). `plan` is
+    plain text ("free" today, "paid" later) rather than an enum since plans may grow, same
+    reasoning as AuditLog.action."""
+
+    __tablename__ = "usage_counters"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    brainstorm_sessions_used: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    architecture_generations_used: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    growth_trigger_updates_used: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    plan: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'free'"))
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+    user: Mapped["User"] = relationship(back_populates="usage_counter")
+
+
+class ApiKey(Base):
+    """Future programmatic/API-key access (schema only in this pass -- no issuing/auth endpoint
+    yet). Only `key_hash` is stored, never the raw key, same principle as password hashing.
+    `key_prefix` is the first several characters of the real key, shown in the UI so a user can
+    tell keys apart without re-exposing the secret -- same display convention as a GitHub PAT's
+    `ghp_...` prefix."""
+
+    __tablename__ = "api_keys"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    key_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    key_prefix: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+    user: Mapped["User"] = relationship(back_populates="api_keys")
+
+
+class ProjectMembership(Base):
+    """Real multi-user collaboration on a project, beyond the existing read-only, unauthenticated
+    ShareLink -- ties an actual User account to a project with a role. `role` is plain text
+    ("owner"/"editor"/"viewer") rather than an enum since roles may grow, same reasoning as
+    AuditLog.action. Unique on (project_id, user_id): a user can't have two memberships on the
+    same project."""
+
+    __tablename__ = "project_memberships"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    # Nullable / SET NULL: keep the membership row even if whoever sent the invite is later
+    # deleted -- same "preserve the record, drop the dangling identity" precedent as
+    # AuditLog.actor_user_id. Deliberately no relationship() for this column (unlike user_id
+    # above) -- it's secondary metadata, not a primary traversal path.
+    invited_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+    project: Mapped["Project"] = relationship(back_populates="memberships")
+    user: Mapped["User"] = relationship(back_populates="project_memberships", foreign_keys=[user_id])
+
+
+class ProjectComment(Base):
+    """Comments on a project, for the collaboration feature (see ProjectMembership above).
+    `author_user_id` is nullable / SET NULL so a comment survives its author's account being
+    deleted later -- same precedent as AuditLog.actor_user_id and ProjectMembership.
+    invited_by_user_id; deliberately no relationship() for the same "secondary reference, not a
+    primary traversal path" reasoning."""
+
+    __tablename__ = "project_comments"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    author_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
+    )
+    # NULL unless edited after creation.
+    updated_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+    project: Mapped["Project"] = relationship(back_populates="comments")
+
+
+class Webhook(Base):
+    """Outbound webhook subscription (schema only in this pass -- no delivery worker yet).
+    `event_types` is a JSON array of subscribed event name strings (e.g.
+    ["architecture.generated", "project.created"]) rather than a join table, since the set of
+    event types is small and app-defined, not a user-managed many-to-many. `secret` HMAC-signs
+    outbound payloads so the receiver can verify authenticity."""
+
+    __tablename__ = "webhooks"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    secret: Mapped[str] = mapped_column(Text, nullable=False)
+    event_types: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
+    )
+    # NULL while active; set to disable without deleting the subscription (and its delivery
+    # history) outright -- same "revoke, don't delete" precedent as ShareLink.revoked_at.
+    disabled_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+    user: Mapped["User"] = relationship(back_populates="webhooks")
+    deliveries: Mapped[list["WebhookDelivery"]] = relationship(back_populates="webhook", passive_deletes=True)
+
+
+class WebhookDelivery(Base):
+    """One row per outbound delivery attempt for a Webhook -- the request/response record used to
+    show delivery history and debug failures. Same "one row per attempt, not one row per logical
+    event" granularity precedent as LlmUsageLog (one row per model attempt, not per call)."""
+
+    __tablename__ = "webhook_deliveries"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    webhook_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("webhooks.id", ondelete="CASCADE"), nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    response_body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    delivered_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+    webhook: Mapped["Webhook"] = relationship(back_populates="deliveries")
