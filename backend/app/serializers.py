@@ -1,4 +1,13 @@
-from app.models import Architecture, Conversation, Project, Requirement, User
+from app.models import (
+    Architecture,
+    Conversation,
+    Project,
+    ProjectComment,
+    ProjectMembership,
+    Requirement,
+    ShareLink,
+    User,
+)
 
 
 def serialize_user(u: User) -> dict:
@@ -67,4 +76,36 @@ def serialize_architecture(a: Architecture) -> dict:
         "securityFindings": a.security_findings,
         "migrationRoadmap": a.migration_roadmap,
         "createdAt": a.created_at,
+    }
+
+
+def serialize_share_link(s: ShareLink) -> dict:
+    return {
+        "id": str(s.id),
+        "projectId": str(s.project_id),
+        "token": s.token,
+        "createdAt": s.created_at,
+        "revokedAt": s.revoked_at,
+    }
+
+
+def serialize_project_membership(m: ProjectMembership) -> dict:
+    return {
+        "id": str(m.id),
+        "projectId": str(m.project_id),
+        "userId": str(m.user_id),
+        "role": m.role,
+        "invitedByUserId": str(m.invited_by_user_id) if m.invited_by_user_id else None,
+        "createdAt": m.created_at,
+    }
+
+
+def serialize_project_comment(c: ProjectComment) -> dict:
+    return {
+        "id": str(c.id),
+        "projectId": str(c.project_id),
+        "authorUserId": str(c.author_user_id) if c.author_user_id else None,
+        "body": c.body,
+        "createdAt": c.created_at,
+        "updatedAt": c.updated_at,
     }

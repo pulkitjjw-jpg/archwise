@@ -11,6 +11,7 @@ from app.dependencies import require_admin
 from app.models import User
 from app.routers.settings import _get_or_create_settings
 from app.schemas import UpdateAppSettingsRequest, UpdateUserAdminRequest
+from app.services.audit import write_audit_log
 
 logger = logging.getLogger("app.routers.admin")
 
@@ -277,7 +278,16 @@ async def update_settings(
     payload: UpdateAppSettingsRequest, db: AsyncSession = Depends(get_db), _admin: User = Depends(require_admin)
 ) -> dict:
     setting = await _get_or_create_settings(db)
+    old_app_name = setting.app_name
     setting.app_name = payload.appName
+    await write_audit_log(
+        db,
+        actor_user_id=_admin.id,
+        action="app_setting.updated",
+        target_type="app_setting",
+        target_id=str(setting.id),
+        extra_data={"old": {"appName": old_app_name}, "new": {"appName": setting.app_name}},
+    )
     await db.commit()
     return {"appName": setting.app_name}
 
@@ -332,6 +342,15 @@ async def update_user_admin_status(
     target = await db.get(User, user_id)
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
+    old_is_admin = target.is_admin
     target.is_admin = payload.isAdmin
+    await write_audit_log(
+        db,
+        actor_user_id=admin_user.id,
+        action="user.promoted_to_admin" if payload.isAdmin else "user.demoted_from_admin",
+        target_type="user",
+        target_id=str(target.id),
+        extra_data={"old": {"isAdmin": old_is_admin}, "new": {"isAdmin": target.is_admin}},
+    )
     await db.commit()
     return {"id": str(target.id), "email": target.email, "isAdmin": target.is_admin}

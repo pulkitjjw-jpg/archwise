@@ -175,3 +175,12 @@ class UpdateAppSettingsRequest(BaseModel):
 
 class UpdateUserAdminRequest(BaseModel):
     isAdmin: bool
+
+
+class DeleteAccountRequest(BaseModel):
+    # Confirmation step for a destructive, irreversible action -- no existing precedent in this
+    # codebase for "are you sure" on a destructive action, so this is a deliberately cheap one:
+    # require the caller to type their own email back, checked against current_user.email
+    # server-side (see DELETE /auth/me). Prevents a stray/scripted DELETE from silently nuking an
+    # account -- a plain boolean confirm=true flag is too easy to send by accident/automation.
+    confirmEmail: str

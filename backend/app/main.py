@@ -90,6 +90,7 @@ FIELD_LABELS: dict[str, str] = {
     "y": "y position",
     "appName": "app name",
     "isAdmin": "admin setting",
+    "confirmEmail": "confirmation email",
     "min": "minimum cost",
     "max": "maximum cost",
     "assumptions": "cost assumptions",
