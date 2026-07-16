@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db import get_db
-from app.models import ApiKey, Project, User
+from app.models import ApiKey, Project, ProjectMembership, User
 from app.services.clerk_sync import get_or_create_user_by_clerk_id
 
 
@@ -131,3 +131,60 @@ async def get_owned_project_by_api_key(
     GET /public/projects/{project_id} so it can share get_owned_project's exact 404-for-both
     not-found/not-owned semantics without depending on get_current_user."""
     return await _load_owned_project(project_id, db, current_user.id)
+
+
+async def _load_project_with_role(project_id: uuid.UUID, db: AsyncSession, user_id: uuid.UUID) -> tuple[Project, str]:
+    """Resolves a project this user can at least VIEW -- either they're the actual owner
+    (Project.user_id), or they hold a ProjectMembership row on it. Returns (project, role), where
+    role is "owner" for the real owner or whatever the membership row's `role` column says
+    ("editor"/"viewer") otherwise. Deliberately a SEPARATE check from _load_owned_project's strict
+    ownership -- collaboration (ProjectMembership) means "can access" is no longer the same
+    question as "is the owner", per the schema's own docstring in app/models.py.
+
+    Not-found and not-a-member/not-the-owner are indistinguishable (both 404), same "never reveal
+    a project id exists to someone with no access to it" precedent as _load_owned_project."""
+    project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.user_id == user_id:
+        return project, "owner"
+    membership = (
+        await db.execute(
+            select(ProjectMembership).where(
+                ProjectMembership.project_id == project_id, ProjectMembership.user_id == user_id
+            )
+        )
+    ).scalar_one_or_none()
+    if not membership:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return project, membership.role
+
+
+async def get_accessible_project(
+    project_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Project:
+    """Broad "can view/act on this project" check: the owner OR any member, regardless of role
+    (viewer or editor). For routes that only ever READ project-scoped data (conversations,
+    requirements, architectures, comments) or that any collaborator should be able to do
+    regardless of role (listing members, posting/reading comments) -- see get_editable_project
+    below for the narrower "can also create/mutate content" check. Routes using this must not
+    assume the caller is the owner -- compare against `project.user_id` explicitly wherever that
+    distinction still matters (e.g. membership/comment moderation)."""
+    project, _role = await _load_project_with_role(project_id, db, current_user.id)
+    return project
+
+
+async def get_editable_project(
+    project_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Project:
+    """Narrower than get_accessible_project: owner OR editor, NOT viewer. For routes that create
+    or mutate brainstorm/requirements/architecture content -- a "viewer" role is deliberately
+    read-only (see ProjectMembership's role scoping decision, app/routers/collaboration.py)."""
+    project, role = await _load_project_with_role(project_id, db, current_user.id)
+    if role == "viewer":
+        raise HTTPException(status_code=403, detail="You have view-only access to this project.")
+    return project

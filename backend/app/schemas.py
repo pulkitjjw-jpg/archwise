@@ -205,3 +205,12 @@ class WebhookCreateRequest(BaseModel):
     # At least one -- a webhook subscribed to nothing would never fire, which is almost certainly
     # a mistake worth rejecting up front rather than silently accepting a useless registration.
     eventTypes: list[str] = Field(min_length=1)
+
+
+class MemberInviteRequest(BaseModel):
+    email: str = Field(min_length=1, max_length=320)
+    role: str  # "editor" | "viewer" -- "owner" is reserved for Project.user_id, never invitable
+
+
+class CommentCreateRequest(BaseModel):
+    body: str = Field(min_length=1, max_length=10000)

@@ -18,6 +18,7 @@ from app.routers import (
     admin,
     architectures,
     auth,
+    collaboration,
     conversations,
     export,
     health,
@@ -303,6 +304,7 @@ app.include_router(requirements.router, prefix="/api/v1")
 app.include_router(architectures.router, prefix="/api/v1")
 app.include_router(export.router, prefix="/api/v1")
 app.include_router(share.router, prefix="/api/v1")
+app.include_router(collaboration.router, prefix="/api/v1")
 app.include_router(admin.router, prefix="/api/v1")
 # API-key-authenticated, not Clerk-session-authenticated -- see public_api.py's own module
 # docstring and require_internal_auth's docstring above for why this still sits behind the same

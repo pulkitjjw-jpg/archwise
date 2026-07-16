@@ -28,6 +28,12 @@ def serialize_project(p: Project) -> dict:
         "id": str(p.id),
         "name": p.name,
         "owner": p.owner,
+        # The actual owning User's internal id (Project.user_id) -- distinct from `owner` above
+        # (a free-text display field). Needed now that a project can have other users with
+        # (non-owner) ProjectMembership access to it: the frontend compares this against the
+        # current user's own id (GET /auth/me) to decide whether to show owner-only controls
+        # (invite/revoke members, etc.) -- see WorkspaceTabs.tsx's Team panel.
+        "userId": str(p.user_id),
         "createdAt": p.created_at,
         "currentVersion": p.current_version,
         "knowledgeLevel": p.knowledge_level,

@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db import get_db
-from app.dependencies import get_current_user, get_owned_project
+from app.dependencies import get_accessible_project, get_current_user
 from app.models import Conversation, Project, User
 from app.rate_limit import limiter
 from app.schemas import ProjectCreateRequest
@@ -176,5 +176,8 @@ async def create_project(
 
 
 @router.get("/projects/{project_id}")
-async def get_project(project: Project = Depends(get_owned_project)) -> dict:
+async def get_project(project: Project = Depends(get_accessible_project)) -> dict:
+    # Broad access (owner OR any member) -- a collaborator's very first request when opening a
+    # project is this one (see src/app/projects/[id]/page.tsx), so it has to allow the same
+    # audience as everything else on the page.
     return {"project": serialize_project(project)}

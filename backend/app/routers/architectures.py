@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.constants import DEFAULT_INDUSTRY_CONTEXT
 from app.db import get_db
-from app.dependencies import get_owned_project
+from app.dependencies import get_accessible_project, get_editable_project
 from app.models import Architecture, Project, Requirement
 from app.rate_limit import limiter
 from app.schemas import (
@@ -70,7 +70,7 @@ def _next_version(latest_arch: Architecture | None) -> str:
 
 @router.get("/projects/{project_id}/architectures")
 async def list_architectures(
-    project: Project = Depends(get_owned_project), all: str | None = None, db: AsyncSession = Depends(get_db)
+    project: Project = Depends(get_accessible_project), all: str | None = None, db: AsyncSession = Depends(get_db)
 ) -> dict:
     if all == "true":
         result = await db.execute(
@@ -222,7 +222,7 @@ async def get_flow_story(
     request: Request,
     architecture_id: uuid.UUID,
     provider: str,
-    project: Project = Depends(get_owned_project),
+    project: Project = Depends(get_accessible_project),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     if provider not in VALID_FLOW_STORY_PROVIDERS:
@@ -252,7 +252,7 @@ async def get_user_journey(
     request: Request,
     architecture_id: uuid.UUID,
     provider: str,
-    project: Project = Depends(get_owned_project),
+    project: Project = Depends(get_accessible_project),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """The "User Journey Architecture" view -- restructures the (already-generated-or-generated-
@@ -305,7 +305,7 @@ async def get_migration_roadmap(
     request: Request,
     architecture_id: uuid.UUID,
     provider: str,
-    project: Project = Depends(get_owned_project),
+    project: Project = Depends(get_accessible_project),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Migration Roadmap (Workstream T5) -- a phased plan from the user's stated existing system to
@@ -373,7 +373,7 @@ async def get_migration_roadmap(
 async def update_layout_override(
     architecture_id: uuid.UUID,
     payload: LayoutOverrideRequest,
-    project: Project = Depends(get_owned_project),
+    project: Project = Depends(get_editable_project),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Persists one node's manually-dragged position (Workstream Q) -- purely cosmetic, so this
@@ -404,7 +404,7 @@ async def propose_architecture_changes(
     request: Request,
     architecture_id: uuid.UUID,
     payload: ProposeChangesRequest,
-    project: Project = Depends(get_owned_project),
+    project: Project = Depends(get_editable_project),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Preview-only: identifies which components a freeform chat-described enhancement would add
@@ -468,7 +468,7 @@ async def propose_architecture_changes(
 @router.post("/projects/{project_id}/architectures/whatif-suggestions")
 @limiter.limit("30/hour")
 async def get_whatif_suggestions(
-    request: Request, project: Project = Depends(get_owned_project), db: AsyncSession = Depends(get_db)
+    request: Request, project: Project = Depends(get_editable_project), db: AsyncSession = Depends(get_db)
 ) -> dict:
     """What-If Simulator (Workstream V) -- AI-suggested HYPOTHETICAL variations per field, fetched
     fresh whenever the panel opens. Deliberately reads the project's CURRENT saved requirements
@@ -509,7 +509,7 @@ async def get_whatif_suggestions(
 async def get_component_suggestions(
     request: Request,
     payload: ComponentSuggestionsRequest,
-    project: Project = Depends(get_owned_project),
+    project: Project = Depends(get_editable_project),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Manual Editor Controls (Workstream W) -- AI-suggested component types/names worth adding
@@ -547,7 +547,7 @@ async def get_component_suggestions(
 async def preview_whatif_architecture(
     request: Request,
     payload: WhatIfPreviewRequest,
-    project: Project = Depends(get_owned_project),
+    project: Project = Depends(get_editable_project),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """What-If Simulator (Workstream T1, extended): runs the FULL real-generation pipeline
@@ -593,7 +593,7 @@ async def refine_proposal(
     request: Request,
     architecture_id: uuid.UUID,
     payload: RefineProposalRequest,
-    project: Project = Depends(get_owned_project),
+    project: Project = Depends(get_editable_project),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Inline discuss/refine for a single pending proposal (Workstream O) -- the user pushes
@@ -658,7 +658,7 @@ async def refine_proposal(
 @router.post("/projects/{project_id}/architectures", status_code=202)
 @limiter.limit("10/hour")
 async def generate_architecture(
-    request: Request, project: Project = Depends(get_owned_project), db: AsyncSession = Depends(get_db)
+    request: Request, project: Project = Depends(get_editable_project), db: AsyncSession = Depends(get_db)
 ) -> dict:
     """Enqueues a background architecture-generation job and returns immediately -- the actual
     rules-engine + knowledge-RAG + LLM pipeline (which can take up to ~35s under load, see
@@ -736,7 +736,7 @@ async def generate_architecture(
 
 
 @router.get("/projects/{project_id}/architectures/jobs/{job_id}")
-async def get_architecture_job(job_id: str, project: Project = Depends(get_owned_project)) -> dict:
+async def get_architecture_job(job_id: str, project: Project = Depends(get_editable_project)) -> dict:
     """Polling endpoint for the job enqueued by POST /projects/{project_id}/architectures above.
     Meant to be polled every couple of seconds by the frontend until status is "complete" or
     "failed" -- see ArchitectureWorkspace.tsx's handleGenerate. A job that's unknown to Redis
@@ -765,7 +765,7 @@ async def get_architecture_job(job_id: str, project: Project = Depends(get_owned
 @router.post("/projects/{project_id}/architectures/manual", status_code=201)
 async def save_manual_architecture(
     payload: ManualArchitectureRequest,
-    project: Project = Depends(get_owned_project),
+    project: Project = Depends(get_editable_project),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     # 1. Fetch latest requirements

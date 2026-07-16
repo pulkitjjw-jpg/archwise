@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db import get_db
-from app.dependencies import get_owned_project
+from app.dependencies import get_accessible_project, get_editable_project
 from app.models import Conversation, Project
 from app.rate_limit import limiter
 from app.schemas import ConversationCreateRequest
@@ -27,7 +27,10 @@ async def _load_history(db: AsyncSession, project_id: uuid.UUID) -> list[Convers
 
 
 @router.get("/projects/{project_id}/conversations")
-async def list_conversations(project: Project = Depends(get_owned_project), db: AsyncSession = Depends(get_db)) -> dict:
+async def list_conversations(
+    project: Project = Depends(get_accessible_project), db: AsyncSession = Depends(get_db)
+) -> dict:
+    # Broad access -- any collaborator (viewer or editor) can read the brainstorm transcript.
     history = await _load_history(db, project.id)
     return {"conversations": [serialize_conversation(c) for c in history]}
 
@@ -37,9 +40,11 @@ async def list_conversations(project: Project = Depends(get_owned_project), db: 
 async def create_conversation_turn(
     request: Request,
     payload: ConversationCreateRequest,
-    project: Project = Depends(get_owned_project),
+    project: Project = Depends(get_editable_project),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
+    # Editor-or-owner only -- continuing the brainstorm creates new conversation content, which a
+    # read-only "viewer" role shouldn't be able to do (see get_editable_project's docstring).
     if not payload.role or not payload.message or not payload.stage:
         raise HTTPException(status_code=400, detail="We couldn't send your message. Please try again.")
 
@@ -51,7 +56,7 @@ async def create_conversation_turn(
     # 2. Load conversation history
     history = await _load_history(db, project.id)
 
-    # 3. Project context (already loaded and ownership-checked by get_owned_project)
+    # 3. Project context (already loaded and access-checked by get_editable_project)
     project_name = project.name or "Cloud Project"
     known_knowledge_level = project.knowledge_level or "unknown"
     has_existing_system = bool(project.has_existing_system)

@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.constants import DEFAULT_INDUSTRY_CONTEXT
 from app.db import get_db
-from app.dependencies import get_owned_project
+from app.dependencies import get_accessible_project, get_editable_project
 from app.models import Conversation, Project, Requirement
 from app.rate_limit import limiter
 from app.schemas import RequirementsPutRequest
@@ -38,7 +38,9 @@ async def _latest_requirement(db: AsyncSession, project_id: uuid.UUID) -> Requir
 
 
 @router.get("/projects/{project_id}/requirements")
-async def get_requirements(project: Project = Depends(get_owned_project), db: AsyncSession = Depends(get_db)) -> dict:
+async def get_requirements(
+    project: Project = Depends(get_accessible_project), db: AsyncSession = Depends(get_db)
+) -> dict:
     record = await _latest_requirement(db, project.id)
 
     # No requirements extracted yet is an expected, common state (e.g. brainstorm still in
@@ -53,7 +55,7 @@ async def get_requirements(project: Project = Depends(get_owned_project), db: As
 @router.post("/projects/{project_id}/requirements", status_code=201)
 @limiter.limit("30/hour")
 async def extract_requirements(
-    request: Request, project: Project = Depends(get_owned_project), db: AsyncSession = Depends(get_db)
+    request: Request, project: Project = Depends(get_editable_project), db: AsyncSession = Depends(get_db)
 ) -> dict:
     # Load conversation history
     history = (
@@ -98,7 +100,7 @@ async def extract_requirements(
 async def get_requirement_suggestions(
     request: Request,
     payload: RequirementsPutRequest,
-    project: Project = Depends(get_owned_project),
+    project: Project = Depends(get_accessible_project),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     # Stateless and not persisted -- recomputed on demand from whatever the client currently has
@@ -140,7 +142,7 @@ async def get_requirement_suggestions(
 @router.post("/projects/{project_id}/requirements/summary")
 @limiter.limit("30/hour")
 async def get_conversation_summary(
-    request: Request, project: Project = Depends(get_owned_project), db: AsyncSession = Depends(get_db)
+    request: Request, project: Project = Depends(get_accessible_project), db: AsyncSession = Depends(get_db)
 ) -> dict:
     latest = await _latest_requirement(db, project.id)
     if not latest:
@@ -194,7 +196,7 @@ async def get_conversation_summary(
 @router.put("/projects/{project_id}/requirements")
 async def save_requirements(
     payload: RequirementsPutRequest,
-    project: Project = Depends(get_owned_project),
+    project: Project = Depends(get_editable_project),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     if not payload.functional or not payload.nonFunctional:

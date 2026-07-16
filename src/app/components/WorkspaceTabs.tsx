@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import dynamic from "next/dynamic";
 import RequirementsPanel from "./RequirementsPanel";
 import ArchitectureWorkspaceErrorBoundary from "./ArchitectureWorkspaceErrorBoundary";
+import CollaborationPanel from "./CollaborationPanel";
 
 // ArchitectureWorkspace is 5000+ lines (SVG diagram rendering, manual editor, multi-provider
 // cloud mapping, terraform export) but the "Requirements" tab is always what's active first --
@@ -36,7 +37,7 @@ export default function WorkspaceTabs({
   focusMode,
   onToggleFocusMode,
 }: WorkspaceTabsProps) {
-  const [activeTab, setActiveTab] = useState<"requirements" | "hld">("requirements");
+  const [activeTab, setActiveTab] = useState<"requirements" | "hld" | "team">("requirements");
   const [requirements, setRequirements] = useState<any>(null);
   const [focusField, setFocusField] = useState<string | null>(null);
 
@@ -94,11 +95,21 @@ export default function WorkspaceTabs({
         >
           2. Architecture Diagram
         </button>
+        <button
+          onClick={() => setActiveTab("team")}
+          className={`px-4 py-2 text-xs font-bold uppercase tracking-wider rounded-xl transition ${
+            activeTab === "team"
+              ? "bg-ink text-white shadow-sm"
+              : "text-ink-muted hover:bg-line/50"
+          }`}
+        >
+          Team
+        </button>
       </div>
 
       {/* Tab Panels */}
       <div className="flex-1 overflow-hidden">
-        {activeTab === "requirements" ? (
+        {activeTab === "requirements" && (
           <RequirementsPanel
             projectId={projectId}
             isBrainstormComplete={isBrainstormComplete}
@@ -107,7 +118,8 @@ export default function WorkspaceTabs({
             clearFocusField={() => setFocusField(null)}
             onGoToArchitecture={() => setActiveTab("hld")}
           />
-        ) : (
+        )}
+        {activeTab === "hld" && (
           <ArchitectureWorkspaceErrorBoundary>
             <ArchitectureWorkspace
               projectId={projectId}
@@ -119,6 +131,7 @@ export default function WorkspaceTabs({
             />
           </ArchitectureWorkspaceErrorBoundary>
         )}
+        {activeTab === "team" && <CollaborationPanel projectId={projectId} />}
       </div>
     </div>
   );
