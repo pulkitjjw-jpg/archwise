@@ -6,7 +6,10 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@clerk/nextjs": "^7.5.18",
@@ -22,17 +25,27 @@
     "react-zoom-pan-pinch": "^4.0.3"
   },
   "devDependencies": {
+    "@clerk/testing": "^2.2.9",
+    "@playwright/test": "^1.61.1",
     "@tailwindcss/postcss": "4.1.17",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/dagre": "^0.7.54",
     "@types/node": "22.19.15",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
     "eslint": "9.39.4",
     "eslint-config-next": "16.2.6",
+    "jsdom": "^29.1.1",
     "playwright": "^1.61.1",
     "postcss": "8.5.10",
     "tailwindcss": "4.1.17",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "vite-tsconfig-paths": "^6.1.1",
+    "vitest": "^4.1.10"
   },
   "overrides": {
     "postcss": "8.5.10"

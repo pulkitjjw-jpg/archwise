@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { useClerk, useSignIn, useSignUp } from "@clerk/nextjs";
 import AuthShell from "@/app/components/AuthShell";
+import { pollForUpdate } from "@/lib/poll";
 
 type NavigateArgs = { decorateUrl: (path: string) => string };
 
@@ -39,21 +40,11 @@ export default function SsoCallbackPage() {
     signUpRef.current = signUp;
   }, [signUp]);
 
-  const waitForSignInUpdate = async (predicate: (s: typeof signIn) => boolean) => {
-    for (let i = 0; i < 20; i++) {
-      if (predicate(signInRef.current)) return signInRef.current;
-      await new Promise((resolve) => setTimeout(resolve, 150));
-    }
-    return signInRef.current;
-  };
+  const waitForSignInUpdate = (predicate: (s: typeof signIn) => boolean) =>
+    pollForUpdate(() => signInRef.current, predicate);
 
-  const waitForSignUpUpdate = async (predicate: (s: typeof signUp) => boolean) => {
-    for (let i = 0; i < 20; i++) {
-      if (predicate(signUpRef.current)) return signUpRef.current;
-      await new Promise((resolve) => setTimeout(resolve, 150));
-    }
-    return signUpRef.current;
-  };
+  const waitForSignUpUpdate = (predicate: (s: typeof signUp) => boolean) =>
+    pollForUpdate(() => signUpRef.current, predicate);
 
   useEffect(() => {
     if (!clerk.loaded || hasRun.current) return;

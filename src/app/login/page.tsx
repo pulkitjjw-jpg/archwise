@@ -7,13 +7,14 @@ import { useSignIn } from "@clerk/nextjs";
 import AuthShell from "@/app/components/AuthShell";
 import GoogleAuthButton from "@/app/components/GoogleAuthButton";
 import EnterpriseSSOButton from "@/app/components/EnterpriseSSOButton";
+import { pollForUpdate } from "@/lib/poll";
 
 type FieldError = { longMessage?: string; message: string } | null;
 
 // Checks field-specific errors first, then falls back to global -- see signup/page.tsx's
 // identical helper for why this matters (Clerk returns some real rejection reasons, like a
 // breached password, as a field error rather than a global one).
-function extractErrorMessage(
+export function extractErrorMessage(
   errors: { global: { longMessage?: string; message: string }[] | null; fields: object },
   fieldOrder: string[]
 ): string {
@@ -59,14 +60,10 @@ function LoginForm() {
   }, [signIn]);
 
   // Polls the ref (not the closure) for a small number of animation-frame-ish ticks -- give
-  // pending re-renders a chance to land and update the ref before giving up. 3s max.
-  const waitForSignInUpdate = async (predicate: (s: typeof signIn) => boolean) => {
-    for (let i = 0; i < 20; i++) {
-      if (predicate(signInRef.current)) return signInRef.current;
-      await new Promise((resolve) => setTimeout(resolve, 150));
-    }
-    return signInRef.current;
-  };
+  // pending re-renders a chance to land and update the ref before giving up. 3s max (20 x 150ms,
+  // see pollForUpdate's defaults).
+  const waitForSignInUpdate = (predicate: (s: typeof signIn) => boolean) =>
+    pollForUpdate(() => signInRef.current, predicate);
 
   const finalizedRef = useRef(false);
   const finalizeAndGo = () => {

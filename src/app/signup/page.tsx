@@ -13,7 +13,7 @@ type FieldError = { longMessage?: string; message: string } | null;
 // Checks field-specific errors first (e.g. Clerk's "this password has appeared in a data breach"
 // rejection comes back as a password FIELD error, not a global one -- missing this meant real
 // rejection reasons were silently replaced with a generic "Something went wrong" message).
-function extractErrorMessage(
+export function extractErrorMessage(
   errors: { global: { longMessage?: string; message: string }[] | null; fields: object },
   fieldOrder: string[]
 ): string {
