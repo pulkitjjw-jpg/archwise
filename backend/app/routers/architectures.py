@@ -40,6 +40,7 @@ from app.services.llm import (
 )
 from app.services.path_verification import verify_journey_path
 from app.services.security_rules import run_security_rules
+from app.services.usage_limits import check_and_increment
 from app.services.validation import validate_architecture_layout
 
 router = APIRouter()
@@ -683,6 +684,16 @@ async def generate_architecture(
     latest_arch = await _latest_architecture(db, project.id)
     next_version = _next_version(latest_arch)
 
+    # 2b. Free-tier cap check BEFORE the real work (knowledge retrieval + the LLM generation call
+    # below) so a request that would exceed the cap never touches either. Whether this is the
+    # project's first-ever architecture (the free "architecture generation") or a later one on a
+    # project that already has ≥1 architectures row (a "growth-trigger update") is determined by
+    # latest_arch, fetched just above -- these are the same versioned `architectures` row type,
+    # distinguished only by whether one already exists for this project. Not committed here --
+    # rides in the same transaction as this route's own commit below.
+    usage_field = "architecture_generations" if latest_arch is None else "growth_trigger_updates"
+    await check_and_increment(db, project.user_id, usage_field)
+
     # 3b. Knowledge-base RAG (highest-value touchpoint per the rollout plan: monolith-vs-
     # microservices, layering, component-boundary reasoning). Retrieval happens HERE, not inside
     # generate_architecture_bundle, since that module deliberately has no database access -- this
@@ -786,6 +797,19 @@ async def save_manual_architecture(
     reqs_context = {"functional": reqs.functional, "nonFunctional": reqs.non_functional}
     industry_context = reqs.industry_context
 
+    # 1b. Fetch the latest architecture now (moved up from its original spot below, where it was
+    # only used for the diff/version) so it can also answer the free-tier cap question: does this
+    # project already have ≥1 architectures row? A manual save produces the same kind of versioned
+    # `architectures` row the auto-generate path does, so it counts the same way -- first-ever
+    # save on a project is the free "architecture generation", any later save (auto-generated OR
+    # manual) is a "growth-trigger update". Checked BEFORE the real work below (cloud-mapping
+    # resolution, validation) even though this path has no LLM call, for the same "never do the
+    # work for a request that's going to be rejected" reasoning as the auto-generate path. Not
+    # committed here -- rides in the same transaction as this route's own commit below.
+    latest_arch = await _latest_architecture(db, project.id)
+    usage_field = "architecture_generations" if latest_arch is None else "growth_trigger_updates"
+    await check_and_increment(db, project.user_id, usage_field)
+
     connections = [conn.model_dump(by_alias=True) for conn in payload.connections]
 
     # 3. Compile manual components (resolve missing cloud mappings and LLD baselines)
@@ -830,8 +854,7 @@ async def save_manual_architecture(
             status_code=400, detail=f"We couldn't save your changes: {'; '.join(validation['errors'])}"
         )
 
-    # 4b. Fetch previous version to compute diff and calculate next version
-    latest_arch = await _latest_architecture(db, project.id)
+    # 4b. Calculate next version (latest_arch was already fetched above, at cap-check time)
     next_version = _next_version(latest_arch)
 
     # 5. Compute diff against previous architecture version

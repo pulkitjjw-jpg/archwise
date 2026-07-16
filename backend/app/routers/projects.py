@@ -12,6 +12,7 @@ from app.rate_limit import limiter
 from app.schemas import ProjectCreateRequest
 from app.serializers import serialize_project
 from app.services.llm import get_next_brainstorm_turn
+from app.services.usage_limits import check_and_increment
 
 logger = logging.getLogger("app.routers.projects")
 
@@ -100,6 +101,14 @@ async def create_project(
         raise HTTPException(
             status_code=400, detail="Please give your project a name and describe your idea before continuing."
         )
+
+    # Free-tier cap check BEFORE any real work (no project row, no LLM call) so a request that
+    # would exceed the cap never touches either. A new project is what actually starts a new
+    # brainstorm session in this app's data model -- conversations.py's POST endpoint only ever
+    # continues an EXISTING project's ongoing back-and-forth, it never starts a new one. Not
+    # committed here -- this call's own increment rides in the same transaction as the rest of
+    # this route's work, committed together below.
+    await check_and_increment(db, current_user.id, "brainstorm_sessions")
 
     project = Project(
         name=payload.name,
