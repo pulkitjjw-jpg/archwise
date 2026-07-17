@@ -295,9 +295,26 @@ resource "aws_route_table_association" "public_1" {
   subnet_id      = aws_subnet.public_1.id
   route_table_id = aws_route_table.public.id
 }
+
+# Rationale: Declared unconditionally (not only when a relational database is present) so any
+# component that needs subnet placement across the private subnets -- RDS, ElastiCache, etc. --
+# can reference one always-present subnet group instead of every branch declaring its own.
+resource "aws_db_subnet_group" "db_subnets" {
+  name       = "${var.project_name}-db-subnet-group"
+  subnet_ids = [aws_subnet.private_db_1.id, aws_subnet.private_app_1.id] # Multi-AZ Subnets
+}
 """
 
         main_tf = f"""# Main Provider Configuration for {project_name}
+
+terraform {{
+  required_providers {{
+    random = {{
+      source  = "hashicorp/random"
+      version = "~> 3.6"
+    }}
+  }}
+}}
 
 provider "aws" {{
   region = var.aws_region
@@ -308,6 +325,7 @@ provider "aws" {{
         database_tf = "# AWS Database & Caching Resources\n\n"
         storage_tf = "# AWS Object Storage Resources\n\n"
         outputs_tf = f"# Terraform Outputs for {project_name}\n\n"
+        has_alb = False  # tracks whether an ALB was provisioned so app_sg's ingress rule below can be tightened
 
         for c in components:
             lld = _get_lld(c, "aws")
@@ -372,6 +390,8 @@ provider "aws" {{
 """
             elif c.get("type") == "compute":
                 has_lambda = "Lambda" in svc
+                is_worker = c_id == "worker"  # background workers never get public ingress (matches
+                # the k8s_manifest_generator.py convention: is_worker components get no Service/ingress)
 
                 if has_lambda:
                     compute_tf += _build_comments(lld, ["memory", "timeout", "concurrency"])
@@ -395,6 +415,49 @@ provider "aws" {{
     Name        = "${{var.project_name}}-{c_id}"
     Environment = var.environment
   }}
+}}
+
+"""
+                    if not is_worker:
+                        # "AWS Lambda + API Gateway" -- wire an HTTP API in front of the function so it's
+                        # actually reachable; a bare Lambda function has no public invocation path at all.
+                        compute_tf += f"""resource "aws_apigatewayv2_api" "{c_id}_api" {{
+  name          = "${{var.project_name}}-{c_id}-api"
+  protocol_type = "HTTP"
+}}
+
+resource "aws_apigatewayv2_integration" "{c_id}_integration" {{
+  api_id                 = aws_apigatewayv2_api.{c_id}_api.id
+  integration_type       = "AWS_PROXY"
+  integration_uri        = aws_lambda_function.{c_id}.invoke_arn
+  integration_method     = "POST"
+  payload_format_version = "2.0"
+}}
+
+resource "aws_apigatewayv2_route" "{c_id}_route" {{
+  api_id    = aws_apigatewayv2_api.{c_id}_api.id
+  route_key = "$default"
+  target    = "integrations/${{aws_apigatewayv2_integration.{c_id}_integration.id}}"
+}}
+
+resource "aws_apigatewayv2_stage" "{c_id}_stage" {{
+  api_id      = aws_apigatewayv2_api.{c_id}_api.id
+  name        = "$default"
+  auto_deploy = true
+}}
+
+resource "aws_lambda_permission" "{c_id}_apigw" {{
+  statement_id  = "AllowAPIGatewayInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.{c_id}.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${{aws_apigatewayv2_api.{c_id}_api.execution_arn}}/*/*"
+}}
+
+"""
+                        outputs_tf += f"""output "{c_id}_api_endpoint" {{
+  value       = aws_apigatewayv2_stage.{c_id}_stage.invoke_url
+  description = "Public invoke URL for the {c_id} HTTP API (API Gateway -> Lambda)."
 }}
 
 """
@@ -424,7 +487,99 @@ resource "aws_ecs_task_definition" "{c_id}_task" {{
   }}])
 }}
 
-resource "aws_ecs_service" "{c_id}_service" {{
+"""
+                    lb_block = ""
+                    depends_on_block = ""
+                    if not is_worker:
+                        # "Amazon ECS Fargate + ALB" -- provision the ALB and register the service with its
+                        # target group; the app_sg ingress rule below is tightened to only trust the ALB.
+                        has_alb = True
+                        compute_tf += f"""resource "aws_security_group" "alb_sg" {{
+  name        = "${{var.project_name}}-${{var.environment}}-alb-sg"
+  description = "Allows inbound HTTP/HTTPS traffic to the ALB from the internet"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {{
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }}
+
+  ingress {{
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }}
+
+  egress {{
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }}
+}}
+
+resource "aws_lb" "app" {{
+  name               = "${{var.project_name}}-{c_id}-alb"
+  internal           = false
+  load_balancer_type = "application"
+  subnets            = [aws_subnet.public_1.id]
+  security_groups    = [aws_security_group.alb_sg.id]
+
+  tags = {{
+    Name        = "${{var.project_name}}-{c_id}-alb"
+    Environment = var.environment
+  }}
+}}
+
+resource "aws_lb_target_group" "app" {{
+  name        = "${{var.project_name}}-{c_id}-tg"
+  port        = 80
+  protocol    = "HTTP"
+  vpc_id      = aws_vpc.main.id
+  target_type = "ip"
+
+  health_check {{
+    path                = "/"
+    healthy_threshold   = 2
+    unhealthy_threshold = 5
+    interval            = 30
+    timeout             = 5
+  }}
+}}
+
+resource "aws_lb_listener" "app" {{
+  load_balancer_arn = aws_lb.app.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {{
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.app.arn
+  }}
+}}
+
+"""
+                        outputs_tf += """output "alb_dns_name" {
+  value       = aws_lb.app.dns_name
+  description = "Public DNS name of the Application Load Balancer fronting the compute service."
+}
+
+"""
+                        lb_block = f"""
+  load_balancer {{
+    target_group_arn = aws_lb_target_group.app.arn
+    container_name   = "{c_id}-app"
+    container_port   = 80
+  }}
+"""
+                        depends_on_block = """
+  depends_on = [aws_lb_listener.app]
+"""
+
+                    compute_tf += f"""resource "aws_ecs_service" "{c_id}_service" {{
   name            = "${{var.project_name}}-{c_id}-service"
   cluster         = aws_ecs_cluster.{c_id}_cluster.id
   task_definition = aws_ecs_task_definition.{c_id}_task.arn
@@ -435,7 +590,7 @@ resource "aws_ecs_service" "{c_id}_service" {{
     subnets         = [aws_subnet.private_app_1.id]
     security_groups = [aws_security_group.app_sg.id]
   }}
-}}
+{lb_block}{depends_on_block}}}
 
 """
             elif c.get("type") == "database":
@@ -447,9 +602,10 @@ resource "aws_ecs_service" "{c_id}_service" {{
                     storage_size = _parse_int(config.get("storageSize"), "20")
                     multi_az = "true" if config.get("multiAZ") == "true" else "false"
                     backup_retention = _parse_int(config.get("backupRetention"), "7")
-                    database_tf += f"""resource "aws_db_subnet_group" "db_subnets" {{
-  name       = "${{var.project_name}}-db-subnet-group"
-  subnet_ids = [aws_subnet.private_db_1.id, aws_subnet.private_app_1.id] # Multi-AZ Subnets
+                    database_tf += f"""resource "random_password" "db_password" {{
+  length           = 24
+  special          = true
+  override_special = "!#$%&*()-_=+[]{{}}<>:?"
 }}
 
 resource "aws_db_instance" "postgres" {{
@@ -464,13 +620,29 @@ resource "aws_db_instance" "postgres" {{
   backup_retention_period = {backup_retention}
   skip_final_snapshot    = true
   username               = "dbadmin"
-  password               = "ManagedSecretPassword123!"
+  password               = random_password.db_password.result
+}}
+
+# Rationale: the generated password never lands in plaintext state review/CI logs beyond the
+# state file itself -- Secrets Manager is the actual runtime-fetch path application code should use.
+resource "aws_secretsmanager_secret" "db_password" {{
+  name = "${{var.project_name}}-${{var.environment}}-db-password"
+}}
+
+resource "aws_secretsmanager_secret_version" "db_password" {{
+  secret_id     = aws_secretsmanager_secret.db_password.id
+  secret_string = random_password.db_password.result
 }}
 
 """
                     outputs_tf += """output "db_endpoint" {
   value       = aws_db_instance.postgres.endpoint
   description = "The database endpoint URL."
+}
+
+output "db_password_secret_arn" {
+  value       = aws_secretsmanager_secret.db_password.arn
+  description = "Secrets Manager ARN holding the generated DB password -- fetch it at runtime via IAM, never hardcode it."
 }
 
 """
@@ -569,28 +741,42 @@ resource "aws_s3_bucket_versioning" "blobs" {{
 """
 
         # Add Security groups and IAM placeholders in compute.tf
-        compute_tf += """# Security Groups and IAM Roles for Compute Nodes
-
-resource "aws_security_group" "app_sg" {
-  name        = "${var.project_name}-${var.environment}-app-sg"
-  description = "Allows inbound traffic to application servers"
-  vpc_id      = aws_vpc.main.id
-
-  ingress {
+        # Rationale: once an ALB fronts the compute layer, app_sg should only trust traffic that has
+        # already passed through the ALB's security group -- not the raw internet directly.
+        app_sg_ingress = (
+            """  ingress {
+    from_port       = 80
+    to_port         = 80
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb_sg.id]
+  }
+"""
+            if has_alb
+            else """  ingress {
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
+"""
+        )
+        compute_tf += f"""# Security Groups and IAM Roles for Compute Nodes
 
-  egress {
+resource "aws_security_group" "app_sg" {{
+  name        = "${{var.project_name}}-${{var.environment}}-app-sg"
+  description = "Allows inbound traffic to application servers"
+  vpc_id      = aws_vpc.main.id
+
+{app_sg_ingress}
+  egress {{
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
-  }
-}
-
+  }}
+}}
+"""
+        compute_tf += """
 resource "aws_security_group" "db_sg" {
   name   = "${var.project_name}-${var.environment}-db-sg"
   vpc_id = aws_vpc.main.id
@@ -689,6 +875,16 @@ resource "azurerm_subnet" "db_subnet" {
   virtual_network_name = azurerm_virtual_network.vnet.name
   address_prefixes     = ["10.0.2.0/24"]
 }
+
+# Rationale: Application Gateway requires its own dedicated subnet (no other resource types may
+# share it). Declared unconditionally alongside app/db subnets so the Container Apps + App Gateway
+# compute branch can always reference it.
+resource "azurerm_subnet" "appgw_subnet" {
+  name                 = "appgw-subnet"
+  resource_group_name  = azurerm_resource_group.rg.name
+  virtual_network_name = azurerm_virtual_network.vnet.name
+  address_prefixes     = ["10.0.3.0/24"]
+}
 """
 
         main_tf = f"""# Main Provider Configuration for {project_name}
@@ -699,18 +895,32 @@ terraform {{
       source  = "hashicorp/azurerm"
       version = "~> 3.0"
     }}
+    random = {{
+      source  = "hashicorp/random"
+      version = "~> 3.6"
+    }}
   }}
 }}
 
 provider "azurerm" {{
   features {{}}
 }}
+
+data "azurerm_client_config" "current" {{}}
 """
 
         compute_tf = "# Azure Compute Resources\n\n"
         database_tf = "# Azure Database Resources\n\n"
         storage_tf = "# Azure Storage & CDN Resources\n\n"
         outputs_tf = f"# Azure Outputs for {project_name}\n\n"
+
+        # Shared/singleton resources emitted at most once even when multiple compute-type
+        # components exist (e.g. a main "compute" component plus a "worker" component both mapped
+        # to Azure Functions or Container Apps -- a common combination, see rules_engine.py's
+        # queue/worker rule) -- without this guard, Terraform sees the same fixed-name resource
+        # declared twice and fails with "Duplicate resource configuration".
+        func_plan_emitted = False
+        container_env_emitted = False
 
         for c in components:
             lld = _get_lld(c, "azure")
@@ -720,7 +930,10 @@ provider "azurerm" {{
 
             if c.get("type") == "cdn":
                 storage_tf += _build_comments(lld, ["priceClass"])
-                storage_tf += """resource "azurerm_frontdoor_profile" "cdn" {
+                # "azurerm_frontdoor_profile" is not a real resource type in the azurerm provider
+                # (confirmed against the real provider schema) -- azurerm_cdn_frontdoor_profile is
+                # the actual (modern, non-deprecated) resource for Azure Front Door.
+                storage_tf += """resource "azurerm_cdn_frontdoor_profile" "cdn" {
   name                = "${var.project_name}-frontdoor"
   resource_group_name = azurerm_resource_group.rg.name
   sku_name            = "Standard_AzureFrontDoor"
@@ -729,10 +942,14 @@ provider "azurerm" {{
 """
             elif c.get("type") == "compute":
                 has_functions = "Functions" in svc
+                is_worker = c_id == "worker"  # background workers never get public ingress (matches
+                # the k8s_manifest_generator.py convention: is_worker components get no Service/ingress)
 
                 if has_functions:
                     compute_tf += _build_comments(lld, ["memory", "timeout", "concurrency"])
-                    compute_tf += f"""resource "azurerm_service_plan" "func_plan" {{
+                    if not func_plan_emitted:
+                        func_plan_emitted = True
+                        compute_tf += f"""resource "azurerm_service_plan" "func_plan" {{
   name                = "${{var.project_name}}-functions-plan"
   resource_group_name = azurerm_resource_group.rg.name
   location            = azurerm_resource_group.rg.location
@@ -740,13 +957,29 @@ provider "azurerm" {{
   sku_name            = "Y1" # Consumption Serverless
 }}
 
-resource "azurerm_linux_function_app" "{c_id}" {{
+# Dedicated storage account for the Function App's own runtime state (triggers, logs, deployment
+# packages) -- a hard Azure Functions requirement, unconditionally declared here rather than
+# reused from the architecture's own "storage" component (which may not exist in this
+# architecture at all, and is conceptually a different thing -- the function runtime's operational
+# storage vs. the product's own object storage). Shared across every Functions-based compute
+# component in this architecture (see func_plan_emitted above) -- a single Consumption plan and
+# storage account can host multiple function apps, so this is correct to share, not a bug.
+resource "azurerm_storage_account" "functions_storage" {{
+  name                     = "${{var.project_name}}funcsa"
+  resource_group_name      = azurerm_resource_group.rg.name
+  location                 = azurerm_resource_group.rg.location
+  account_tier             = "Standard"
+  account_replication_type = "LRS"
+}}
+
+"""
+                    compute_tf += f"""resource "azurerm_linux_function_app" "{c_id}" {{
   name                = "${{var.project_name}}-{c_id}-app"
   resource_group_name = azurerm_resource_group.rg.name
   location            = azurerm_resource_group.rg.location
   service_plan_id     = azurerm_service_plan.func_plan.id
-  storage_account_name       = azurerm_storage_account.storage.name
-  storage_account_access_key = azurerm_storage_account.storage.primary_access_key
+  storage_account_name       = azurerm_storage_account.functions_storage.name
+  storage_account_access_key = azurerm_storage_account.functions_storage.primary_access_key
 
   site_config {{
     application_stack {{
@@ -756,18 +989,92 @@ resource "azurerm_linux_function_app" "{c_id}" {{
 }}
 
 """
+                    if not is_worker:
+                        # "Azure Functions + API Management" -- front the Function App with a real APIM
+                        # gateway instead of leaving it reachable only via its raw default hostname.
+                        compute_tf += f"""resource "azurerm_api_management" "apim" {{
+  name                = "${{var.project_name}}-apim"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  publisher_name      = "${{var.project_name}} API Publisher"
+  publisher_email     = "admin@${{var.project_name}}.example.com"
+  sku_name            = "Consumption_0"
+}}
+
+resource "azurerm_api_management_backend" "{c_id}_backend" {{
+  name                = "${{var.project_name}}-{c_id}-backend"
+  resource_group_name = azurerm_resource_group.rg.name
+  api_management_name = azurerm_api_management.apim.name
+  protocol            = "http"
+  url                 = "https://${{azurerm_linux_function_app.{c_id}.default_hostname}}"
+}}
+
+resource "azurerm_api_management_api" "{c_id}_api" {{
+  name                = "${{var.project_name}}-{c_id}-api"
+  resource_group_name = azurerm_resource_group.rg.name
+  api_management_name = azurerm_api_management.apim.name
+  revision            = "1"
+  display_name        = "${{var.project_name}}-{c_id}-api"
+  path                = "{c_id}"
+  protocols           = ["https"]
+}}
+
+resource "azurerm_api_management_api_policy" "{c_id}_policy" {{
+  api_name            = azurerm_api_management_api.{c_id}_api.name
+  api_management_name = azurerm_api_management.apim.name
+  resource_group_name = azurerm_resource_group.rg.name
+
+  xml_content = <<XML
+<policies>
+  <inbound>
+    <base />
+    <set-backend-service backend-id="${{azurerm_api_management_backend.{c_id}_backend.name}}" />
+  </inbound>
+</policies>
+XML
+}}
+
+"""
+                        outputs_tf += """output "apim_gateway_url" {
+  value       = azurerm_api_management.apim.gateway_url
+  description = "Public API Management gateway URL fronting the Azure Functions backend."
+}
+
+"""
                 else:
                     # Container Apps
                     compute_tf += _build_comments(lld, ["instanceSize", "minInstances", "maxInstances"])
                     min_replicas = _parse_int(config.get("minInstances"), "1")
                     max_replicas = _parse_int(config.get("maxInstances"), "3")
-                    compute_tf += f"""resource "azurerm_container_app_environment" "env" {{
+                    ingress_block = (
+                        """
+  ingress {
+    external_enabled = true
+    target_port       = 80
+    transport         = "auto"
+
+    traffic_weight {
+      latest_revision = true
+      percentage      = 100
+    }
+  }
+"""
+                        if not is_worker
+                        else ""
+                    )
+                    if not container_env_emitted:
+                        container_env_emitted = True
+                        # Shared across every Container-Apps-based compute component in this
+                        # architecture (see container_env_emitted above) -- one environment can
+                        # host multiple container apps, so sharing it is correct, not a bug.
+                        compute_tf += f"""resource "azurerm_container_app_environment" "env" {{
   name                = "${{var.project_name}}-containerapp-env"
   resource_group_name = azurerm_resource_group.rg.name
   location            = azurerm_resource_group.rg.location
 }}
 
-resource "azurerm_container_app" "{c_id}" {{
+"""
+                    compute_tf += f"""resource "azurerm_container_app" "{c_id}" {{
   name                         = "${{var.project_name}}-{c_id}"
   container_app_environment_id = azurerm_container_app_environment.env.id
   resource_group_name          = azurerm_resource_group.rg.name
@@ -783,7 +1090,82 @@ resource "azurerm_container_app" "{c_id}" {{
     min_replicas = {min_replicas}
     max_replicas = {max_replicas}
   }}
+{ingress_block}}}
+
+"""
+                    if not is_worker:
+                        # "Azure Container Apps + App Gateway" -- Application Gateway routes to the
+                        # Container App's own managed ingress FQDN via an FQDN-based backend pool.
+                        compute_tf += f"""resource "azurerm_public_ip" "appgw_pip" {{
+  name                = "${{var.project_name}}-appgw-pip"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
+  allocation_method   = "Static"
+  sku                 = "Standard"
 }}
+
+resource "azurerm_application_gateway" "appgw" {{
+  name                = "${{var.project_name}}-appgw"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
+
+  sku {{
+    name     = "Standard_v2"
+    tier     = "Standard_v2"
+    capacity = 1
+  }}
+
+  gateway_ip_configuration {{
+    name      = "appgw-ip-config"
+    subnet_id = azurerm_subnet.appgw_subnet.id
+  }}
+
+  frontend_port {{
+    name = "frontend-port-80"
+    port = 80
+  }}
+
+  frontend_ip_configuration {{
+    name                 = "appgw-frontend-ip"
+    public_ip_address_id = azurerm_public_ip.appgw_pip.id
+  }}
+
+  backend_address_pool {{
+    name  = "{c_id}-backend-pool"
+    fqdns = [azurerm_container_app.{c_id}.ingress[0].fqdn]
+  }}
+
+  backend_http_settings {{
+    name                                = "{c_id}-backend-http-settings"
+    cookie_based_affinity               = "Disabled"
+    port                                = 443
+    protocol                            = "Https"
+    request_timeout                     = 30
+    pick_host_name_from_backend_address = true
+  }}
+
+  http_listener {{
+    name                           = "{c_id}-http-listener"
+    frontend_ip_configuration_name = "appgw-frontend-ip"
+    frontend_port_name             = "frontend-port-80"
+    protocol                       = "Http"
+  }}
+
+  request_routing_rule {{
+    name                       = "{c_id}-routing-rule"
+    rule_type                  = "Basic"
+    http_listener_name         = "{c_id}-http-listener"
+    backend_address_pool_name  = "{c_id}-backend-pool"
+    backend_http_settings_name = "{c_id}-backend-http-settings"
+    priority                   = 100
+  }}
+}}
+
+"""
+                        outputs_tf += """output "appgw_public_ip" {
+  value       = azurerm_public_ip.appgw_pip.ip_address
+  description = "Public IP address of the Application Gateway fronting the container app."
+}
 
 """
             elif c.get("type") == "database":
@@ -794,22 +1176,56 @@ resource "azurerm_container_app" "{c_id}" {{
                     instance_class = config.get("instanceClass") or "MO_Standard_E2ds_v4"
                     storage_mb = _parse_int(config.get("storageSize"), "32") * 1024
                     backup_retention = _parse_int(config.get("backupRetention"), "7")
-                    database_tf += f"""resource "azurerm_postgresql_flexible_server" "db" {{
+                    database_tf += f"""resource "random_password" "db_password" {{
+  length           = 24
+  special          = true
+  override_special = "!#$%&*()-_=+[]{{}}<>:?"
+}}
+
+resource "azurerm_postgresql_flexible_server" "db" {{
   name                = "${{var.project_name}}-pg-db"
   resource_group_name = azurerm_resource_group.rg.name
   location            = azurerm_resource_group.rg.location
   version             = "14"
   administrator_login          = "psqladmin"
-  administrator_password       = "ManagedSecretPassword123!"
+  administrator_password       = random_password.db_password.result
   sku_name                     = "{instance_class}"
   storage_mb                   = {storage_mb}
   backup_retention_days        = {backup_retention}
+}}
+
+# Rationale: minimal Key Vault created for the generated DB secret -- the same "output a
+# reference, never the raw value" principle as the AWS Secrets Manager / GCP Secret Manager paths.
+resource "azurerm_key_vault" "kv" {{
+  name                = "${{var.project_name}}-kv"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  tenant_id           = data.azurerm_client_config.current.tenant_id
+  sku_name            = "standard"
+
+  access_policy {{
+    tenant_id = data.azurerm_client_config.current.tenant_id
+    object_id = data.azurerm_client_config.current.object_id
+
+    secret_permissions = ["Get", "Set", "Delete", "Purge"]
+  }}
+}}
+
+resource "azurerm_key_vault_secret" "db_password" {{
+  name         = "${{var.project_name}}-db-password"
+  value        = random_password.db_password.result
+  key_vault_id = azurerm_key_vault.kv.id
 }}
 
 """
                     outputs_tf += """output "db_fqdn" {
   value       = azurerm_postgresql_flexible_server.db.fqdn
   description = "The fully qualified database endpoint."
+}
+
+output "db_password_secret_id" {
+  value       = azurerm_key_vault_secret.db_password.id
+  description = "Key Vault secret URI holding the generated DB password -- fetch it at runtime via a managed identity, never hardcode it."
 }
 
 """
@@ -927,7 +1343,30 @@ resource "google_compute_subnetwork" "subnet" {
 
         main_tf = f"""# Main Provider Configuration for {project_name}
 
+terraform {{
+  required_providers {{
+    random = {{
+      source  = "hashicorp/random"
+      version = "~> 3.6"
+    }}
+    google-beta = {{
+      source  = "hashicorp/google-beta"
+      version = "~> 5.0"
+    }}
+  }}
+}}
+
 provider "google" {{
+  project = var.gcp_project
+  region  = var.gcp_region
+}}
+
+# API Gateway resources (google_api_gateway_*) are only available under the google-beta provider
+# as of this writing, even though the underlying GCP API Gateway service itself is GA -- the
+# standard "google" provider genuinely does not implement these resource types (confirmed against
+# the provider's real schema, not assumed). Every other GCP resource in this file uses the
+# standard "google" provider; only the API Gateway block below opts into google-beta.
+provider "google-beta" {{
   project = var.gcp_project
   region  = var.gcp_region
 }}
@@ -954,6 +1393,8 @@ provider "google" {{
 """
             elif c.get("type") == "compute":
                 has_functions = "Functions" in svc
+                is_worker = c_id == "worker"  # background workers never get public ingress (matches
+                # the k8s_manifest_generator.py convention: is_worker components get no Service/ingress)
 
                 if has_functions:
                     compute_tf += _build_comments(lld, ["memory", "timeout", "concurrency"])
@@ -968,6 +1409,70 @@ provider "google" {{
   timeout               = {timeout}
   entry_point           = "handler"
   trigger_http          = true
+}}
+
+"""
+                    if not is_worker:
+                        # "Google Cloud Functions + API Gateway" -- front the function with a real API
+                        # Gateway instead of leaving it reachable only via its raw HTTPS trigger URL.
+                        compute_tf += f"""resource "google_cloudfunctions_function_iam_member" "{c_id}_invoker" {{
+  project        = var.gcp_project
+  region         = var.gcp_region
+  cloud_function = google_cloudfunctions_function.{c_id}.name
+  role           = "roles/cloudfunctions.invoker"
+  member         = "allUsers"
+}}
+
+resource "google_api_gateway_api" "{c_id}_api" {{
+  provider = google-beta
+  api_id   = "${{var.gcp_project}}-{c_id}-api"
+}}
+
+resource "google_api_gateway_api_config" "{c_id}_config" {{
+  provider      = google-beta
+  api           = google_api_gateway_api.{c_id}_api.api_id
+  api_config_id = "${{var.gcp_project}}-{c_id}-config"
+
+  openapi_documents {{
+    document {{
+      path = "openapi.yaml"
+      contents = base64encode(<<-EOT
+        swagger: "2.0"
+        info:
+          title: ${{var.gcp_project}}-{c_id}-api
+          version: "1.0.0"
+        schemes:
+          - https
+        paths:
+          /:
+            get:
+              operationId: {c_id}Root
+              x-google-backend:
+                address: ${{google_cloudfunctions_function.{c_id}.https_trigger_url}}
+              responses:
+                "200":
+                  description: OK
+        EOT
+      )
+    }}
+  }}
+
+  lifecycle {{
+    create_before_destroy = true
+  }}
+}}
+
+resource "google_api_gateway_gateway" "{c_id}_gateway" {{
+  provider   = google-beta
+  api_config = google_api_gateway_api_config.{c_id}_config.id
+  gateway_id = "${{var.gcp_project}}-{c_id}-gw"
+  region     = var.gcp_region
+}}
+
+"""
+                        outputs_tf += f"""output "{c_id}_gateway_url" {{
+  value       = google_api_gateway_gateway.{c_id}_gateway.default_hostname
+  description = "Public hostname for the {c_id} API Gateway (Cloud Functions backend)."
 }}
 
 """
@@ -1002,6 +1507,66 @@ provider "google" {{
 }}
 
 """
+                    if not is_worker:
+                        # "Google Cloud Run + HTTPS Load Balancer" -- a serverless NEG-backed global
+                        # HTTPS load balancer, the real GCP pattern for fronting a public Cloud Run service.
+                        compute_tf += f"""resource "google_cloud_run_service_iam_member" "{c_id}_public" {{
+  location = google_cloud_run_service.{c_id}.location
+  project  = google_cloud_run_service.{c_id}.project
+  service  = google_cloud_run_service.{c_id}.name
+  role     = "roles/run.invoker"
+  member   = "allUsers"
+}}
+
+resource "google_compute_region_network_endpoint_group" "{c_id}_neg" {{
+  name                  = "${{var.gcp_project}}-{c_id}-neg"
+  region                = var.gcp_region
+  network_endpoint_type = "SERVERLESS"
+
+  cloud_run {{
+    service = google_cloud_run_service.{c_id}.name
+  }}
+}}
+
+resource "google_compute_backend_service" "{c_id}_backend" {{
+  name                  = "${{var.gcp_project}}-{c_id}-backend"
+  protocol              = "HTTP"
+  load_balancing_scheme = "EXTERNAL_MANAGED"
+
+  backend {{
+    group = google_compute_region_network_endpoint_group.{c_id}_neg.id
+  }}
+}}
+
+resource "google_compute_url_map" "{c_id}_url_map" {{
+  name            = "${{var.gcp_project}}-{c_id}-url-map"
+  default_service = google_compute_backend_service.{c_id}_backend.id
+}}
+
+resource "google_compute_target_http_proxy" "{c_id}_http_proxy" {{
+  name    = "${{var.gcp_project}}-{c_id}-http-proxy"
+  url_map = google_compute_url_map.{c_id}_url_map.id
+}}
+
+resource "google_compute_global_address" "{c_id}_lb_ip" {{
+  name = "${{var.gcp_project}}-{c_id}-lb-ip"
+}}
+
+resource "google_compute_global_forwarding_rule" "{c_id}_forwarding_rule" {{
+  name                  = "${{var.gcp_project}}-{c_id}-fwd-rule"
+  target                = google_compute_target_http_proxy.{c_id}_http_proxy.id
+  port_range            = "80"
+  ip_address            = google_compute_global_address.{c_id}_lb_ip.id
+  load_balancing_scheme = "EXTERNAL_MANAGED"
+}}
+
+"""
+                        outputs_tf += f"""output "{c_id}_lb_ip_address" {{
+  value       = google_compute_global_address.{c_id}_lb_ip.address
+  description = "Public IP address of the HTTPS Load Balancer fronting the {c_id} Cloud Run service."
+}}
+
+"""
             elif c.get("type") == "database":
                 is_pg = "PostgreSQL" in svc
 
@@ -1028,10 +1593,42 @@ provider "google" {{
   }}
 }}
 
+resource "random_password" "db_password" {{
+  length           = 24
+  special          = true
+  override_special = "!#$%&*()-_=+[]{{}}<>:?"
+}}
+
+resource "google_sql_user" "db_user" {{
+  name     = "dbadmin"
+  instance = google_sql_database_instance.db.name
+  password = random_password.db_password.result
+}}
+
+# Rationale: same "output a reference, never the raw value" principle as the AWS Secrets Manager /
+# Azure Key Vault paths -- application code fetches the password from Secret Manager at runtime.
+resource "google_secret_manager_secret" "db_password" {{
+  secret_id = "${{var.gcp_project}}-db-password"
+
+  replication {{
+    auto {{}}
+  }}
+}}
+
+resource "google_secret_manager_secret_version" "db_password" {{
+  secret      = google_secret_manager_secret.db_password.id
+  secret_data = random_password.db_password.result
+}}
+
 """
                     outputs_tf += """output "db_ip" {
   value       = google_sql_database_instance.db.public_ip_address
   description = "The database instance public IP."
+}
+
+output "db_password_secret_id" {
+  value       = google_secret_manager_secret.db_password.secret_id
+  description = "Secret Manager secret ID holding the generated DB password -- fetch it at runtime via IAM, never hardcode it."
 }
 
 """
