@@ -2017,29 +2017,97 @@ export default function ArchitectureWorkspace({
     });
   };
 
-  const [whatIfMode, setWhatIfMode] = useState(false);
-  // Additional capabilities to explore adding, one per line -- appended to the current functional
-  // list at submit time, never replaces it (see resolveWhatIfFunctional below).
-  const [whatIfFunctional, setWhatIfFunctional] = useState("");
-  // Starts BLANK, not pre-filled with the current value -- per explicit feedback, the primary
-  // experience should be picking an AI-suggested hypothetical, not editing what's already true.
-  // A blank field falls back to the real current value at submit time (resolveWhatIfNFR below),
-  // so leaving something untouched still means "keep this as it really is", not "unspecified".
-  const [whatIfNFR, setWhatIfNFR] = useState<WhatIfNFR>(BLANK_NFR);
-  const [whatIfIndustry, setWhatIfIndustry] = useState<WhatIfIndustry>("none");
-  const [whatIfHandlesCardData, setWhatIfHandlesCardData] = useState(false);
-  const [whatIfStoresPHI, setWhatIfStoresPHI] = useState(false);
-  const [whatIfAdditionalContext, setWhatIfAdditionalContext] = useState("");
-  const [whatIfProvider, setWhatIfProvider] = useState<CloudProviderKey>(activeProvider);
-  // Industry is a fixed-choice toggle, not free text -- there's no meaningful "blank" state for
-  // it, so it starts at the CURRENT selection and "changed" just means picking a different one.
-  const [whatIfCurrentIndustry, setWhatIfCurrentIndustry] = useState<WhatIfIndustry>("none");
-  const [whatIfPreview, setWhatIfPreview] = useState<WhatIfPreviewData | null>(null);
-  const [whatIfLoading, setWhatIfLoading] = useState(false);
-  const [whatIfApplying, setWhatIfApplying] = useState(false);
-  const [whatIfError, setWhatIfError] = useState("");
-  const [whatIfSuggestions, setWhatIfSuggestions] = useState<WhatIfSuggestions>({});
-  const [whatIfSuggestionsLoading, setWhatIfSuggestionsLoading] = useState(false);
+  // All 15 What-If Simulator fields consolidated into a single state object rather than 15
+  // independent useState calls -- these values are read/written independently throughout this
+  // section (each field has its own input/toggle), so a grouped object with one setter (via the
+  // patchWhatIf helper below) is a more natural fit here than a reducer with enumerated action
+  // types. Individual `whatIfXxx` / `setWhatIfXxx` names are preserved below (as a destructure +
+  // thin wrapper setters) purely so every existing read/write site further down in this component
+  // keeps working unchanged -- this is a storage-only change, not a behavioral one.
+  type WhatIfState = {
+    mode: boolean;
+    functional: string;
+    nfr: WhatIfNFR;
+    industry: WhatIfIndustry;
+    handlesCardData: boolean;
+    storesPHI: boolean;
+    additionalContext: string;
+    provider: CloudProviderKey;
+    currentIndustry: WhatIfIndustry;
+    preview: WhatIfPreviewData | null;
+    loading: boolean;
+    applying: boolean;
+    error: string;
+    suggestions: WhatIfSuggestions;
+    suggestionsLoading: boolean;
+  };
+  const [whatIfState, setWhatIfState] = useState<WhatIfState>(() => ({
+    mode: false,
+    // Additional capabilities to explore adding, one per line -- appended to the current
+    // functional list at submit time, never replaces it (see resolveWhatIfFunctional below).
+    functional: "",
+    // Starts BLANK, not pre-filled with the current value -- per explicit feedback, the primary
+    // experience should be picking an AI-suggested hypothetical, not editing what's already true.
+    // A blank field falls back to the real current value at submit time (resolveWhatIfNFR below),
+    // so leaving something untouched still means "keep this as it really is", not "unspecified".
+    nfr: BLANK_NFR,
+    industry: "none",
+    handlesCardData: false,
+    storesPHI: false,
+    additionalContext: "",
+    provider: activeProvider,
+    // Industry is a fixed-choice toggle, not free text -- there's no meaningful "blank" state for
+    // it, so it starts at the CURRENT selection and "changed" just means picking a different one.
+    currentIndustry: "none",
+    preview: null,
+    loading: false,
+    applying: false,
+    error: "",
+    suggestions: {},
+    suggestionsLoading: false,
+  }));
+
+  // Merges a partial update (or an updater function of the previous state) into whatIfState.
+  const patchWhatIf = (patch: Partial<WhatIfState> | ((prev: WhatIfState) => Partial<WhatIfState>)) => {
+    setWhatIfState((prev) => ({ ...prev, ...(typeof patch === "function" ? patch(prev) : patch) }));
+  };
+
+  const {
+    mode: whatIfMode,
+    functional: whatIfFunctional,
+    nfr: whatIfNFR,
+    industry: whatIfIndustry,
+    handlesCardData: whatIfHandlesCardData,
+    storesPHI: whatIfStoresPHI,
+    additionalContext: whatIfAdditionalContext,
+    provider: whatIfProvider,
+    currentIndustry: whatIfCurrentIndustry,
+    preview: whatIfPreview,
+    loading: whatIfLoading,
+    applying: whatIfApplying,
+    error: whatIfError,
+    suggestions: whatIfSuggestions,
+    suggestionsLoading: whatIfSuggestionsLoading,
+  } = whatIfState;
+
+  const setWhatIfMode = (v: boolean) => patchWhatIf({ mode: v });
+  const setWhatIfFunctional = (v: string | ((prev: string) => string)) =>
+    patchWhatIf((prev) => ({ functional: typeof v === "function" ? v(prev.functional) : v }));
+  const setWhatIfNFR = (v: WhatIfNFR | ((prev: WhatIfNFR) => WhatIfNFR)) =>
+    patchWhatIf((prev) => ({ nfr: typeof v === "function" ? v(prev.nfr) : v }));
+  const setWhatIfIndustry = (v: WhatIfIndustry) => patchWhatIf({ industry: v });
+  const setWhatIfHandlesCardData = (v: boolean) => patchWhatIf({ handlesCardData: v });
+  const setWhatIfStoresPHI = (v: boolean) => patchWhatIf({ storesPHI: v });
+  const setWhatIfAdditionalContext = (v: string) => patchWhatIf({ additionalContext: v });
+  const setWhatIfProvider = (v: CloudProviderKey) => patchWhatIf({ provider: v });
+  const setWhatIfCurrentIndustry = (v: WhatIfIndustry) => patchWhatIf({ currentIndustry: v });
+  const setWhatIfPreview = (v: WhatIfPreviewData | null) => patchWhatIf({ preview: v });
+  const setWhatIfLoading = (v: boolean) => patchWhatIf({ loading: v });
+  const setWhatIfApplying = (v: boolean) => patchWhatIf({ applying: v });
+  const setWhatIfError = (v: string) => patchWhatIf({ error: v });
+  const setWhatIfSuggestions = (v: WhatIfSuggestions | ((prev: WhatIfSuggestions) => WhatIfSuggestions)) =>
+    patchWhatIf((prev) => ({ suggestions: typeof v === "function" ? v(prev.suggestions) : v }));
+  const setWhatIfSuggestionsLoading = (v: boolean) => patchWhatIf({ suggestionsLoading: v });
   const whatIfResultsRef = useRef<HTMLDivElement>(null);
 
   const loadWhatIfSuggestions = () => {
