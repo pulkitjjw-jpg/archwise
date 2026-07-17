@@ -1,3 +1,7 @@
+from app.services.nfr_signals import is_budget_tight as _is_budget_tight
+from app.services.nfr_signals import is_high_scale as _is_high_scale
+
+
 def run_lld_rules_engine(
     provider: str,
     component_type: str,
@@ -15,22 +19,11 @@ def run_lld_rules_engine(
     industry_context: dict | None = None,
 ) -> dict:
     nfr = requirements["nonFunctional"]
-    scale_lower = nfr["expectedScale"].lower()
-    budget_lower = nfr["budget"].lower()
     team_lower = nfr["teamMaturity"].lower()
     compliance_lower = nfr["compliance"].lower()
 
-    is_high_scale = (
-        "high" in scale_lower
-        or "million" in scale_lower
-        or "100,000" in scale_lower
-        or "10k" in scale_lower
-        or "50k" in scale_lower
-    )
-
-    is_low_budget = (
-        "low" in budget_lower or "50" in budget_lower or "30" in budget_lower or "tight" in budget_lower
-    )
+    is_high_scale = _is_high_scale(nfr["expectedScale"])
+    is_low_budget = _is_budget_tight(nfr["budget"])
 
     is_high_security = (
         "gdpr" in compliance_lower

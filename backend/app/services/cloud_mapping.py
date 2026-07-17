@@ -1,3 +1,5 @@
+from app.services.nfr_signals import is_budget_tight as _is_budget_tight
+from app.services.nfr_signals import is_high_scale as _is_high_scale
 from app.services.rules_engine import is_relational_data_nature
 
 
@@ -7,21 +9,10 @@ def _mapping(service_name: str, alternatives: list[dict], cost_estimate: dict) -
 
 def get_cloud_mapping(provider: str, component_type: str, component_id: str, requirements: dict) -> dict:
     nfr = requirements["nonFunctional"]
-    scale_lower = nfr["expectedScale"].lower()
-    budget_lower = nfr["budget"].lower()
     team_lower = nfr["teamMaturity"].lower()
 
-    is_high_scale = (
-        "high" in scale_lower
-        or "million" in scale_lower
-        or "100,000" in scale_lower
-        or "10k" in scale_lower
-        or "50k" in scale_lower
-    )
-
-    is_low_budget = (
-        "low" in budget_lower or "50" in budget_lower or "30" in budget_lower or "tight" in budget_lower
-    )
+    is_high_scale = _is_high_scale(nfr["expectedScale"])
+    is_low_budget = _is_budget_tight(nfr["budget"])
 
     if provider == "aws":
         return _aws_mapping(component_type, component_id, requirements, is_high_scale, is_low_budget, team_lower)

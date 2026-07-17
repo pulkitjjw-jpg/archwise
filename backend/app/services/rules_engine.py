@@ -1,3 +1,6 @@
+from app.services.nfr_signals import is_budget_tight
+
+
 def _connection(from_: str, to: str, protocol: str | None = None) -> dict:
     conn: dict = {"from": from_, "to": to}
     if protocol is not None:
@@ -57,21 +60,14 @@ def run_rules_engine(requirements: dict) -> dict:
         rules_trace.append("Rule-CDN-HighScale-Or-Media")
 
     # 2. Compute (Serverless vs Containers)
-    budget_lower = nfr["budget"].lower()
-    is_budget_tight = (
-        "low" in budget_lower
-        or "50" in budget_lower
-        or "10" in budget_lower
-        or "tight" in budget_lower
-        or budget_lower == "not_specified"
-    )
+    budget_tight = is_budget_tight(nfr["budget"])
 
     team_lower = nfr["teamMaturity"].lower()
     is_team_junior = (
         "junior" in team_lower or "small" in team_lower or team_lower == "not_specified"
     )
 
-    if is_budget_tight and is_team_junior:
+    if budget_tight and is_team_junior:
         components.append(
             {
                 "id": "compute",
