@@ -10,6 +10,8 @@ const TYPE_DESCRIPTIONS: Record<string, string> = {
   queue: "Holds tasks that need to happen soon but don't have to happen instantly, so spikes don't slow the app down.",
   cache: "Keeps frequently-used data close at hand so repeat requests come back almost instantly.",
   auth: "Handles user sign-in, passwords, and who's allowed to access what.",
+  lb: "The system's front door — spreads incoming traffic across your running instances and stops sending traffic to any that go unhealthy.",
+  dns: "Points your custom domain (like yourapp.com) at the right place, and is the mechanism a future multi-region setup would route through.",
   tokenization: "Swaps sensitive data (like card numbers) for safe placeholder tokens, so the real data never touches the rest of your systems directly.",
   "audit-log": "Keeps a tamper-proof record of who did what and when — required for compliance reviews.",
   "phi-vault": "A specially secured, separate store for protected health information, locked down beyond your normal data.",
@@ -73,6 +75,16 @@ const LEARN_CONTENT: Record<string, LearnContent> = {
     analogy: "The bouncer-and-wristband system at a venue.",
     deeper:
       "Your ID gets checked once at the door (sign-in), then you get a wristband (session/token) that proves who you are for the rest of the night — so you're not re-checked at every single room.",
+  },
+  lb: {
+    analogy: "A host at a busy restaurant seating guests at whichever table is actually free.",
+    deeper:
+      "Instead of every customer walking straight to one specific table (server), the host checks which tables are open and healthy, and sends each new party to one that can actually serve them right now — so no single table gets overwhelmed while others sit empty.",
+  },
+  dns: {
+    analogy: "A phone book that turns a business's name into its actual street address.",
+    deeper:
+      "People type a memorable name (yourapp.com) instead of a numeric address, and the phone book (DNS) looks up where to actually send them. If a business ever opens a second location, the phone book is also exactly where you'd update the listing to send people to the right one.",
   },
   tokenization: {
     analogy: "Casino chips — you exchange real cash for chips at the door, and the casino floor never touches your cash directly.",

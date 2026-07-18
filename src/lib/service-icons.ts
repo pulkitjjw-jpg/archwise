@@ -30,6 +30,9 @@ const SERVICE_ICON_RULES: IconMatch[] = [
   { keywords: ["elasticache", "dax"], icon: "logos:aws-elasticache" },
   { keywords: ["kms"], icon: "logos:aws-kms" },
   { keywords: ["cloudtrail"], icon: "logos:aws-cloudtrail" },
+  { keywords: ["application load balancer", "alb"], icon: "mdi:scale-balance" },
+  { keywords: ["api gateway", "api management"], icon: "mdi:api" },
+  { keywords: ["route 53"], icon: "logos:aws-route53" },
   { keywords: ["healthlake"], icon: "mdi:hospital-box-outline" },
   { keywords: ["comprehend"], icon: "mdi:text-search" },
   { keywords: ["qldb"], icon: "mdi:book-lock-outline" },
@@ -65,6 +68,9 @@ const SERVICE_ICON_RULES: IconMatch[] = [
   { keywords: ["openstack", "nova"], icon: "logos:openstack-icon" },
   { keywords: ["oracle"], icon: "logos:oracle" },
   { keywords: ["bare-metal", "dedicated vm", "virtual machine", "vm pool", "compute pool"], icon: "mdi:server" },
+  { keywords: ["externaldns"], icon: "mdi:dns-outline" },
+  { keywords: ["application gateway", "load balancing", "load balancer"], icon: "mdi:scale-balance" },
+  { keywords: ["dns"], icon: "mdi:dns-outline" },
 ];
 
 const TYPE_FALLBACK_ICON: Record<string, string> = {
@@ -75,6 +81,8 @@ const TYPE_FALLBACK_ICON: Record<string, string> = {
   queue: "mdi:tray-full",
   cache: "mdi:lightning-bolt-outline",
   auth: "mdi:account-key-outline",
+  lb: "mdi:scale-balance",
+  dns: "mdi:dns-outline",
   tokenization: "mdi:key-chain-variant",
   "audit-log": "mdi:clipboard-text-clock-outline",
   "phi-vault": "mdi:hospital-box-outline",

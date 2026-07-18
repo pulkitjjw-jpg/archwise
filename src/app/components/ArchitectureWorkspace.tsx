@@ -80,7 +80,7 @@ const TYPE_LABELS: Record<string, string> = {
 // select via a dynamically-added fallback option rather than silently resetting to blank.
 const NODE_TYPE_OPTIONS: { value: string; label: string }[] = [
   { value: "compute", label: "Compute" },
-  { value: "db", label: "Database" },
+  { value: "database", label: "Database" },
   { value: "cache", label: "Cache" },
   { value: "queue", label: "Queue" },
   { value: "cdn", label: "CDN" },

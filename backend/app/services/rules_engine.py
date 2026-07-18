@@ -96,8 +96,61 @@ def run_rules_engine(requirements: dict) -> dict:
         )
         rules_trace.append("Rule-Compute-Container")
 
+        # Container-style compute has no ingress path of its own -- unlike serverless (whose
+        # own managed gateway is resolved per-provider inside cloud_mapping.py's "lb" branch,
+        # not a separate HLD component), a fleet of container instances needs an explicit,
+        # first-class routing/edge component in front of it. This is also where TLS termination
+        # and health checks live in every real reference architecture, so it earns its own box
+        # with its own reasoning/cost/LLD rather than staying invisibly bundled into compute's
+        # own service name.
+        components.append(
+            {
+                "id": "lb",
+                "name": "Load Balancer",
+                "type": "lb",
+                "description": "Distributes incoming traffic across compute instances and is the system's single public entry point.",
+                "rulesFired": [
+                    "Rule-LB-Container: Container-based compute needs an explicit ingress/routing layer in front of it."
+                ],
+                "reasoning": "Routes and load-balances incoming requests across compute instances, terminates TLS, and performs health checks so unhealthy instances are automatically taken out of rotation.",
+            }
+        )
+        rules_trace.append("Rule-LB-Container")
+        connections.append(_connection("lb", "compute", "HTTPS"))
+
+    needs_lb = "lb" in {c["id"] for c in components}
+
     if needs_cdn:
-        connections.append(_connection("cdn", "compute", "HTTPS"))
+        # The CDN sits in front of whatever is actually public-facing: the load balancer when
+        # one exists (the more architecturally correct request path -- CDN edge caches static
+        # content, then hands dynamic requests down to the LB, not straight to compute), or
+        # compute directly for serverless architectures that have no separate lb component.
+        connections.append(_connection("cdn", "lb", "HTTPS") if needs_lb else _connection("cdn", "compute", "HTTPS"))
+
+    # 2b. Managed DNS -- whenever there's a real public-facing edge (an lb or a cdn), a managed
+    # DNS layer is what actually routes a custom domain to it. Kept intentionally light for now
+    # (routing policy defaults to "Simple" in cloud_mapping.py/lld_rules.py) -- this is also the
+    # mechanism a future multi-region failover phase would route through, but that capability
+    # doesn't exist yet and this component doesn't claim it does.
+    if needs_lb or needs_cdn:
+        components.append(
+            {
+                "id": "dns",
+                "name": "Managed DNS",
+                "type": "dns",
+                "description": "Resolves the product's custom domain to its public-facing entry point.",
+                "rulesFired": [
+                    "Rule-DNS-PublicEdge: A public-facing load balancer or CDN exists, so a managed DNS layer is needed to route a custom domain to it."
+                ],
+                "reasoning": (
+                    "Routes the product's custom domain to its public edge. Also the mechanism a future "
+                    "multi-region failover setup would route through -- not configured for that yet, but "
+                    "this is where that capability would be added."
+                ),
+            }
+        )
+        rules_trace.append("Rule-DNS-PublicEdge")
+        connections.append(_connection("dns", "lb", "DNS") if needs_lb else _connection("dns", "cdn", "DNS"))
 
     # 3. Storage & Database
     is_relational = is_relational_data_nature(requirements)

@@ -63,6 +63,62 @@ class TestDatabaseAws:
         assert "encryptionType" in result["config"]
 
 
+class TestLbAws:
+    def test_container_budget_gets_alb_shaped_config(self):
+        req = make_requirements(budget="$50,000/month", teamMaturity="a large senior team")
+        result = run_lld_rules_engine("aws", "lb", "lb", req)
+        assert result["config"]["healthCheckPath"] == "/health"
+        assert "listenerProtocol" in result["config"]
+        assert "gatewayType" not in result["config"]
+        assert result["reasoning"]["unhealthyThresholdCount"]
+
+    def test_serverless_budget_gets_api_gateway_shaped_config(self):
+        req = make_requirements(budget="$50/month", teamMaturity="a junior team")
+        result = run_lld_rules_engine("aws", "lb", "lb", req)
+        assert result["config"]["gatewayType"] == "HTTP API (Regional)"
+        assert "healthCheckPath" not in result["config"]
+        assert result["reasoning"]["corsPolicy"]
+
+    def test_service_name_override_forces_api_gateway_shape(self):
+        """A manually swapped service (e.g. user picks 'Amazon API Gateway (HTTP API)' for an lb
+        that would otherwise resolve to container-shaped config) overrides the deterministic
+        budget/team signal."""
+        req = make_requirements(budget="$50,000/month", teamMaturity="a large senior team")
+        result = run_lld_rules_engine("aws", "lb", "lb", req, service_name_override="Amazon API Gateway (HTTP API)")
+        assert result["config"]["gatewayType"] == "HTTP API (Regional)"
+
+
+class TestDnsAws:
+    def test_dns_config_has_genuine_multi_region_forward_looking_note(self):
+        req = make_requirements()
+        result = run_lld_rules_engine("aws", "dns", "dns", req)
+        assert result["config"]["routingPolicy"] == "Simple"
+        assert "multi-region" in result["reasoning"]["routingPolicy"].lower()
+
+
+class TestLbAndDnsKubernetesAndPrivate:
+    def test_kubernetes_lb_is_ingress_shaped(self):
+        req = make_requirements()
+        result = run_lld_rules_engine("kubernetes", "lb", "lb", req)
+        assert "namespace" in result["config"]
+        assert result["config"]["namespace"] == "ingress-system"
+
+    def test_kubernetes_dns_uses_externaldns_operator(self):
+        req = make_requirements()
+        result = run_lld_rules_engine("kubernetes", "dns", "dns", req)
+        assert "ExternalDNS" in result["config"]["deploymentMode"]
+
+    def test_private_lb_flags_manual_failover(self):
+        req = make_requirements()
+        result = run_lld_rules_engine("private", "lb", "lb", req)
+        assert "Manual failover" in result["config"]["haMode"]
+
+    def test_private_dns_flags_manual_record_management(self):
+        req = make_requirements()
+        result = run_lld_rules_engine("private", "dns", "dns", req)
+        assert "Manual" in result["config"]["deploymentMode"]
+
+
 class TestComputeKubernetes:
     def test_kubernetes_compute_replica_scaling_for_high_scale(self):
         req = make_requirements(expectedScale="high scale, 1 million users")

@@ -45,12 +45,15 @@ class TestCdnRule:
     def test_triggered_by_media_keyword_in_functional_requirements(self):
         from app.services.rules_engine import run_rules_engine
 
+        # Default make_requirements() budget/teamMaturity fire the container compute branch, which
+        # also adds an "lb" component -- so the CDN sits in front of the lb, not compute directly
+        # (see TestLbRule below for the serverless case, where cdn connects straight to compute).
         req = make_requirements(functional=["Users can upload profile pictures and video clips"])
         result = run_rules_engine(req)
 
         assert "cdn" in component_ids(result)
         assert "Rule-CDN-HighScale-Or-Media" in result["rulesTrace"]
-        assert {"from": "cdn", "to": "compute", "protocol": "HTTPS"} in result["connections"]
+        assert {"from": "cdn", "to": "lb", "protocol": "HTTPS"} in result["connections"]
 
     def test_triggered_by_high_latency_sensitivity(self):
         from app.services.rules_engine import run_rules_engine
@@ -116,6 +119,96 @@ class TestComputeServerlessVsContainer:
         compute = next(c for c in result["components"] if c["id"] == "compute")
         assert compute["name"] == "API Container Service"
         assert "Rule-Compute-Container" in result["rulesTrace"]
+
+
+class TestLbRule:
+    def test_container_compute_gets_lb_component_wired_to_compute(self):
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(budget="$2,000/month", teamMaturity="senior engineers")
+        result = run_rules_engine(req)
+
+        assert "Rule-Compute-Container" in result["rulesTrace"]
+        assert "lb" in component_ids(result)
+        assert "Rule-LB-Container" in result["rulesTrace"]
+        lb = next(c for c in result["components"] if c["id"] == "lb")
+        assert lb["type"] == "lb"
+        assert {"from": "lb", "to": "compute", "protocol": "HTTPS"} in result["connections"]
+
+    def test_serverless_compute_gets_no_lb_component(self):
+        """Serverless's own gateway (API Gateway/API Management) is resolved per-provider inside
+        cloud_mapping.py's "lb" branch when a user manually adds one, but rules_engine.py itself
+        never auto-adds an "lb" component for the serverless compute branch."""
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(budget="$50/month", teamMaturity="a junior team, first project")
+        result = run_rules_engine(req)
+
+        assert "Rule-Compute-Serverless" in result["rulesTrace"]
+        assert "lb" not in component_ids(result)
+        assert "Rule-LB-Container" not in result["rulesTrace"]
+
+    def test_cdn_connects_through_lb_not_directly_to_compute_when_lb_present(self):
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(
+            functional=["Users can upload profile pictures"], budget="$2,000/month", teamMaturity="senior engineers"
+        )
+        result = run_rules_engine(req)
+
+        assert {"from": "cdn", "to": "lb", "protocol": "HTTPS"} in result["connections"]
+        assert {"from": "cdn", "to": "compute", "protocol": "HTTPS"} not in result["connections"]
+
+    def test_cdn_connects_directly_to_compute_when_no_lb(self):
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(
+            functional=["Users can upload profile pictures"], budget="$50/month", teamMaturity="a junior team"
+        )
+        result = run_rules_engine(req)
+
+        assert "lb" not in component_ids(result)
+        assert {"from": "cdn", "to": "compute", "protocol": "HTTPS"} in result["connections"]
+
+
+class TestDnsRule:
+    def test_dns_added_when_lb_present_and_connects_to_lb(self):
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(budget="$2,000/month", teamMaturity="senior engineers")
+        result = run_rules_engine(req)
+
+        assert "lb" in component_ids(result)
+        assert "dns" in component_ids(result)
+        assert "Rule-DNS-PublicEdge" in result["rulesTrace"]
+        assert {"from": "dns", "to": "lb", "protocol": "DNS"} in result["connections"]
+
+    def test_dns_added_when_only_cdn_present_no_lb_and_connects_to_cdn(self):
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(
+            functional=["Users can upload profile pictures"], budget="$50/month", teamMaturity="a junior team"
+        )
+        result = run_rules_engine(req)
+
+        assert "lb" not in component_ids(result)
+        assert "cdn" in component_ids(result)
+        assert "dns" in component_ids(result)
+        assert {"from": "dns", "to": "cdn", "protocol": "DNS"} in result["connections"]
+        assert {"from": "dns", "to": "lb", "protocol": "DNS"} not in result["connections"]
+
+    def test_dns_not_added_when_neither_lb_nor_cdn_present(self):
+        """Serverless compute (no lb) with no CDN-triggering signals -- no public edge at all, so
+        no DNS component either."""
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(budget="$50/month", teamMaturity="a junior team, first project")
+        result = run_rules_engine(req)
+
+        assert "lb" not in component_ids(result)
+        assert "cdn" not in component_ids(result)
+        assert "dns" not in component_ids(result)
+        assert "Rule-DNS-PublicEdge" not in result["rulesTrace"]
 
 
 class TestDatabaseRelationalVsDocument:

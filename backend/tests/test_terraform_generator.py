@@ -1,15 +1,24 @@
 """Tests for app/services/terraform_generator.py -- pure functions, no DB access.
 
-Covers the fixes for three confirmed bugs (see task description this test suite accompanies):
-  1. Compute services named "... + ALB"/"... + API Gateway"/"... + App Gateway"/"... + HTTPS Load
-     Balancer" now actually emit a real ingress resource wiring to the compute resource, for both
-     the container-based and serverless compute variant of every provider.
+Covers the fixes for three confirmed bugs from Phase 1 (see task description that test suite
+accompanied):
+  1. Compute services previously named "... + ALB"/"... + API Gateway"/"... + App Gateway"/
+     "... + HTTPS Load Balancer" emitted a real ingress resource wiring to the compute resource.
   2. No hardcoded plaintext database password appears anywhere in generated output -- every
-     provider's relational-database branch now generates a `random_password` and stores it in that
+     provider's relational-database branch generates a `random_password` and stores it in that
      cloud's secret manager, never the raw value in an output.
   3. `database.tf` never references a Terraform resource that isn't actually declared, for any
      combination of components (cache-only, cache+NoSQL, cache+relational) -- regression coverage
      for the AWS `aws_elasticache_cluster` -> `aws_db_subnet_group.db_subnets` dangling reference.
+
+Phase 2 moved the load balancer / API gateway out of being bundled into compute's own service
+name and into a real, first-class "lb"-type component (see rules_engine.py/cloud_mapping.py).
+`generate_terraform_code` now triggers ALB/API-Gateway/App-Gateway/HTTPS-LB resource emission off
+an actual "lb"-type component present in `components` AND connected (via `connections`) to the
+compute component it fronts -- never off string-matching compute's own (now-cleaned-up) service
+name. `TestLbComponentDrivenTriggering` below is the regression guard for that: a compute
+component with no connected "lb" component must emit NO ingress resource at all, even though
+older test data might still show old-style bundled service name substrings.
 
 The cross-file "every reference resolves to a declared resource" check is the main regression
 guard against reintroducing bug 3's class of error in any provider/branch.
@@ -55,7 +64,7 @@ def _unresolved_references(files: dict[str, str]) -> list[str]:
 
 def _component(comp_id: str, comp_type: str, name: str, service_names: dict[str, str], config: dict | None = None) -> dict:
     """Builds a minimal component dict with cloudMappings for whichever providers are passed in
-    `service_names` (e.g. {"aws": "Amazon ECS Fargate + ALB"})."""
+    `service_names` (e.g. {"aws": "Amazon ECS Fargate"})."""
     return {
         "id": comp_id,
         "type": comp_type,
@@ -67,59 +76,103 @@ def _component(comp_id: str, comp_type: str, name: str, service_names: dict[str,
     }
 
 
-def _full_stack(provider: str, compute_service: str, database_service: str, cache_service: str, storage_service: str) -> list[dict]:
+def _lb(provider: str, svc: str, target: str = "compute") -> tuple[dict, dict]:
+    """An "lb"-type component plus its lb -> target connection (rules_engine.py's convention: the
+    edge component is always the "from")."""
+    return _component("lb", "lb", "LB", {provider: svc}), {"from": "lb", "to": target, "protocol": "HTTPS"}
+
+
+def _full_stack(
+    provider: str,
+    compute_service: str,
+    database_service: str,
+    cache_service: str,
+    storage_service: str,
+    lb_service: str | None = None,
+) -> tuple[list[dict], list[dict]]:
     """compute (non-worker) + relational database + cache + storage -- the "realistic
-    architecture" combination called out in the task's own manual-verification step."""
-    return [
+    architecture" combination called out in the task's own manual-verification step. Includes a
+    connected "lb" component (fronting "compute") whenever `lb_service` is given."""
+    components = [
         _component("compute", "compute", "API", {provider: compute_service}, {"minInstances": "2"}),
         _component("database", "database", "DB", {provider: database_service}),
         _component("cache", "cache", "Cache", {provider: cache_service}),
         _component("storage", "storage", "Storage", {provider: storage_service}),
     ]
+    connections: list[dict] = []
+    if lb_service:
+        lb_comp, lb_conn = _lb(provider, lb_service)
+        components.append(lb_comp)
+        connections.append(lb_conn)
+    return components, connections
 
 
-AWS_CONTAINER_STACK = _full_stack("aws", "Amazon ECS Fargate + ALB", "Amazon RDS PostgreSQL", "Amazon ElastiCache", "Amazon S3")
-AWS_SERVERLESS_STACK = _full_stack("aws", "AWS Lambda + API Gateway", "Amazon RDS PostgreSQL", "Amazon ElastiCache", "Amazon S3")
-
-AZURE_CONTAINER_STACK = _full_stack(
-    "azure", "Azure Container Apps + App Gateway", "Azure Database for PostgreSQL (Flexible Server)", "Azure Cache for Redis", "Azure Blob Storage"
+AWS_CONTAINER_STACK, AWS_CONTAINER_CONN = _full_stack(
+    "aws", "Amazon ECS Fargate", "Amazon RDS PostgreSQL", "Amazon ElastiCache", "Amazon S3", "Application Load Balancer"
 )
-AZURE_SERVERLESS_STACK = _full_stack(
-    "azure", "Azure Functions + API Management", "Azure Database for PostgreSQL (Flexible Server)", "Azure Cache for Redis", "Azure Blob Storage"
+AWS_SERVERLESS_STACK, AWS_SERVERLESS_CONN = _full_stack(
+    "aws", "AWS Lambda", "Amazon RDS PostgreSQL", "Amazon ElastiCache", "Amazon S3", "Amazon API Gateway (HTTP API)"
 )
 
-GCP_CONTAINER_STACK = _full_stack(
-    "gcp", "Google Cloud Run + HTTPS Load Balancer", "Google Cloud SQL for PostgreSQL (db-custom-1-3840)", "Google Cloud Memorystore", "Google Cloud Storage"
+AZURE_CONTAINER_STACK, AZURE_CONTAINER_CONN = _full_stack(
+    "azure",
+    "Azure Container Apps",
+    "Azure Database for PostgreSQL (Flexible Server)",
+    "Azure Cache for Redis",
+    "Azure Blob Storage",
+    "Azure Application Gateway",
 )
-GCP_SERVERLESS_STACK = _full_stack(
-    "gcp", "Google Cloud Functions + API Gateway", "Google Cloud SQL for PostgreSQL (db-custom-1-3840)", "Google Cloud Memorystore", "Google Cloud Storage"
+AZURE_SERVERLESS_STACK, AZURE_SERVERLESS_CONN = _full_stack(
+    "azure",
+    "Azure Functions",
+    "Azure Database for PostgreSQL (Flexible Server)",
+    "Azure Cache for Redis",
+    "Azure Blob Storage",
+    "Azure API Management",
+)
+
+GCP_CONTAINER_STACK, GCP_CONTAINER_CONN = _full_stack(
+    "gcp",
+    "Google Cloud Run",
+    "Google Cloud SQL for PostgreSQL (db-custom-1-3840)",
+    "Google Cloud Memorystore",
+    "Google Cloud Storage",
+    "Google Cloud Load Balancing (HTTPS)",
+)
+GCP_SERVERLESS_STACK, GCP_SERVERLESS_CONN = _full_stack(
+    "gcp",
+    "Google Cloud Functions",
+    "Google Cloud SQL for PostgreSQL (db-custom-1-3840)",
+    "Google Cloud Memorystore",
+    "Google Cloud Storage",
+    "Google Cloud API Gateway",
 )
 
 
 class TestNoHardcodedPassword:
     def test_no_hardcoded_password_string_any_provider(self):
-        for provider, stack in [
-            ("aws", AWS_CONTAINER_STACK),
-            ("azure", AZURE_CONTAINER_STACK),
-            ("gcp", GCP_CONTAINER_STACK),
+        for provider, stack, conns in [
+            ("aws", AWS_CONTAINER_STACK, AWS_CONTAINER_CONN),
+            ("azure", AZURE_CONTAINER_STACK, AZURE_CONTAINER_CONN),
+            ("gcp", GCP_CONTAINER_STACK, GCP_CONTAINER_CONN),
         ]:
-            files = generate_terraform_code(provider, "TestProj", stack, [], None)
+            files = generate_terraform_code(provider, "TestProj", stack, conns, None)
             for filename, content in files.items():
                 assert HARDCODED_PASSWORD not in content, f"{provider}/{filename} contains the hardcoded password literal"
 
     def test_random_password_resource_present_for_every_relational_db(self):
-        for provider, stack in [
-            ("aws", AWS_CONTAINER_STACK),
-            ("azure", AZURE_CONTAINER_STACK),
-            ("gcp", GCP_CONTAINER_STACK),
+        for provider, stack, conns in [
+            ("aws", AWS_CONTAINER_STACK, AWS_CONTAINER_CONN),
+            ("azure", AZURE_CONTAINER_STACK, AZURE_CONTAINER_CONN),
+            ("gcp", GCP_CONTAINER_STACK, GCP_CONTAINER_CONN),
         ]:
-            files = generate_terraform_code(provider, "TestProj", stack, [], None)
+            files = generate_terraform_code(provider, "TestProj", stack, conns, None)
             assert 'resource "random_password" "db_password"' in files["database.tf"]
 
 
 class TestSecretsAreStoredNotOutputRaw:
     def test_aws_secrets_manager_and_output_is_arn_not_raw_password(self):
-        files = generate_terraform_code("aws", "TestProj", AWS_CONTAINER_STACK, [], None)
+        files = generate_terraform_code("aws", "TestProj", AWS_CONTAINER_STACK, AWS_CONTAINER_CONN, None)
         assert 'resource "aws_secretsmanager_secret" "db_password"' in files["database.tf"]
         assert 'resource "aws_secretsmanager_secret_version" "db_password"' in files["database.tf"]
         assert "random_password.db_password.result" in files["database.tf"]
@@ -128,14 +181,14 @@ class TestSecretsAreStoredNotOutputRaw:
         assert "random_password.db_password.result" not in files["outputs.tf"]
 
     def test_azure_key_vault_and_output_is_reference_not_raw_password(self):
-        files = generate_terraform_code("azure", "TestProj", AZURE_CONTAINER_STACK, [], None)
+        files = generate_terraform_code("azure", "TestProj", AZURE_CONTAINER_STACK, AZURE_CONTAINER_CONN, None)
         assert 'resource "azurerm_key_vault_secret" "db_password"' in files["database.tf"]
         assert "random_password.db_password.result" in files["database.tf"]
         assert "azurerm_key_vault_secret.db_password.id" in files["outputs.tf"]
         assert "random_password.db_password.result" not in files["outputs.tf"]
 
     def test_gcp_secret_manager_and_google_sql_user_present(self):
-        files = generate_terraform_code("gcp", "TestProj", GCP_CONTAINER_STACK, [], None)
+        files = generate_terraform_code("gcp", "TestProj", GCP_CONTAINER_STACK, GCP_CONTAINER_CONN, None)
         # the "related gap" -- google_sql_user was entirely missing before the fix
         assert 'resource "google_sql_user" "db_user"' in files["database.tf"]
         assert 'resource "google_secret_manager_secret" "db_password"' in files["database.tf"]
@@ -145,8 +198,12 @@ class TestSecretsAreStoredNotOutputRaw:
 
 
 class TestLoadBalancerAndApiGatewayResources:
+    """Every one of these stacks has a real "lb"-type component connected to "compute" -- these
+    tests cover the resource shapes moved (not reinvented) from Phase 1, now emitted by the
+    "lb" branch of generate_terraform_code rather than the "compute" branch."""
+
     def test_aws_container_variant_has_alb_and_ecs_load_balancer_block(self):
-        files = generate_terraform_code("aws", "TestProj", AWS_CONTAINER_STACK, [], None)
+        files = generate_terraform_code("aws", "TestProj", AWS_CONTAINER_STACK, AWS_CONTAINER_CONN, None)
         compute = files["compute.tf"]
         assert 'resource "aws_lb" "app"' in compute
         assert 'resource "aws_lb_target_group" "app"' in compute
@@ -159,7 +216,7 @@ class TestLoadBalancerAndApiGatewayResources:
         assert "aws_lb.app.dns_name" in files["outputs.tf"]
 
     def test_aws_serverless_variant_has_http_api_gateway(self):
-        files = generate_terraform_code("aws", "TestProj", AWS_SERVERLESS_STACK, [], None)
+        files = generate_terraform_code("aws", "TestProj", AWS_SERVERLESS_STACK, AWS_SERVERLESS_CONN, None)
         compute = files["compute.tf"]
         assert 'resource "aws_apigatewayv2_api" "compute_api"' in compute
         assert 'resource "aws_apigatewayv2_integration" "compute_integration"' in compute
@@ -170,16 +227,17 @@ class TestLoadBalancerAndApiGatewayResources:
 
     def test_aws_worker_component_gets_no_public_ingress(self):
         """Background workers (component id "worker") must never get an ALB/API Gateway --
-        matches the k8s_manifest_generator.py convention of no Service/ingress for workers."""
+        matches the k8s_manifest_generator.py convention of no Service/ingress for workers.
+        rules_engine.py only ever wires lb -> "compute", never lb -> "worker"."""
         stack = AWS_CONTAINER_STACK + [_component("worker", "compute", "Worker", {"aws": "Amazon ECS Fargate (Worker)"})]
-        files = generate_terraform_code("aws", "TestProj", stack, [], None)
+        files = generate_terraform_code("aws", "TestProj", stack, AWS_CONTAINER_CONN, None)
         compute = files["compute.tf"]
         assert 'resource "aws_ecs_service" "worker_service"' in compute
         # only one ALB total (the primary compute's), not one per compute component
         assert compute.count('resource "aws_lb" "app"') == 1
 
     def test_azure_container_variant_has_application_gateway(self):
-        files = generate_terraform_code("azure", "TestProj", AZURE_CONTAINER_STACK, [], None)
+        files = generate_terraform_code("azure", "TestProj", AZURE_CONTAINER_STACK, AZURE_CONTAINER_CONN, None)
         compute = files["compute.tf"]
         assert 'resource "azurerm_application_gateway" "appgw"' in compute
         assert "ingress {" in compute  # container app now actually has ingress enabled
@@ -187,7 +245,7 @@ class TestLoadBalancerAndApiGatewayResources:
         assert "azurerm_public_ip.appgw_pip.ip_address" in files["outputs.tf"]
 
     def test_azure_serverless_variant_has_api_management(self):
-        files = generate_terraform_code("azure", "TestProj", AZURE_SERVERLESS_STACK, [], None)
+        files = generate_terraform_code("azure", "TestProj", AZURE_SERVERLESS_STACK, AZURE_SERVERLESS_CONN, None)
         compute = files["compute.tf"]
         assert 'resource "azurerm_api_management" "apim"' in compute
         assert 'resource "azurerm_api_management_backend" "compute_backend"' in compute
@@ -195,7 +253,7 @@ class TestLoadBalancerAndApiGatewayResources:
         assert "azurerm_api_management.apim.gateway_url" in files["outputs.tf"]
 
     def test_gcp_container_variant_has_https_load_balancer(self):
-        files = generate_terraform_code("gcp", "TestProj", GCP_CONTAINER_STACK, [], None)
+        files = generate_terraform_code("gcp", "TestProj", GCP_CONTAINER_STACK, GCP_CONTAINER_CONN, None)
         compute = files["compute.tf"]
         assert 'resource "google_compute_backend_service" "compute_backend"' in compute
         assert 'resource "google_compute_url_map" "compute_url_map"' in compute
@@ -204,12 +262,68 @@ class TestLoadBalancerAndApiGatewayResources:
         assert "google_compute_global_address.compute_lb_ip.address" in files["outputs.tf"]
 
     def test_gcp_serverless_variant_has_api_gateway(self):
-        files = generate_terraform_code("gcp", "TestProj", GCP_SERVERLESS_STACK, [], None)
+        files = generate_terraform_code("gcp", "TestProj", GCP_SERVERLESS_STACK, GCP_SERVERLESS_CONN, None)
         compute = files["compute.tf"]
         assert 'resource "google_api_gateway_api" "compute_api"' in compute
         assert 'resource "google_api_gateway_api_config" "compute_config"' in compute
         assert 'resource "google_api_gateway_gateway" "compute_gateway"' in compute
         assert "google_api_gateway_gateway.compute_gateway.default_hostname" in files["outputs.tf"]
+
+
+class TestLbComponentDrivenTriggering:
+    """Phase 2 regression guard: ingress resource emission is driven ENTIRELY by an actual
+    "lb"-type component present in `components` and connected (via `connections`) to the compute
+    component it fronts -- never by string-matching compute's own service name. A compute
+    component alone, even one whose LLD/service name looks container/serverless-flavored, gets
+    no ALB/API Gateway/App Gateway/HTTPS-LB resource at all without a connected "lb" component."""
+
+    def test_aws_compute_alone_gets_no_alb_without_lb_component(self):
+        stack, _ = _full_stack("aws", "Amazon ECS Fargate", "Amazon RDS PostgreSQL", "Amazon ElastiCache", "Amazon S3")
+        files = generate_terraform_code("aws", "TestProj", stack, [], None)
+        compute = files["compute.tf"]
+        assert "aws_lb" not in compute
+        assert "load_balancer {" not in compute
+        # app_sg falls back to trusting the raw internet since no ALB fronts it
+        assert 'cidr_blocks = ["0.0.0.0/0"]' in compute
+
+    def test_aws_lambda_alone_gets_no_api_gateway_without_lb_component(self):
+        stack, _ = _full_stack("aws", "AWS Lambda", "Amazon RDS PostgreSQL", "Amazon ElastiCache", "Amazon S3")
+        files = generate_terraform_code("aws", "TestProj", stack, [], None)
+        assert "aws_apigatewayv2" not in files["compute.tf"]
+        assert "aws_apigatewayv2" not in files["outputs.tf"]
+
+    def test_azure_compute_alone_gets_no_app_gateway_without_lb_component(self):
+        stack, _ = _full_stack(
+            "azure", "Azure Container Apps", "Azure Database for PostgreSQL (Flexible Server)", "Azure Cache for Redis", "Azure Blob Storage"
+        )
+        files = generate_terraform_code("azure", "TestProj", stack, [], None)
+        assert "azurerm_application_gateway" not in files["compute.tf"]
+
+    def test_gcp_compute_alone_gets_no_https_lb_without_lb_component(self):
+        stack, _ = _full_stack(
+            "gcp", "Google Cloud Run", "Google Cloud SQL for PostgreSQL (db-custom-1-3840)", "Google Cloud Memorystore", "Google Cloud Storage"
+        )
+        files = generate_terraform_code("gcp", "TestProj", stack, [], None)
+        assert "google_compute_backend_service" not in files["compute.tf"]
+
+    def test_lb_component_present_but_unconnected_emits_nothing(self):
+        """An "lb" component that isn't actually wired to any compute component (dangling in the
+        editor, or connected to something else) must not emit ingress resources either -- the
+        connection is what identifies the target, not mere presence of the component."""
+        lb_comp, _ = _lb("aws", "Application Load Balancer")
+        stack = [
+            _component("compute", "compute", "API", {"aws": "Amazon ECS Fargate"}),
+            lb_comp,
+        ]
+        files = generate_terraform_code("aws", "TestProj", stack, [], None)
+        assert "aws_lb" not in files["compute.tf"]
+
+    def test_compute_service_name_no_longer_carries_bundled_suffix(self):
+        """cloud_mapping.py no longer bundles the LB/gateway into compute's own serviceName --
+        this is a documentation-style assertion on the test fixtures themselves, confirming the
+        stacks in this file reflect the real (Phase 2) cloud_mapping.py output shape."""
+        for svc in ("Amazon ECS Fargate", "AWS Lambda", "Azure Container Apps", "Azure Functions", "Google Cloud Run", "Google Cloud Functions"):
+            assert "+" not in svc
 
 
 class TestEveryReferenceResolves:
@@ -219,15 +333,15 @@ class TestEveryReferenceResolves:
 
     def test_all_full_stacks_have_no_dangling_references(self):
         stacks = {
-            "aws-container": ("aws", AWS_CONTAINER_STACK),
-            "aws-serverless": ("aws", AWS_SERVERLESS_STACK),
-            "azure-container": ("azure", AZURE_CONTAINER_STACK),
-            "azure-serverless": ("azure", AZURE_SERVERLESS_STACK),
-            "gcp-container": ("gcp", GCP_CONTAINER_STACK),
-            "gcp-serverless": ("gcp", GCP_SERVERLESS_STACK),
+            "aws-container": ("aws", AWS_CONTAINER_STACK, AWS_CONTAINER_CONN),
+            "aws-serverless": ("aws", AWS_SERVERLESS_STACK, AWS_SERVERLESS_CONN),
+            "azure-container": ("azure", AZURE_CONTAINER_STACK, AZURE_CONTAINER_CONN),
+            "azure-serverless": ("azure", AZURE_SERVERLESS_STACK, AZURE_SERVERLESS_CONN),
+            "gcp-container": ("gcp", GCP_CONTAINER_STACK, GCP_CONTAINER_CONN),
+            "gcp-serverless": ("gcp", GCP_SERVERLESS_STACK, GCP_SERVERLESS_CONN),
         }
-        for label, (provider, stack) in stacks.items():
-            files = generate_terraform_code(provider, "TestProj", stack, [], None)
+        for label, (provider, stack, conns) in stacks.items():
+            files = generate_terraform_code(provider, "TestProj", stack, conns, None)
             unresolved = _unresolved_references(files)
             assert unresolved == [], f"{label}: dangling references found: {unresolved}"
 
@@ -293,11 +407,24 @@ def _duplicate_declarations(files: dict[str, str]) -> list[str]:
     return [f"{rtype}.{rname} ({count}x)" for (rtype, rname), count in seen.items() if count > 1]
 
 
-def _kitchen_sink(provider: str, compute_svc: str, worker_svc: str, db_svc: str, cache_svc: str, storage_svc: str, cdn_svc: str, auth_svc: str, queue_svc: str) -> list[dict]:
+def _kitchen_sink(
+    provider: str,
+    compute_svc: str,
+    worker_svc: str,
+    db_svc: str,
+    cache_svc: str,
+    storage_svc: str,
+    cdn_svc: str,
+    auth_svc: str,
+    queue_svc: str,
+    lb_svc: str,
+    dns_svc: str,
+) -> tuple[list[dict], list[dict]]:
     """compute + worker (both type=="compute", the combination that exposed the Azure shared-
-    resource duplicate-declaration bug) + every other component type -- the broadest realistic
-    architecture this generator has to handle in one pass."""
-    return [
+    resource duplicate-declaration bug) + every other component type, including the new "lb" and
+    "dns" components -- the broadest realistic architecture this generator has to handle in one
+    pass (the same "kitchen sink" shape used for the real `terraform validate` verification)."""
+    components = [
         _component("compute", "compute", "API", {provider: compute_svc}, {"minInstances": "2"}),
         _component("worker", "compute", "Worker", {provider: worker_svc}),
         _component("database", "database", "DB", {provider: db_svc}),
@@ -306,16 +433,60 @@ def _kitchen_sink(provider: str, compute_svc: str, worker_svc: str, db_svc: str,
         _component("cdn", "cdn", "CDN", {provider: cdn_svc}),
         _component("auth", "auth", "Auth", {provider: auth_svc}),
         _component("queue", "queue", "Queue", {provider: queue_svc}),
+        _component("lb", "lb", "LB", {provider: lb_svc}),
+        _component("dns", "dns", "DNS", {provider: dns_svc}),
     ]
+    connections = [
+        {"from": "cdn", "to": "lb", "protocol": "HTTPS"},
+        {"from": "lb", "to": "compute", "protocol": "HTTPS"},
+        {"from": "dns", "to": "lb", "protocol": "DNS"},
+    ]
+    return components, connections
 
 
 KITCHEN_SINK_STACKS = {
-    "aws_container": ("aws", _kitchen_sink("aws", "Amazon ECS Fargate + ALB", "AWS Lambda (Worker)", "Amazon RDS PostgreSQL", "Amazon ElastiCache", "Amazon S3", "Amazon CloudFront", "Amazon Cognito", "Amazon SQS")),
-    "aws_serverless": ("aws", _kitchen_sink("aws", "AWS Lambda + API Gateway", "AWS Lambda (Worker)", "Amazon DynamoDB", "Amazon ElastiCache", "Amazon S3", "Amazon CloudFront", "Amazon Cognito", "Amazon SQS")),
-    "azure_container": ("azure", _kitchen_sink("azure", "Azure Container Apps", "Azure Container Apps (Worker)", "Azure Database for PostgreSQL", "Azure Cache for Redis", "Azure Blob Storage", "Azure Front Door", "Azure AD B2C", "Azure Service Bus")),
-    "azure_serverless": ("azure", _kitchen_sink("azure", "Azure Functions", "Azure Functions (Worker)", "Azure Database for PostgreSQL", "Azure Cache for Redis", "Azure Blob Storage", "Azure Front Door", "Azure AD B2C", "Azure Service Bus")),
-    "gcp_container": ("gcp", _kitchen_sink("gcp", "Google Cloud Run", "Google Cloud Run (Worker)", "Cloud SQL for PostgreSQL", "Memorystore for Redis", "Cloud Storage", "Cloud CDN", "Firebase Authentication", "Cloud Pub/Sub")),
-    "gcp_serverless": ("gcp", _kitchen_sink("gcp", "Google Cloud Functions", "Google Cloud Functions (Worker)", "Cloud SQL for PostgreSQL", "Memorystore for Redis", "Cloud Storage", "Cloud CDN", "Firebase Authentication", "Cloud Pub/Sub")),
+    "aws_container": (
+        "aws",
+        *_kitchen_sink(
+            "aws", "Amazon ECS Fargate", "AWS Lambda (Worker)", "Amazon RDS PostgreSQL", "Amazon ElastiCache", "Amazon S3",
+            "Amazon CloudFront", "Amazon Cognito", "Amazon SQS", "Application Load Balancer", "Amazon Route 53",
+        ),
+    ),
+    "aws_serverless": (
+        "aws",
+        *_kitchen_sink(
+            "aws", "AWS Lambda", "AWS Lambda (Worker)", "Amazon DynamoDB", "Amazon ElastiCache", "Amazon S3",
+            "Amazon CloudFront", "Amazon Cognito", "Amazon SQS", "Amazon API Gateway (HTTP API)", "Amazon Route 53",
+        ),
+    ),
+    "azure_container": (
+        "azure",
+        *_kitchen_sink(
+            "azure", "Azure Container Apps", "Azure Container Apps (Worker)", "Azure Database for PostgreSQL", "Azure Cache for Redis", "Azure Blob Storage",
+            "Azure Front Door", "Azure AD B2C", "Azure Service Bus", "Azure Application Gateway", "Azure DNS",
+        ),
+    ),
+    "azure_serverless": (
+        "azure",
+        *_kitchen_sink(
+            "azure", "Azure Functions", "Azure Functions (Worker)", "Azure Database for PostgreSQL", "Azure Cache for Redis", "Azure Blob Storage",
+            "Azure Front Door", "Azure AD B2C", "Azure Service Bus", "Azure API Management", "Azure DNS",
+        ),
+    ),
+    "gcp_container": (
+        "gcp",
+        *_kitchen_sink(
+            "gcp", "Google Cloud Run", "Google Cloud Run (Worker)", "Cloud SQL for PostgreSQL", "Memorystore for Redis", "Cloud Storage",
+            "Cloud CDN", "Firebase Authentication", "Cloud Pub/Sub", "Google Cloud Load Balancing (HTTPS)", "Google Cloud DNS",
+        ),
+    ),
+    "gcp_serverless": (
+        "gcp",
+        *_kitchen_sink(
+            "gcp", "Google Cloud Functions", "Google Cloud Functions (Worker)", "Cloud SQL for PostgreSQL", "Memorystore for Redis", "Cloud Storage",
+            "Cloud CDN", "Firebase Authentication", "Cloud Pub/Sub", "Google Cloud API Gateway", "Google Cloud DNS",
+        ),
+    ),
 }
 
 
@@ -327,8 +498,8 @@ class TestNoDuplicateResourceDeclarations:
     azurerm_container_app_environment.env) twice."""
 
     def test_no_duplicate_declarations_any_provider_compute_plus_worker(self):
-        for name, (provider, stack) in KITCHEN_SINK_STACKS.items():
-            files = generate_terraform_code(provider, "KitchenSink", stack, [], None)
+        for name, (provider, stack, conns) in KITCHEN_SINK_STACKS.items():
+            files = generate_terraform_code(provider, "KitchenSink", stack, conns, None)
             dupes = _duplicate_declarations(files)
             assert dupes == [], f"{name}: duplicate resource declarations found: {dupes}"
 
@@ -359,8 +530,8 @@ class TestTerraformValidate:
     def test_generated_terraform_validates(self, terraform_available, name, tmp_path):
         import subprocess
 
-        provider, stack = KITCHEN_SINK_STACKS[name]
-        files = generate_terraform_code(provider, "ValidateTest", stack, [], None)
+        provider, stack, conns = KITCHEN_SINK_STACKS[name]
+        files = generate_terraform_code(provider, "ValidateTest", stack, conns, None)
         for filename, content in files.items():
             if not filename.endswith(".tf"):
                 continue

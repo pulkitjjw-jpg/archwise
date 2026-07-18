@@ -142,41 +142,111 @@ def _aws_mapping(
         )
         if is_serverless_rules:
             return _mapping(
-                "AWS Lambda + API Gateway",
+                "AWS Lambda",
                 [
                     {
                         "serviceName": "Amazon ECS Fargate",
                         "reason": "Chose Lambda to leverage pay-per-request pricing and zero management overhead. Fargate containers have a higher fixed monthly cost.",
                         "costEstimate": {
-                            "min": 25,
-                            "max": 250 if is_high_scale else 60,
-                            "assumptions": "Application Load Balancer baseline cost ($18/month) + 1-2 ECS Fargate tasks (0.5 vCPU, 1GB RAM) running 24/7.",
+                            "min": 15,
+                            "max": 220 if is_high_scale else 42,
+                            "assumptions": "1-2 ECS Fargate tasks (0.5 vCPU, 1GB RAM) running 24/7; its fronting Application Load Balancer is costed separately as the architecture's own \"lb\" component.",
                         },
                     }
                 ],
                 {
                     "min": 0,
                     "max": 80 if is_high_scale else 10,
-                    "assumptions": "API Gateway HTTP API requests ($1.00/million) + Lambda execution times (128MB RAM, 100ms duration).",
+                    "assumptions": "Lambda execution times (128MB RAM, 100ms duration). Its fronting API Gateway is costed separately as the architecture's own \"lb\" component.",
                 },
             )
         return _mapping(
-            "Amazon ECS Fargate + ALB",
+            "Amazon ECS Fargate",
             [
                 {
-                    "serviceName": "AWS Lambda + API Gateway",
-                    "reason": "Chose Fargate because the application has long-running connections or consistent request streams. ALB provides better caching and SSL termination.",
+                    "serviceName": "AWS Lambda",
+                    "reason": "Chose Fargate because the application has long-running connections or consistent request streams. An ALB in front of Fargate provides better caching and SSL termination than API Gateway's Lambda integration.",
                     "costEstimate": {
                         "min": 0,
                         "max": 80 if is_high_scale else 10,
-                        "assumptions": "API Gateway HTTP API requests ($1.00/million) + Lambda execution times (128MB RAM, 100ms duration).",
+                        "assumptions": "Lambda execution times (128MB RAM, 100ms duration). Its fronting API Gateway is costed separately as the architecture's own \"lb\" component.",
                     },
                 }
             ],
             {
-                "min": 25,
-                "max": 250 if is_high_scale else 60,
-                "assumptions": "Application Load Balancer baseline cost ($18/month) + 1-2 ECS Fargate tasks (0.5 vCPU, 1GB RAM) running 24/7.",
+                "min": 15,
+                "max": 220 if is_high_scale else 42,
+                "assumptions": "1-2 ECS Fargate tasks (0.5 vCPU, 1GB RAM) running 24/7; its fronting Application Load Balancer is costed separately as the architecture's own \"lb\" component.",
+            },
+        )
+
+    if component_type == "lb":
+        # This branch doesn't yet know whether it's fronting serverless or container-style
+        # compute, so it recomputes the exact same signal the compute branch above used --
+        # deterministic, so it always agrees with whatever compute actually chose, whether the
+        # "lb" component was auto-added by rules_engine.py (container-only) or added manually
+        # via the editor onto a serverless architecture.
+        is_serverless_rules = is_low_budget and (
+            "junior" in team_lower or "small" in team_lower or team_lower == "not_specified"
+        )
+        if is_serverless_rules:
+            return _mapping(
+                "Amazon API Gateway (HTTP API)",
+                [
+                    {
+                        "serviceName": "Application Load Balancer",
+                        "reason": "Chose API Gateway's HTTP API for native Lambda proxy integration with no idle-capacity cost. An ALB is the right fit once compute is container-based rather than Lambda.",
+                        "costEstimate": {
+                            "min": 18,
+                            "max": 60 if is_high_scale else 20,
+                            "assumptions": "ALB fixed hourly charge (~$18/month) plus Load Balancer Capacity Unit (LCU) charges that scale with traffic.",
+                        },
+                    }
+                ],
+                {
+                    "min": 0,
+                    "max": 80 if is_high_scale else 10,
+                    "assumptions": "API Gateway HTTP API requests ($1.00/million) -- no fixed baseline cost, scales to zero with traffic.",
+                },
+            )
+        return _mapping(
+            "Application Load Balancer",
+            [
+                {
+                    "serviceName": "Amazon API Gateway (HTTP API)",
+                    "reason": "Chose an ALB for the health-checked, sticky-session-capable routing that a fleet of long-running container instances needs. API Gateway's HTTP API is the better fit once compute is Lambda-based.",
+                    "costEstimate": {
+                        "min": 0,
+                        "max": 80 if is_high_scale else 10,
+                        "assumptions": "API Gateway HTTP API requests ($1.00/million) -- no fixed baseline cost, scales to zero with traffic.",
+                    },
+                }
+            ],
+            {
+                "min": 18,
+                "max": 60 if is_high_scale else 20,
+                "assumptions": "ALB fixed hourly charge (~$18/month) plus Load Balancer Capacity Unit (LCU) charges that scale with traffic.",
+            },
+        )
+
+    if component_type == "dns":
+        return _mapping(
+            "Amazon Route 53",
+            [
+                {
+                    "serviceName": "Third-Party DNS (e.g. Cloudflare DNS)",
+                    "reason": "Chose Route 53 for native AWS integration -- alias records can point directly at an ALB/CloudFront/API Gateway with no extra CNAME indirection. A third-party DNS provider is a reasonable choice if DNS is already managed there for other domains.",
+                    "costEstimate": {
+                        "min": 0,
+                        "max": 20 if is_high_scale else 5,
+                        "assumptions": "Most third-party DNS providers price hosted zones/queries comparably to Route 53 at this volume.",
+                    },
+                }
+            ],
+            {
+                "min": 0.50,
+                "max": 5 if is_high_scale else 1,
+                "assumptions": "Route 53 hosted zone ($0.50/month) plus per-million-query pricing; negligible at this traffic volume.",
             },
         )
 
@@ -527,26 +597,26 @@ def _azure_mapping(
         )
         if is_serverless_rules:
             return _mapping(
-                "Azure Functions + API Management",
+                "Azure Functions",
                 [
                     {
                         "serviceName": "Azure Container Apps",
                         "reason": "Chose Azure Functions to minimize fixed costs, charging strictly per request. Container Apps has a slightly higher base footprint cost.",
                         "costEstimate": {
-                            "min": 25,
-                            "max": 260 if is_high_scale else 65,
-                            "assumptions": "Azure App Gateway baseline costs ($18/mo) + Container App execution (1-2 replicas).",
+                            "min": 15,
+                            "max": 230 if is_high_scale else 45,
+                            "assumptions": "Container App execution (1-2 replicas); its fronting Application Gateway is costed separately as the architecture's own \"lb\" component.",
                         },
                     }
                 ],
                 {
                     "min": 0,
                     "max": 85 if is_high_scale else 10,
-                    "assumptions": "API Management Consumption tier + Serverless Functions executions.",
+                    "assumptions": "Serverless Functions executions; its fronting API Management gateway is costed separately as the architecture's own \"lb\" component.",
                 },
             )
         return _mapping(
-            "Azure Container Apps + App Gateway",
+            "Azure Container Apps",
             [
                 {
                     "serviceName": "Azure App Service (Linux Web App)",
@@ -554,14 +624,79 @@ def _azure_mapping(
                     "costEstimate": {
                         "min": 0,
                         "max": 85 if is_high_scale else 10,
-                        "assumptions": "API Management Consumption tier + Serverless Functions executions.",
+                        "assumptions": "Serverless Functions executions; its fronting API Management gateway is costed separately as the architecture's own \"lb\" component.",
                     },
                 }
             ],
             {
-                "min": 25,
-                "max": 260 if is_high_scale else 65,
-                "assumptions": "Azure App Gateway baseline costs ($18/mo) + Container App execution (1-2 replicas).",
+                "min": 15,
+                "max": 230 if is_high_scale else 45,
+                "assumptions": "Container App execution (1-2 replicas); its fronting Application Gateway is costed separately as the architecture's own \"lb\" component.",
+            },
+        )
+
+    if component_type == "lb":
+        is_serverless_rules = is_low_budget and (
+            "junior" in team_lower or "small" in team_lower or team_lower == "not_specified"
+        )
+        if is_serverless_rules:
+            return _mapping(
+                "Azure API Management",
+                [
+                    {
+                        "serviceName": "Azure Application Gateway",
+                        "reason": "Chose API Management's Consumption tier for a gateway that scales to zero with Functions. Application Gateway is the right fit once compute is container-based rather than Functions.",
+                        "costEstimate": {
+                            "min": 18,
+                            "max": 55 if is_high_scale else 20,
+                            "assumptions": "Application Gateway Standard_v2 baseline cost (~$18/month) plus capacity unit charges that scale with traffic.",
+                        },
+                    }
+                ],
+                {
+                    "min": 0,
+                    "max": 85 if is_high_scale else 10,
+                    "assumptions": "API Management Consumption tier -- billed per API call, no fixed baseline cost.",
+                },
+            )
+        return _mapping(
+            "Azure Application Gateway",
+            [
+                {
+                    "serviceName": "Azure API Management",
+                    "reason": "Chose Application Gateway for health-checked routing and TLS termination in front of a fleet of container instances. API Management's Consumption tier is the better fit once compute is Functions-based.",
+                    "costEstimate": {
+                        "min": 0,
+                        "max": 85 if is_high_scale else 10,
+                        "assumptions": "API Management Consumption tier -- billed per API call, no fixed baseline cost.",
+                    },
+                }
+            ],
+            {
+                "min": 18,
+                "max": 55 if is_high_scale else 20,
+                "assumptions": "Application Gateway Standard_v2 baseline cost (~$18/month) plus capacity unit charges that scale with traffic.",
+            },
+        )
+
+    if component_type == "dns":
+        return _mapping(
+            "Azure DNS",
+            [
+                {
+                    "serviceName": "Third-Party DNS (e.g. Cloudflare DNS)",
+                    "reason": "Chose Azure DNS for native alias-record integration with Application Gateway/Front Door/API Management. A third-party DNS provider is a reasonable choice if DNS is already managed there for other domains.",
+                    "costEstimate": {
+                        "min": 0,
+                        "max": 20 if is_high_scale else 5,
+                        "assumptions": "Most third-party DNS providers price hosted zones/queries comparably to Azure DNS at this volume.",
+                    },
+                }
+            ],
+            {
+                "min": 0.50,
+                "max": 5 if is_high_scale else 1,
+                "assumptions": "Azure DNS hosted zone (~$0.50/month) plus per-million-query pricing; negligible at this traffic volume.",
             },
         )
 
@@ -912,26 +1047,26 @@ def _gcp_mapping(
         )
         if is_serverless_rules:
             return _mapping(
-                "Google Cloud Functions + API Gateway",
+                "Google Cloud Functions",
                 [
                     {
                         "serviceName": "Google Cloud Run",
                         "reason": "Chose Cloud Functions for minimal serverless orchestration overhead. Cloud Run is serverless but requires containerizing the API.",
                         "costEstimate": {
-                            "min": 20,
-                            "max": 240 if is_high_scale else 60,
-                            "assumptions": "GCP Global HTTPS Load Balancer baseline cost ($18/mo) + Cloud Run CPU allocation.",
+                            "min": 12,
+                            "max": 220 if is_high_scale else 42,
+                            "assumptions": "Cloud Run CPU allocation; its fronting HTTPS Load Balancer is costed separately as the architecture's own \"lb\" component.",
                         },
                     }
                 ],
                 {
                     "min": 0,
                     "max": 80 if is_high_scale else 10,
-                    "assumptions": "API Gateway request pricing + Cloud Functions executions duration costs.",
+                    "assumptions": "Cloud Functions execution duration costs; its fronting API Gateway is costed separately as the architecture's own \"lb\" component.",
                 },
             )
         return _mapping(
-            "Google Cloud Run + HTTPS Load Balancer",
+            "Google Cloud Run",
             [
                 {
                     "serviceName": "Google Kubernetes Engine (GKE Autopilot)",
@@ -944,9 +1079,74 @@ def _gcp_mapping(
                 }
             ],
             {
-                "min": 20,
-                "max": 240 if is_high_scale else 60,
-                "assumptions": "GCP Global HTTPS Load Balancer baseline cost ($18/mo) + Cloud Run CPU allocation.",
+                "min": 12,
+                "max": 220 if is_high_scale else 42,
+                "assumptions": "Cloud Run CPU allocation; its fronting HTTPS Load Balancer is costed separately as the architecture's own \"lb\" component.",
+            },
+        )
+
+    if component_type == "lb":
+        is_serverless_rules = is_low_budget and (
+            "junior" in team_lower or "small" in team_lower or team_lower == "not_specified"
+        )
+        if is_serverless_rules:
+            return _mapping(
+                "Google Cloud API Gateway",
+                [
+                    {
+                        "serviceName": "Google Cloud Load Balancing (HTTPS)",
+                        "reason": "Chose API Gateway for native Cloud Functions request routing at low idle cost. A full HTTPS Load Balancer is the right fit once compute is Cloud Run/GKE-based rather than Cloud Functions.",
+                        "costEstimate": {
+                            "min": 18,
+                            "max": 55 if is_high_scale else 20,
+                            "assumptions": "Global external HTTPS Load Balancer forwarding rule baseline (~$18/month) plus data processing fees.",
+                        },
+                    }
+                ],
+                {
+                    "min": 0,
+                    "max": 80 if is_high_scale else 10,
+                    "assumptions": "API Gateway request pricing -- billed per call, no fixed baseline cost.",
+                },
+            )
+        return _mapping(
+            "Google Cloud Load Balancing (HTTPS)",
+            [
+                {
+                    "serviceName": "Google Cloud API Gateway",
+                    "reason": "Chose the HTTPS Load Balancer for global anycast routing and health checks in front of a serverless-NEG-backed compute fleet. API Gateway is the better fit once compute is Cloud Functions-based.",
+                    "costEstimate": {
+                        "min": 0,
+                        "max": 80 if is_high_scale else 10,
+                        "assumptions": "API Gateway request pricing -- billed per call, no fixed baseline cost.",
+                    },
+                }
+            ],
+            {
+                "min": 18,
+                "max": 55 if is_high_scale else 20,
+                "assumptions": "Global external HTTPS Load Balancer forwarding rule baseline (~$18/month) plus data processing fees.",
+            },
+        )
+
+    if component_type == "dns":
+        return _mapping(
+            "Google Cloud DNS",
+            [
+                {
+                    "serviceName": "Third-Party DNS (e.g. Cloudflare DNS)",
+                    "reason": "Chose Cloud DNS for native alias-record integration with the HTTPS Load Balancer/API Gateway. A third-party DNS provider is a reasonable choice if DNS is already managed there for other domains.",
+                    "costEstimate": {
+                        "min": 0,
+                        "max": 20 if is_high_scale else 5,
+                        "assumptions": "Most third-party DNS providers price hosted zones/queries comparably to Cloud DNS at this volume.",
+                    },
+                }
+            ],
+            {
+                "min": 0.20,
+                "max": 5 if is_high_scale else 1,
+                "assumptions": "Cloud DNS managed zone (~$0.20/month) plus per-million-query pricing; negligible at this traffic volume.",
             },
         )
 
@@ -1239,6 +1439,54 @@ def _kubernetes_mapping(component_type: str, component_id: str, is_high_scale: b
                 "min": 5,
                 "max": 40 if is_high_scale else 15,
                 "assumptions": "Ingress-NGINX controller (2 replicas) + cert-manager pods running within existing cluster capacity — incremental infra cost only, no edge network.",
+            },
+        )
+
+    if component_type == "lb":
+        # Conceptually the same role the AWS/Azure/GCP "lb" mapping plays -- the cluster's own
+        # Ingress controller is the L7 routing/health-check/TLS-termination layer in front of
+        # compute. Named distinctly from the "cdn" branch above (which also happens to return an
+        # Ingress-NGINX + cert-manager pairing, since Kubernetes has no provider-specific CDN
+        # edge network of its own) to keep the routing role and the TLS/edge-caching role legible
+        # as separate concerns even when both resolve to the same underlying controller.
+        return _mapping(
+            "Ingress-NGINX Controller (LoadBalancer Service, L7 Routing + Health Checks)",
+            [
+                {
+                    "serviceName": "Cloud Load Balancer (Provisioned Directly, Bypassing Ingress)",
+                    "reason": "Chose Ingress-NGINX for a portable, provider-agnostic routing layer defined declaratively as cluster config. Provisioning the cloud host's native load balancer directly is possible but ties the manifests to one specific cloud, defeating the point of a Kubernetes-first deployment target.",
+                    "costEstimate": {
+                        "min": 18 if is_high_scale else 0,
+                        "max": 60 if is_high_scale else 20,
+                        "assumptions": "Native cloud load balancer (ALB/App Gateway/Cloud LB) billed directly by whichever cloud host the cluster runs on, outside Kubernetes' own cost accounting.",
+                    },
+                }
+            ],
+            {
+                "min": 5,
+                "max": 40 if is_high_scale else 15,
+                "assumptions": "Ingress-NGINX controller (2 replicas) running within existing cluster capacity, plus the cloud host's underlying LoadBalancer Service billing for the external IP itself.",
+            },
+        )
+
+    if component_type == "dns":
+        return _mapping(
+            "ExternalDNS Operator (Syncs Ingress Hostnames to an External DNS Provider)",
+            [
+                {
+                    "serviceName": "Manually Managed DNS Records (No In-Cluster Automation)",
+                    "reason": "Chose the ExternalDNS operator so DNS records stay in sync automatically whenever an Ingress hostname changes. Manually managing records avoids running an extra in-cluster controller, at the cost of a manual step on every hostname change.",
+                    "costEstimate": {
+                        "min": 0,
+                        "max": 5 if is_high_scale else 1,
+                        "assumptions": "DNS record changes made by hand against whichever DNS provider hosts the zone; no automation cost, but no automation either.",
+                    },
+                }
+            ],
+            {
+                "min": 0,
+                "max": 5 if is_high_scale else 1,
+                "assumptions": "ExternalDNS runs as a small in-cluster Deployment; the actual DNS hosting/query cost is billed by whichever external provider (Route 53/Cloud DNS/etc.) holds the zone, not by the cluster itself.",
             },
         )
 
@@ -1538,6 +1786,48 @@ def _private_mapping(component_type: str, component_id: str, is_high_scale: bool
                 "min": 5,
                 "max": 20,
                 "assumptions": "NGINX/HAProxy reverse-proxy VM(s). No edge caching network — static assets are served from origin unless a hybrid CDN is added in front.",
+            },
+        )
+
+    if component_type == "lb":
+        return _mapping(
+            "Self-Managed Load Balancer (HAProxy/NGINX on Dedicated VM)",
+            [
+                {
+                    "serviceName": "Hardware Load Balancer Appliance (e.g. F5 BIG-IP)",
+                    "reason": "Chose software HAProxy/NGINX for lower cost and full configuration control. A dedicated hardware appliance offers higher raw throughput and vendor support at a significant capital expense.",
+                    "costEstimate": {
+                        "min": 5000,
+                        "max": 20000,
+                        "assumptions": "Dedicated hardware load balancer appliance purchase/lease, amortized monthly — a significant capital expense.",
+                    },
+                }
+            ],
+            {
+                "min": 60 if is_high_scale else 25,
+                "max": 250 if is_high_scale else 90,
+                "assumptions": "Dedicated VM(s) running HAProxy/NGINX in an active/passive or active/active pair. Flag: no managed failover — health checks, TLS certificate renewal, and failover are fully manual operational responsibilities.",
+            },
+        )
+
+    if component_type == "dns":
+        return _mapping(
+            "Manually Managed DNS Records (Existing Corporate DNS / BIND Server)",
+            [
+                {
+                    "serviceName": "Managed DNS Provider (Hybrid — Public Records Only)",
+                    "reason": "Chose the existing corporate DNS infrastructure to keep internal/private records under the same authority private infrastructure already uses. A managed public DNS provider is a reasonable hybrid for just the public-facing record if one is needed.",
+                    "costEstimate": {
+                        "min": 0,
+                        "max": 5 if is_high_scale else 1,
+                        "assumptions": "Managed public DNS provider pricing for the subset of records that need to be internet-resolvable.",
+                    },
+                }
+            ],
+            {
+                "min": 0,
+                "max": 0,
+                "assumptions": "Flag: no managed DNS automation on-premises — record changes (including any future failover routing) are a manual change against the existing DNS server, with no API-driven update path.",
             },
         )
 

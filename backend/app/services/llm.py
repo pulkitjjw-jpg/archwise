@@ -1116,6 +1116,8 @@ KNOWN_COMPONENT_TYPES = (
     "cache",
     "auth",
     "realtime",
+    "lb",
+    "dns",
     "tokenization",
     "audit-log",
     "phi-vault",

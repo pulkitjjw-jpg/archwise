@@ -39,7 +39,9 @@ class TestBudgetRegression:
         mapping = get_cloud_mapping("aws", "compute", "compute", req)
 
         assert "Lambda" not in mapping["serviceName"]
-        assert mapping["serviceName"] == "Amazon ECS Fargate + ALB"
+        # Phase 2: the LB is no longer bundled into compute's own serviceName -- it's a separate
+        # "lb"-type component (see TestLbAndDnsMapping below).
+        assert mapping["serviceName"] == "Amazon ECS Fargate"
 
     def test_large_budget_aws_worker_compute_does_not_pick_lambda(self):
         from app.services.cloud_mapping import get_cloud_mapping
@@ -56,7 +58,9 @@ class TestBudgetRegression:
         req = make_requirements(budget="$50/month", teamMaturity="a small team")
         mapping = get_cloud_mapping("aws", "compute", "compute", req)
 
-        assert mapping["serviceName"] == "AWS Lambda + API Gateway"
+        # Phase 2: the API Gateway is no longer bundled into compute's own serviceName -- it's a
+        # separate "lb"-type component (see TestLbAndDnsMapping below).
+        assert mapping["serviceName"] == "AWS Lambda"
 
     def test_large_budget_azure_compute_does_not_pick_functions(self):
         from app.services.cloud_mapping import get_cloud_mapping
@@ -175,6 +179,79 @@ class TestRepresentativeProviderComponentPairs:
         mapping = get_cloud_mapping("unknown-provider", "compute", "compute", req)
         assert mapping["alternatives"] == []
         assert mapping["costEstimate"] == {"min": 0, "max": 0, "assumptions": "Fallback."}
+
+
+class TestLbAndDnsMapping:
+    """The "lb" branch doesn't know whether it's fronting serverless or container-style compute
+    ahead of time -- it recomputes the exact same budget/team signal the compute branch uses, so
+    it must always agree with whichever compute service the SAME requirements would produce."""
+
+    def test_aws_lb_resolves_to_alb_for_container_budget(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements(budget="$50,000/month", teamMaturity="a large senior team")
+        compute = get_cloud_mapping("aws", "compute", "compute", req)
+        lb = get_cloud_mapping("aws", "lb", "lb", req)
+
+        assert compute["serviceName"] == "Amazon ECS Fargate"
+        assert lb["serviceName"] == "Application Load Balancer"
+        assert "costEstimate" in lb and "alternatives" in lb and len(lb["alternatives"]) == 1
+
+    def test_aws_lb_resolves_to_api_gateway_for_serverless_budget(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements(budget="$50/month", teamMaturity="a junior team")
+        compute = get_cloud_mapping("aws", "compute", "compute", req)
+        lb = get_cloud_mapping("aws", "lb", "lb", req)
+
+        assert compute["serviceName"] == "AWS Lambda"
+        assert lb["serviceName"] == "Amazon API Gateway (HTTP API)"
+
+    def test_azure_lb_container_vs_serverless(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        container_req = make_requirements(budget="$50,000/month", teamMaturity="a large senior team")
+        serverless_req = make_requirements(budget="$50/month", teamMaturity="a junior team")
+
+        assert get_cloud_mapping("azure", "lb", "lb", container_req)["serviceName"] == "Azure Application Gateway"
+        assert get_cloud_mapping("azure", "lb", "lb", serverless_req)["serviceName"] == "Azure API Management"
+
+    def test_gcp_lb_container_vs_serverless(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        container_req = make_requirements(budget="$50,000/month", teamMaturity="a large senior team")
+        serverless_req = make_requirements(budget="$50/month", teamMaturity="a junior team")
+
+        assert get_cloud_mapping("gcp", "lb", "lb", container_req)["serviceName"] == "Google Cloud Load Balancing (HTTPS)"
+        assert get_cloud_mapping("gcp", "lb", "lb", serverless_req)["serviceName"] == "Google Cloud API Gateway"
+
+    def test_dns_mapping_every_major_provider(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        assert get_cloud_mapping("aws", "dns", "dns", req)["serviceName"] == "Amazon Route 53"
+        assert get_cloud_mapping("azure", "dns", "dns", req)["serviceName"] == "Azure DNS"
+        assert get_cloud_mapping("gcp", "dns", "dns", req)["serviceName"] == "Google Cloud DNS"
+
+    def test_kubernetes_lb_and_dns_are_real_incluster_resources(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        lb = get_cloud_mapping("kubernetes", "lb", "lb", req)
+        dns = get_cloud_mapping("kubernetes", "dns", "dns", req)
+
+        assert "Ingress" in lb["serviceName"]
+        assert "ExternalDNS" in dns["serviceName"]
+
+    def test_private_lb_and_dns_are_self_managed(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        lb = get_cloud_mapping("private", "lb", "lb", req)
+        dns = get_cloud_mapping("private", "dns", "dns", req)
+
+        assert "Self-Managed" in lb["serviceName"]
+        assert "Manually Managed" in dns["serviceName"]
 
 
 class TestHighScaleAffectsCostBands:

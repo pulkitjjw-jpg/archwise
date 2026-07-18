@@ -327,6 +327,23 @@ provider "aws" {{
         outputs_tf = f"# Terraform Outputs for {project_name}\n\n"
         has_alb = False  # tracks whether an ALB was provisioned so app_sg's ingress rule below can be tightened
 
+        # A load balancer/API gateway is now its own real "lb"-type component (see rules_engine.py)
+        # rather than bundled into compute's own service name -- this pre-scan of connections finds
+        # which compute component (if any) each lb component fronts, keyed by the COMPUTE
+        # component's own id. The compute branch below needs this at the moment it processes the
+        # compute component (to decide whether the ECS service needs an inline `load_balancer {}`
+        # block, which HCL requires to live literally inside that resource), regardless of whether
+        # the "lb" component itself is processed earlier or later in this same loop -- Terraform
+        # resource references resolve by address, not by emission order, but Python string
+        # concatenation for a block that must be nested inside another resource's braces does care.
+        by_id = {comp.get("id"): comp for comp in components if comp.get("id")}
+        lb_for_compute: dict[str, dict] = {}
+        for conn in connections:
+            from_c = by_id.get(conn.get("from"))
+            to_c = by_id.get(conn.get("to"))
+            if from_c and to_c and from_c.get("type") == "lb" and to_c.get("type") == "compute":
+                lb_for_compute[to_c.get("id")] = from_c
+
         for c in components:
             lld = _get_lld(c, "aws")
             svc = _get_service_name(c, "aws")
@@ -390,8 +407,11 @@ provider "aws" {{
 """
             elif c.get("type") == "compute":
                 has_lambda = "Lambda" in svc
-                is_worker = c_id == "worker"  # background workers never get public ingress (matches
-                # the k8s_manifest_generator.py convention: is_worker components get no Service/ingress)
+                # Whether this compute component gets ingress wiring is now driven entirely by
+                # whether an "lb"-type component actually connects to it (lb_for_compute, built
+                # above), not by an is_worker check -- rules_engine.py only ever wires
+                # lb -> "compute", never lb -> "worker", so the same outcome holds in practice, but
+                # the check is now general rather than hardcoded to a specific component id.
 
                 if has_lambda:
                     compute_tf += _build_comments(lld, ["memory", "timeout", "concurrency"])
@@ -418,49 +438,10 @@ provider "aws" {{
 }}
 
 """
-                    if not is_worker:
-                        # "AWS Lambda + API Gateway" -- wire an HTTP API in front of the function so it's
-                        # actually reachable; a bare Lambda function has no public invocation path at all.
-                        compute_tf += f"""resource "aws_apigatewayv2_api" "{c_id}_api" {{
-  name          = "${{var.project_name}}-{c_id}-api"
-  protocol_type = "HTTP"
-}}
-
-resource "aws_apigatewayv2_integration" "{c_id}_integration" {{
-  api_id                 = aws_apigatewayv2_api.{c_id}_api.id
-  integration_type       = "AWS_PROXY"
-  integration_uri        = aws_lambda_function.{c_id}.invoke_arn
-  integration_method     = "POST"
-  payload_format_version = "2.0"
-}}
-
-resource "aws_apigatewayv2_route" "{c_id}_route" {{
-  api_id    = aws_apigatewayv2_api.{c_id}_api.id
-  route_key = "$default"
-  target    = "integrations/${{aws_apigatewayv2_integration.{c_id}_integration.id}}"
-}}
-
-resource "aws_apigatewayv2_stage" "{c_id}_stage" {{
-  api_id      = aws_apigatewayv2_api.{c_id}_api.id
-  name        = "$default"
-  auto_deploy = true
-}}
-
-resource "aws_lambda_permission" "{c_id}_apigw" {{
-  statement_id  = "AllowAPIGatewayInvoke"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.{c_id}.function_name
-  principal     = "apigateway.amazonaws.com"
-  source_arn    = "${{aws_apigatewayv2_api.{c_id}_api.execution_arn}}/*/*"
-}}
-
-"""
-                        outputs_tf += f"""output "{c_id}_api_endpoint" {{
-  value       = aws_apigatewayv2_stage.{c_id}_stage.invoke_url
-  description = "Public invoke URL for the {c_id} HTTP API (API Gateway -> Lambda)."
-}}
-
-"""
+                    # The API Gateway wiring in front of this Lambda is now emitted by the "lb"-type
+                    # component's own branch below (see the `elif c.get("type") == "lb":` case), not
+                    # here -- a bare Lambda function has no public invocation path at all until that
+                    # branch finds this component as its target via `connections` and wires it up.
                 else:
                     # ECS Fargate
                     compute_tf += _build_comments(lld, ["instanceSize", "minInstances", "maxInstances", "scalingPolicy"])
@@ -490,10 +471,100 @@ resource "aws_ecs_task_definition" "{c_id}_task" {{
 """
                     lb_block = ""
                     depends_on_block = ""
-                    if not is_worker:
-                        # "Amazon ECS Fargate + ALB" -- provision the ALB and register the service with its
-                        # target group; the app_sg ingress rule below is tightened to only trust the ALB.
+                    if c_id in lb_for_compute:
+                        # The actual ALB/target group/listener resources are provisioned by the
+                        # "lb"-type component's own branch below -- this compute branch only needs
+                        # to know an lb fronts it so it can embed the `load_balancer {}` block HCL
+                        # requires to live literally inside this `aws_ecs_service` resource.
+                        lb_block = f"""
+  load_balancer {{
+    target_group_arn = aws_lb_target_group.app.arn
+    container_name   = "{c_id}-app"
+    container_port   = 80
+  }}
+"""
+                        depends_on_block = """
+  depends_on = [aws_lb_listener.app]
+"""
+
+                    compute_tf += f"""resource "aws_ecs_service" "{c_id}_service" {{
+  name            = "${{var.project_name}}-{c_id}-service"
+  cluster         = aws_ecs_cluster.{c_id}_cluster.id
+  task_definition = aws_ecs_task_definition.{c_id}_task.arn
+  desired_count   = {desired_count}
+  launch_type     = "FARGATE"
+
+  network_configuration {{
+    subnets         = [aws_subnet.private_app_1.id]
+    security_groups = [aws_security_group.app_sg.id]
+  }}
+{lb_block}{depends_on_block}}}
+
+"""
+            elif c.get("type") == "lb":
+                # Find which compute component this lb actually fronts by scanning connections
+                # (rules_engine.py wires lb -> compute, the edge component is always the "from").
+                target_id = None
+                for conn in connections:
+                    if conn.get("from") == c_id:
+                        candidate = by_id.get(conn.get("to"))
+                        if candidate and candidate.get("type") == "compute":
+                            target_id = conn.get("to")
+                            break
+
+                if target_id:
+                    target_svc = _get_service_name(by_id.get(target_id, {}), "aws")
+                    if "Lambda" in target_svc:
+                        # "Amazon API Gateway (HTTP API)" -- wire an HTTP API in front of the Lambda
+                        # function it fronts so it's actually reachable; a bare Lambda function has
+                        # no public invocation path at all.
+                        compute_tf += _build_comments(lld, ["gatewayType", "throttlingBurstLimit", "corsPolicy"])
+                        compute_tf += f"""resource "aws_apigatewayv2_api" "{target_id}_api" {{
+  name          = "${{var.project_name}}-{target_id}-api"
+  protocol_type = "HTTP"
+}}
+
+resource "aws_apigatewayv2_integration" "{target_id}_integration" {{
+  api_id                 = aws_apigatewayv2_api.{target_id}_api.id
+  integration_type       = "AWS_PROXY"
+  integration_uri        = aws_lambda_function.{target_id}.invoke_arn
+  integration_method     = "POST"
+  payload_format_version = "2.0"
+}}
+
+resource "aws_apigatewayv2_route" "{target_id}_route" {{
+  api_id    = aws_apigatewayv2_api.{target_id}_api.id
+  route_key = "$default"
+  target    = "integrations/${{aws_apigatewayv2_integration.{target_id}_integration.id}}"
+}}
+
+resource "aws_apigatewayv2_stage" "{target_id}_stage" {{
+  api_id      = aws_apigatewayv2_api.{target_id}_api.id
+  name        = "$default"
+  auto_deploy = true
+}}
+
+resource "aws_lambda_permission" "{target_id}_apigw" {{
+  statement_id  = "AllowAPIGatewayInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.{target_id}.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${{aws_apigatewayv2_api.{target_id}_api.execution_arn}}/*/*"
+}}
+
+"""
+                        outputs_tf += f"""output "{target_id}_api_endpoint" {{
+  value       = aws_apigatewayv2_stage.{target_id}_stage.invoke_url
+  description = "Public invoke URL for the {target_id} HTTP API (API Gateway -> Lambda)."
+}}
+
+"""
+                    else:
+                        # "Application Load Balancer" -- provision the ALB and register the target
+                        # compute's ECS service with its target group; the app_sg ingress rule below
+                        # is tightened to only trust the ALB.
                         has_alb = True
+                        compute_tf += _build_comments(lld, ["healthCheckPath", "healthCheckIntervalSec", "healthCheckTimeoutSec", "idleTimeoutSec", "listenerProtocol"])
                         compute_tf += f"""resource "aws_security_group" "alb_sg" {{
   name        = "${{var.project_name}}-${{var.environment}}-alb-sg"
   description = "Allows inbound HTTP/HTTPS traffic to the ALB from the internet"
@@ -522,20 +593,20 @@ resource "aws_ecs_task_definition" "{c_id}_task" {{
 }}
 
 resource "aws_lb" "app" {{
-  name               = "${{var.project_name}}-{c_id}-alb"
+  name               = "${{var.project_name}}-{target_id}-alb"
   internal           = false
   load_balancer_type = "application"
   subnets            = [aws_subnet.public_1.id]
   security_groups    = [aws_security_group.alb_sg.id]
 
   tags = {{
-    Name        = "${{var.project_name}}-{c_id}-alb"
+    Name        = "${{var.project_name}}-{target_id}-alb"
     Environment = var.environment
   }}
 }}
 
 resource "aws_lb_target_group" "app" {{
-  name        = "${{var.project_name}}-{c_id}-tg"
+  name        = "${{var.project_name}}-{target_id}-tg"
   port        = 80
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
@@ -566,31 +637,6 @@ resource "aws_lb_listener" "app" {{
   value       = aws_lb.app.dns_name
   description = "Public DNS name of the Application Load Balancer fronting the compute service."
 }
-
-"""
-                        lb_block = f"""
-  load_balancer {{
-    target_group_arn = aws_lb_target_group.app.arn
-    container_name   = "{c_id}-app"
-    container_port   = 80
-  }}
-"""
-                        depends_on_block = """
-  depends_on = [aws_lb_listener.app]
-"""
-
-                    compute_tf += f"""resource "aws_ecs_service" "{c_id}_service" {{
-  name            = "${{var.project_name}}-{c_id}-service"
-  cluster         = aws_ecs_cluster.{c_id}_cluster.id
-  task_definition = aws_ecs_task_definition.{c_id}_task.arn
-  desired_count   = {desired_count}
-  launch_type     = "FARGATE"
-
-  network_configuration {{
-    subnets         = [aws_subnet.private_app_1.id]
-    security_groups = [aws_security_group.app_sg.id]
-  }}
-{lb_block}{depends_on_block}}}
 
 """
             elif c.get("type") == "database":
@@ -922,6 +968,10 @@ data "azurerm_client_config" "current" {{}}
         func_plan_emitted = False
         container_env_emitted = False
 
+        # Used by the "lb"-type component's own branch below to find which compute component it
+        # fronts via `connections` (rules_engine.py wires lb -> compute).
+        by_id = {comp.get("id"): comp for comp in components if comp.get("id")}
+
         for c in components:
             lld = _get_lld(c, "azure")
             svc = _get_service_name(c, "azure")
@@ -989,58 +1039,10 @@ resource "azurerm_storage_account" "functions_storage" {{
 }}
 
 """
-                    if not is_worker:
-                        # "Azure Functions + API Management" -- front the Function App with a real APIM
-                        # gateway instead of leaving it reachable only via its raw default hostname.
-                        compute_tf += f"""resource "azurerm_api_management" "apim" {{
-  name                = "${{var.project_name}}-apim"
-  location            = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
-  publisher_name      = "${{var.project_name}} API Publisher"
-  publisher_email     = "admin@${{var.project_name}}.example.com"
-  sku_name            = "Consumption_0"
-}}
-
-resource "azurerm_api_management_backend" "{c_id}_backend" {{
-  name                = "${{var.project_name}}-{c_id}-backend"
-  resource_group_name = azurerm_resource_group.rg.name
-  api_management_name = azurerm_api_management.apim.name
-  protocol            = "http"
-  url                 = "https://${{azurerm_linux_function_app.{c_id}.default_hostname}}"
-}}
-
-resource "azurerm_api_management_api" "{c_id}_api" {{
-  name                = "${{var.project_name}}-{c_id}-api"
-  resource_group_name = azurerm_resource_group.rg.name
-  api_management_name = azurerm_api_management.apim.name
-  revision            = "1"
-  display_name        = "${{var.project_name}}-{c_id}-api"
-  path                = "{c_id}"
-  protocols           = ["https"]
-}}
-
-resource "azurerm_api_management_api_policy" "{c_id}_policy" {{
-  api_name            = azurerm_api_management_api.{c_id}_api.name
-  api_management_name = azurerm_api_management.apim.name
-  resource_group_name = azurerm_resource_group.rg.name
-
-  xml_content = <<XML
-<policies>
-  <inbound>
-    <base />
-    <set-backend-service backend-id="${{azurerm_api_management_backend.{c_id}_backend.name}}" />
-  </inbound>
-</policies>
-XML
-}}
-
-"""
-                        outputs_tf += """output "apim_gateway_url" {
-  value       = azurerm_api_management.apim.gateway_url
-  description = "Public API Management gateway URL fronting the Azure Functions backend."
-}
-
-"""
+                    # The API Management gateway in front of this Function App is now emitted by the
+                    # "lb"-type component's own branch below (see `elif c.get("type") == "lb":`), not
+                    # here -- a bare Function App is only reachable via its raw default hostname until
+                    # that branch finds this component as its target via `connections` and wires it up.
                 else:
                     # Container Apps
                     compute_tf += _build_comments(lld, ["instanceSize", "minInstances", "maxInstances"])
@@ -1093,9 +1095,79 @@ XML
 {ingress_block}}}
 
 """
-                    if not is_worker:
-                        # "Azure Container Apps + App Gateway" -- Application Gateway routes to the
-                        # Container App's own managed ingress FQDN via an FQDN-based backend pool.
+                    # The Application Gateway in front of this Container App is now emitted by the
+                    # "lb"-type component's own branch below, not here -- see the Functions branch
+                    # above for the identical rationale.
+            elif c.get("type") == "lb":
+                # Find which compute component this lb actually fronts (rules_engine.py wires
+                # lb -> compute; the edge component is always the "from").
+                target_id = None
+                for conn in connections:
+                    if conn.get("from") == c_id:
+                        candidate = by_id.get(conn.get("to"))
+                        if candidate and candidate.get("type") == "compute":
+                            target_id = conn.get("to")
+                            break
+
+                if target_id:
+                    target_svc = _get_service_name(by_id.get(target_id, {}), "azure")
+                    if "Functions" in target_svc:
+                        # "Azure API Management" -- front the Function App with a real APIM gateway
+                        # instead of leaving it reachable only via its raw default hostname.
+                        compute_tf += _build_comments(lld, ["gatewayType", "throttlingBurstLimit", "corsPolicy"])
+                        compute_tf += f"""resource "azurerm_api_management" "apim" {{
+  name                = "${{var.project_name}}-apim"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  publisher_name      = "${{var.project_name}} API Publisher"
+  publisher_email     = "admin@${{var.project_name}}.example.com"
+  sku_name            = "Consumption_0"
+}}
+
+resource "azurerm_api_management_backend" "{target_id}_backend" {{
+  name                = "${{var.project_name}}-{target_id}-backend"
+  resource_group_name = azurerm_resource_group.rg.name
+  api_management_name = azurerm_api_management.apim.name
+  protocol            = "http"
+  url                 = "https://${{azurerm_linux_function_app.{target_id}.default_hostname}}"
+}}
+
+resource "azurerm_api_management_api" "{target_id}_api" {{
+  name                = "${{var.project_name}}-{target_id}-api"
+  resource_group_name = azurerm_resource_group.rg.name
+  api_management_name = azurerm_api_management.apim.name
+  revision            = "1"
+  display_name        = "${{var.project_name}}-{target_id}-api"
+  path                = "{target_id}"
+  protocols           = ["https"]
+}}
+
+resource "azurerm_api_management_api_policy" "{target_id}_policy" {{
+  api_name            = azurerm_api_management_api.{target_id}_api.name
+  api_management_name = azurerm_api_management.apim.name
+  resource_group_name = azurerm_resource_group.rg.name
+
+  xml_content = <<XML
+<policies>
+  <inbound>
+    <base />
+    <set-backend-service backend-id="${{azurerm_api_management_backend.{target_id}_backend.name}}" />
+  </inbound>
+</policies>
+XML
+}}
+
+"""
+                        outputs_tf += """output "apim_gateway_url" {
+  value       = azurerm_api_management.apim.gateway_url
+  description = "Public API Management gateway URL fronting the Azure Functions backend."
+}
+
+"""
+                    else:
+                        # "Azure Application Gateway" -- routes to the Container App's own managed
+                        # ingress FQDN via an FQDN-based backend pool.
+                        compute_tf += _build_comments(lld, ["healthCheckPath", "healthCheckIntervalSec", "healthCheckTimeoutSec", "idleTimeoutSec", "listenerProtocol"])
                         compute_tf += f"""resource "azurerm_public_ip" "appgw_pip" {{
   name                = "${{var.project_name}}-appgw-pip"
   resource_group_name = azurerm_resource_group.rg.name
@@ -1131,12 +1203,12 @@ resource "azurerm_application_gateway" "appgw" {{
   }}
 
   backend_address_pool {{
-    name  = "{c_id}-backend-pool"
-    fqdns = [azurerm_container_app.{c_id}.ingress[0].fqdn]
+    name  = "{target_id}-backend-pool"
+    fqdns = [azurerm_container_app.{target_id}.ingress[0].fqdn]
   }}
 
   backend_http_settings {{
-    name                                = "{c_id}-backend-http-settings"
+    name                                = "{target_id}-backend-http-settings"
     cookie_based_affinity               = "Disabled"
     port                                = 443
     protocol                            = "Https"
@@ -1145,18 +1217,18 @@ resource "azurerm_application_gateway" "appgw" {{
   }}
 
   http_listener {{
-    name                           = "{c_id}-http-listener"
+    name                           = "{target_id}-http-listener"
     frontend_ip_configuration_name = "appgw-frontend-ip"
     frontend_port_name             = "frontend-port-80"
     protocol                       = "Http"
   }}
 
   request_routing_rule {{
-    name                       = "{c_id}-routing-rule"
+    name                       = "{target_id}-routing-rule"
     rule_type                  = "Basic"
-    http_listener_name         = "{c_id}-http-listener"
-    backend_address_pool_name  = "{c_id}-backend-pool"
-    backend_http_settings_name = "{c_id}-backend-http-settings"
+    http_listener_name         = "{target_id}-http-listener"
+    backend_address_pool_name  = "{target_id}-backend-pool"
+    backend_http_settings_name = "{target_id}-backend-http-settings"
     priority                   = 100
   }}
 }}
@@ -1377,6 +1449,10 @@ provider "google-beta" {{
         storage_tf = "# Google Cloud Storage & CDN Resources\n\n"
         outputs_tf = f"# Google Cloud Outputs for {project_name}\n\n"
 
+        # Used by the "lb"-type component's own branch below to find which compute component it
+        # fronts via `connections` (rules_engine.py wires lb -> compute).
+        by_id = {comp.get("id"): comp for comp in components if comp.get("id")}
+
         for c in components:
             lld = _get_lld(c, "gcp")
             svc = _get_service_name(c, "gcp")
@@ -1393,8 +1469,6 @@ provider "google-beta" {{
 """
             elif c.get("type") == "compute":
                 has_functions = "Functions" in svc
-                is_worker = c_id == "worker"  # background workers never get public ingress (matches
-                # the k8s_manifest_generator.py convention: is_worker components get no Service/ingress)
 
                 if has_functions:
                     compute_tf += _build_comments(lld, ["memory", "timeout", "concurrency"])
@@ -1412,70 +1486,10 @@ provider "google-beta" {{
 }}
 
 """
-                    if not is_worker:
-                        # "Google Cloud Functions + API Gateway" -- front the function with a real API
-                        # Gateway instead of leaving it reachable only via its raw HTTPS trigger URL.
-                        compute_tf += f"""resource "google_cloudfunctions_function_iam_member" "{c_id}_invoker" {{
-  project        = var.gcp_project
-  region         = var.gcp_region
-  cloud_function = google_cloudfunctions_function.{c_id}.name
-  role           = "roles/cloudfunctions.invoker"
-  member         = "allUsers"
-}}
-
-resource "google_api_gateway_api" "{c_id}_api" {{
-  provider = google-beta
-  api_id   = "${{var.gcp_project}}-{c_id}-api"
-}}
-
-resource "google_api_gateway_api_config" "{c_id}_config" {{
-  provider      = google-beta
-  api           = google_api_gateway_api.{c_id}_api.api_id
-  api_config_id = "${{var.gcp_project}}-{c_id}-config"
-
-  openapi_documents {{
-    document {{
-      path = "openapi.yaml"
-      contents = base64encode(<<-EOT
-        swagger: "2.0"
-        info:
-          title: ${{var.gcp_project}}-{c_id}-api
-          version: "1.0.0"
-        schemes:
-          - https
-        paths:
-          /:
-            get:
-              operationId: {c_id}Root
-              x-google-backend:
-                address: ${{google_cloudfunctions_function.{c_id}.https_trigger_url}}
-              responses:
-                "200":
-                  description: OK
-        EOT
-      )
-    }}
-  }}
-
-  lifecycle {{
-    create_before_destroy = true
-  }}
-}}
-
-resource "google_api_gateway_gateway" "{c_id}_gateway" {{
-  provider   = google-beta
-  api_config = google_api_gateway_api_config.{c_id}_config.id
-  gateway_id = "${{var.gcp_project}}-{c_id}-gw"
-  region     = var.gcp_region
-}}
-
-"""
-                        outputs_tf += f"""output "{c_id}_gateway_url" {{
-  value       = google_api_gateway_gateway.{c_id}_gateway.default_hostname
-  description = "Public hostname for the {c_id} API Gateway (Cloud Functions backend)."
-}}
-
-"""
+                    # The API Gateway in front of this function is now emitted by the "lb"-type
+                    # component's own branch below, not here -- a bare Cloud Function is only
+                    # reachable via its raw HTTPS trigger URL until that branch finds this
+                    # component as its target via `connections` and wires it up.
                 else:
                     # Cloud Run
                     compute_tf += _build_comments(lld, ["instanceSize", "minInstances", "maxInstances"])
@@ -1507,63 +1521,145 @@ resource "google_api_gateway_gateway" "{c_id}_gateway" {{
 }}
 
 """
-                    if not is_worker:
-                        # "Google Cloud Run + HTTPS Load Balancer" -- a serverless NEG-backed global
+                    # The HTTPS Load Balancer in front of this Cloud Run service is now emitted by
+                    # the "lb"-type component's own branch below, not here -- see the Functions
+                    # branch above for the identical rationale.
+            elif c.get("type") == "lb":
+                # Find which compute component this lb actually fronts (rules_engine.py wires
+                # lb -> compute; the edge component is always the "from").
+                target_id = None
+                for conn in connections:
+                    if conn.get("from") == c_id:
+                        candidate = by_id.get(conn.get("to"))
+                        if candidate and candidate.get("type") == "compute":
+                            target_id = conn.get("to")
+                            break
+
+                if target_id:
+                    target_svc = _get_service_name(by_id.get(target_id, {}), "gcp")
+                    if "Functions" in target_svc:
+                        # "Google Cloud API Gateway" -- front the function with a real API Gateway
+                        # instead of leaving it reachable only via its raw HTTPS trigger URL.
+                        compute_tf += _build_comments(lld, ["gatewayType", "throttlingBurstLimit", "corsPolicy"])
+                        compute_tf += f"""resource "google_cloudfunctions_function_iam_member" "{target_id}_invoker" {{
+  project        = var.gcp_project
+  region         = var.gcp_region
+  cloud_function = google_cloudfunctions_function.{target_id}.name
+  role           = "roles/cloudfunctions.invoker"
+  member         = "allUsers"
+}}
+
+resource "google_api_gateway_api" "{target_id}_api" {{
+  provider = google-beta
+  api_id   = "${{var.gcp_project}}-{target_id}-api"
+}}
+
+resource "google_api_gateway_api_config" "{target_id}_config" {{
+  provider      = google-beta
+  api           = google_api_gateway_api.{target_id}_api.api_id
+  api_config_id = "${{var.gcp_project}}-{target_id}-config"
+
+  openapi_documents {{
+    document {{
+      path = "openapi.yaml"
+      contents = base64encode(<<-EOT
+        swagger: "2.0"
+        info:
+          title: ${{var.gcp_project}}-{target_id}-api
+          version: "1.0.0"
+        schemes:
+          - https
+        paths:
+          /:
+            get:
+              operationId: {target_id}Root
+              x-google-backend:
+                address: ${{google_cloudfunctions_function.{target_id}.https_trigger_url}}
+              responses:
+                "200":
+                  description: OK
+        EOT
+      )
+    }}
+  }}
+
+  lifecycle {{
+    create_before_destroy = true
+  }}
+}}
+
+resource "google_api_gateway_gateway" "{target_id}_gateway" {{
+  provider   = google-beta
+  api_config = google_api_gateway_api_config.{target_id}_config.id
+  gateway_id = "${{var.gcp_project}}-{target_id}-gw"
+  region     = var.gcp_region
+}}
+
+"""
+                        outputs_tf += f"""output "{target_id}_gateway_url" {{
+  value       = google_api_gateway_gateway.{target_id}_gateway.default_hostname
+  description = "Public hostname for the {target_id} API Gateway (Cloud Functions backend)."
+}}
+
+"""
+                    else:
+                        # "Google Cloud Load Balancing (HTTPS)" -- a serverless NEG-backed global
                         # HTTPS load balancer, the real GCP pattern for fronting a public Cloud Run service.
-                        compute_tf += f"""resource "google_cloud_run_service_iam_member" "{c_id}_public" {{
-  location = google_cloud_run_service.{c_id}.location
-  project  = google_cloud_run_service.{c_id}.project
-  service  = google_cloud_run_service.{c_id}.name
+                        compute_tf += _build_comments(lld, ["healthCheckPath", "healthCheckIntervalSec", "healthCheckTimeoutSec", "idleTimeoutSec", "listenerProtocol"])
+                        compute_tf += f"""resource "google_cloud_run_service_iam_member" "{target_id}_public" {{
+  location = google_cloud_run_service.{target_id}.location
+  project  = google_cloud_run_service.{target_id}.project
+  service  = google_cloud_run_service.{target_id}.name
   role     = "roles/run.invoker"
   member   = "allUsers"
 }}
 
-resource "google_compute_region_network_endpoint_group" "{c_id}_neg" {{
-  name                  = "${{var.gcp_project}}-{c_id}-neg"
+resource "google_compute_region_network_endpoint_group" "{target_id}_neg" {{
+  name                  = "${{var.gcp_project}}-{target_id}-neg"
   region                = var.gcp_region
   network_endpoint_type = "SERVERLESS"
 
   cloud_run {{
-    service = google_cloud_run_service.{c_id}.name
+    service = google_cloud_run_service.{target_id}.name
   }}
 }}
 
-resource "google_compute_backend_service" "{c_id}_backend" {{
-  name                  = "${{var.gcp_project}}-{c_id}-backend"
+resource "google_compute_backend_service" "{target_id}_backend" {{
+  name                  = "${{var.gcp_project}}-{target_id}-backend"
   protocol              = "HTTP"
   load_balancing_scheme = "EXTERNAL_MANAGED"
 
   backend {{
-    group = google_compute_region_network_endpoint_group.{c_id}_neg.id
+    group = google_compute_region_network_endpoint_group.{target_id}_neg.id
   }}
 }}
 
-resource "google_compute_url_map" "{c_id}_url_map" {{
-  name            = "${{var.gcp_project}}-{c_id}-url-map"
-  default_service = google_compute_backend_service.{c_id}_backend.id
+resource "google_compute_url_map" "{target_id}_url_map" {{
+  name            = "${{var.gcp_project}}-{target_id}-url-map"
+  default_service = google_compute_backend_service.{target_id}_backend.id
 }}
 
-resource "google_compute_target_http_proxy" "{c_id}_http_proxy" {{
-  name    = "${{var.gcp_project}}-{c_id}-http-proxy"
-  url_map = google_compute_url_map.{c_id}_url_map.id
+resource "google_compute_target_http_proxy" "{target_id}_http_proxy" {{
+  name    = "${{var.gcp_project}}-{target_id}-http-proxy"
+  url_map = google_compute_url_map.{target_id}_url_map.id
 }}
 
-resource "google_compute_global_address" "{c_id}_lb_ip" {{
-  name = "${{var.gcp_project}}-{c_id}-lb-ip"
+resource "google_compute_global_address" "{target_id}_lb_ip" {{
+  name = "${{var.gcp_project}}-{target_id}-lb-ip"
 }}
 
-resource "google_compute_global_forwarding_rule" "{c_id}_forwarding_rule" {{
-  name                  = "${{var.gcp_project}}-{c_id}-fwd-rule"
-  target                = google_compute_target_http_proxy.{c_id}_http_proxy.id
+resource "google_compute_global_forwarding_rule" "{target_id}_forwarding_rule" {{
+  name                  = "${{var.gcp_project}}-{target_id}-fwd-rule"
+  target                = google_compute_target_http_proxy.{target_id}_http_proxy.id
   port_range            = "80"
-  ip_address            = google_compute_global_address.{c_id}_lb_ip.id
+  ip_address            = google_compute_global_address.{target_id}_lb_ip.id
   load_balancing_scheme = "EXTERNAL_MANAGED"
 }}
 
 """
-                        outputs_tf += f"""output "{c_id}_lb_ip_address" {{
-  value       = google_compute_global_address.{c_id}_lb_ip.address
-  description = "Public IP address of the HTTPS Load Balancer fronting the {c_id} Cloud Run service."
+                        outputs_tf += f"""output "{target_id}_lb_ip_address" {{
+  value       = google_compute_global_address.{target_id}_lb_ip.address
+  description = "Public IP address of the HTTPS Load Balancer fronting the {target_id} Cloud Run service."
 }}
 
 """

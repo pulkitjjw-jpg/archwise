@@ -54,6 +54,25 @@ class TestPublicComponentDirectToDataStore:
         findings = run_security_rules(components, [conn("cdn", "compute"), conn("compute", "db")], NONE_INDUSTRY, PROVIDER)
         assert "Public-facing component connects directly to a data store" not in _titles(findings)
 
+    def test_fires_when_lb_connects_directly_to_database(self):
+        """"lb" is a public-facing entry type too (_PUBLIC_ENTRY_TYPES) -- a load balancer wired
+        straight to a data store bypasses the application layer exactly like a CDN would."""
+        components = [
+            component("lb", "lb", lld_config={}),
+            component("db", "database", lld_config={"encryptionType": "x", "multiAZ": "true", "backupRetention": "7 Days"}),
+        ]
+        findings = run_security_rules(components, [conn("lb", "db")], NONE_INDUSTRY, PROVIDER)
+        assert "Public-facing component connects directly to a data store" in _titles(findings)
+
+    def test_does_not_fire_when_compute_sits_between_lb_and_database(self):
+        components = [
+            component("lb", "lb", lld_config={}),
+            component("compute", "compute", lld_config={}),
+            component("db", "database", lld_config={"encryptionType": "x", "multiAZ": "true", "backupRetention": "7 Days"}),
+        ]
+        findings = run_security_rules(components, [conn("lb", "compute"), conn("compute", "db")], NONE_INDUSTRY, PROVIDER)
+        assert "Public-facing component connects directly to a data store" not in _titles(findings)
+
 
 class TestMissingAuthWhenDataStoresExist:
     def test_fires_when_database_exists_with_no_auth_component(self):

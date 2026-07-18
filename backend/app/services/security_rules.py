@@ -18,7 +18,7 @@ LOW = "low"
 # decide whether "no audit-log component" etc. is actually a gap, not just absent-by-design.
 _SENSITIVE_DATA_TYPES = ("phi-vault", "tokenization")
 _DATA_STORE_TYPES = ("database", "storage", "cache")
-_PUBLIC_ENTRY_TYPES = ("cdn",)
+_PUBLIC_ENTRY_TYPES = ("cdn", "lb")
 
 
 def _find(components: list[dict], component_type: str) -> list[dict]:

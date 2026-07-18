@@ -80,6 +80,77 @@ def run_lld_rules_engine(
             else "Disabled Origin Shield as scale is moderate, avoiding extra gateway pricing."
         )
 
+    elif component_type == "lb":
+        # Same is_serverless recompute as the "compute" branch below -- a service_name_override
+        # (manual service-swap) or the deterministic scale/budget/team signal both need to agree
+        # on whether this "lb" resolves to an ALB-style load balancer (container compute) or an
+        # API-gateway-style managed gateway (serverless compute), since the two have genuinely
+        # different config shapes.
+        is_serverless = is_low_budget and (
+            "junior" in team_lower or "small" in team_lower or team_lower == "not_specified"
+        )
+        if service_name_override:
+            svc_lower = service_name_override.lower()
+            if "api gateway" in svc_lower or "api management" in svc_lower:
+                is_serverless = True
+            elif "load balanc" in svc_lower or "application gateway" in svc_lower or svc_lower == "alb":
+                is_serverless = False
+
+        if is_serverless:
+            config["gatewayType"] = "HTTP API (Regional)"
+            config["throttlingBurstLimit"] = "5000" if is_high_scale else "1000"
+            config["throttlingRateLimit"] = "2000" if is_high_scale else "500"
+            config["corsPolicy"] = "Restricted to configured origin(s), not wildcard"
+            config["tlsPolicy"] = "TLS 1.2+"
+
+            reasoning["throttlingBurstLimit"] = (
+                "A higher burst ceiling absorbs legitimate traffic spikes without rejecting real requests at high expected scale."
+                if is_high_scale
+                else "A modest burst ceiling is appropriate for lower expected traffic, and doubles as a cheap first line of defense against a runaway client retry loop."
+            )
+            reasoning["corsPolicy"] = (
+                "A wildcard CORS policy on a public API gateway is a common source of unintended cross-origin access -- restricting to known origins up front is the safer default."
+            )
+            reasoning["tlsPolicy"] = "The managed gateway terminates TLS itself, so this is the one place a minimum protocol version needs to be enforced for the whole public API surface."
+        else:
+            config["healthCheckPath"] = "/health"
+            config["healthCheckIntervalSec"] = "15" if is_high_scale else "30"
+            config["healthCheckTimeoutSec"] = "5"
+            config["healthyThresholdCount"] = "2"
+            config["unhealthyThresholdCount"] = "3" if is_high_scale else "5"
+            config["idleTimeoutSec"] = "60"
+            config["listenerProtocol"] = "HTTPS"
+            config["listenerPort"] = "443"
+            config["tlsPolicy"] = "TLS 1.2+ (Modern Security Policy)"
+
+            reasoning["healthCheckIntervalSec"] = (
+                "More frequent health checks pull a failing instance out of rotation faster at high scale, where a slow instance affects more concurrent users."
+                if is_high_scale
+                else "A standard interval is sufficient at lower scale, and avoids piling unnecessary health-check traffic onto each instance."
+            )
+            reasoning["unhealthyThresholdCount"] = (
+                "A lower unhealthy threshold removes a failing instance from rotation faster, trading a slightly higher chance of a false-positive removal for reduced blast radius at high scale."
+                if is_high_scale
+                else "A higher threshold avoids flapping a healthy-but-momentarily-slow instance in and out of rotation on a single transient failure."
+            )
+            reasoning["listenerProtocol"] = (
+                "TLS terminates at the load balancer rather than on individual compute instances, so the certificate is issued, rotated, and audited in exactly one place."
+            )
+
+    elif component_type == "dns":
+        config["hostedZoneType"] = "Public"
+        config["recordType"] = "Alias record to the load balancer/CDN endpoint (not a raw CNAME/IP)"
+        config["routingPolicy"] = "Simple"
+        config["ttlSeconds"] = "300"
+
+        reasoning["recordType"] = (
+            "An alias-style record points directly at the managed load balancer/CDN endpoint without pinning to an IP address that provider can change at any time."
+        )
+        reasoning["routingPolicy"] = (
+            "Simple routing is correct today because there's only one region/endpoint to route traffic to. This is the exact field a future multi-region failover setup would change (e.g. to failover or latency-based routing) -- the mechanism exists here, but that behavior isn't configured yet."
+        )
+        reasoning["ttlSeconds"] = "A short TTL keeps DNS propagation fast if the target ever needs to change, at the cost of a modest increase in DNS query volume."
+
     elif component_type == "compute":
         is_worker = component_id == "worker"
         is_serverless = is_low_budget and (
@@ -371,6 +442,30 @@ def _run_kubernetes_lld(
         reasoning["replicas"] = "Two Ingress-NGINX replicas avoid a single point of failure for all cluster traffic entry."
         reasoning["tlsMode"] = "cert-manager automates certificate issuance and renewal rather than requiring manual cert rotation."
 
+    elif component_type == "lb":
+        config["replicas"] = "3" if is_high_scale else "2"
+        config["namespace"] = "ingress-system"
+        config["healthCheckPath"] = "/healthz"
+        config["idleTimeoutSec"] = "60"
+        config["tlsMode"] = "cert-manager (Let's Encrypt)"
+        reasoning["replicas"] = (
+            "Three replicas spread across nodes tolerate a node failure without dropping the cluster's single entry point for all traffic."
+            if is_high_scale
+            else "Two replicas is the minimum that avoids the Ingress controller itself becoming a single point of failure."
+        )
+        reasoning["healthCheckPath"] = (
+            "Ingress-NGINX health-checks each backend Service's endpoints directly via Kubernetes readiness probes, not a separate synthetic external check."
+        )
+
+    elif component_type == "dns":
+        config["deploymentMode"] = "ExternalDNS Operator (In-Cluster)"
+        config["namespace"] = "ingress-system"
+        config["syncPolicy"] = "upsert-only (never deletes records it didn't create)"
+        reasoning["deploymentMode"] = (
+            "ExternalDNS watches Ingress/Service resources and syncs their hostnames to an external DNS provider automatically -- the standard Kubernetes-native way to avoid manually updating DNS records on every deploy."
+        )
+        reasoning["syncPolicy"] = "upsert-only is the safer default -- it will never delete a DNS record it doesn't already track as its own, even if the matching Ingress is removed."
+
     elif component_type == "compute":
         is_worker = component_id == "worker"
         if is_worker:
@@ -521,6 +616,20 @@ def _run_private_cloud_lld(
         config["vmSize"] = "2 vCPU / 4GB RAM"
         config["scalingMode"] = "Manual (no autoscaler)"
         reasoning["scalingMode"] = "No CDN edge network on-premises — traffic capacity is whatever the reverse-proxy VM(s) can handle, sized ahead of time."
+
+    elif component_type == "lb":
+        config["vmSize"] = "4 vCPU / 8GB RAM"
+        config["vmCount"] = "2 (active/passive failover pair)"
+        config["healthCheckPath"] = "/health"
+        config["haMode"] = "Manual failover (keepalived/VRRP, or a documented manual DNS cutover)"
+        reasoning["haMode"] = "On-premises load balancer HA requires a manually configured VRRP/keepalived pair or a documented, tested failover runbook — nothing here does this automatically."
+
+    elif component_type == "dns":
+        config["deploymentMode"] = "Manual record management against the existing corporate DNS/BIND server"
+        config["ttlSeconds"] = "300"
+        reasoning["deploymentMode"] = (
+            "Flagging explicitly: there is no automation syncing load balancer/VM changes to DNS records here — every change, including any future failover routing, is a manual step against the existing DNS server."
+        )
 
     elif component_type == "compute":
         is_worker = component_id == "worker"
