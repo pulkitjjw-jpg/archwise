@@ -18,6 +18,7 @@ import {
   type JourneyVerification,
 } from "@/lib/journey-verification";
 import { computeHealthScore, type HealthScore } from "@/lib/health-score";
+import { getRedundancyBadge, isRedundantConfig } from "@/lib/redundancy";
 import { useStagedLoadingMessage } from "@/app/hooks/useStagedLoadingMessage";
 import { useGrowthTrigger } from "@/app/contexts/GrowthTriggerContext";
 import { FIELD_EXPLANATIONS } from "@/lib/field-explanations";
@@ -4401,14 +4402,50 @@ export default function ArchitectureWorkspace({
                               const serviceName = mapping?.serviceName || node.name;
                               const isOverride = node.metadata?.overrideSource === "user";
 
+                              // Redundancy indicator (Phase 4 diagram enhancement) -- purely
+                              // visual, derived from the SAME per-provider LLD config already
+                              // fetched above via getMappingForProvider, never a second
+                              // component/HLD entry. See src/lib/redundancy.ts for exactly which
+                              // config keys/shapes this looks at.
+                              const isRedundant = isRedundantConfig(mapping?.lld?.config);
+                              const redundancyBadge = isRedundant ? getRedundancyBadge(mapping?.lld?.config) : null;
+
                               return (
-                                <foreignObject
-                                  key={node.id}
-                                  x={coord.x - coord.width / 2}
-                                  y={coord.y - coord.height / 2}
-                                  width={coord.width}
-                                  height={coord.height}
-                                >
+                                <g key={node.id}>
+                                  {isRedundant && (
+                                    <>
+                                      {/* Two background "stacked index card" rects, emitted before
+                                          the foreignObject so they paint behind it (SVG paints in
+                                          document order) -- a depth cue that this component is
+                                          deployed as multiple redundant instances/replicas. */}
+                                      <rect
+                                        x={coord.x - coord.width / 2 + 10}
+                                        y={coord.y - coord.height / 2 + 10}
+                                        width={coord.width}
+                                        height={coord.height}
+                                        rx={16}
+                                        className="fill-panel stroke-line-strong/30"
+                                        strokeWidth={1}
+                                        opacity={0.45}
+                                      />
+                                      <rect
+                                        x={coord.x - coord.width / 2 + 5}
+                                        y={coord.y - coord.height / 2 + 5}
+                                        width={coord.width}
+                                        height={coord.height}
+                                        rx={16}
+                                        className="fill-panel stroke-line-strong/45"
+                                        strokeWidth={1}
+                                        opacity={0.7}
+                                      />
+                                    </>
+                                  )}
+                                  <foreignObject
+                                    x={coord.x - coord.width / 2}
+                                    y={coord.y - coord.height / 2}
+                                    width={coord.width}
+                                    height={coord.height}
+                                  >
                                   <div
                                     role="button"
                                     tabIndex={0}
@@ -4456,6 +4493,14 @@ export default function ArchitectureWorkspace({
                                         U
                                       </span>
                                     )}
+                                    {redundancyBadge && (
+                                      <span
+                                        title={`Deployed redundantly (${redundancyBadge}) -- see this component's LLD detail for the exact config driving it.`}
+                                        className="absolute -bottom-1.5 -right-1.5 flex h-4 flex-none items-center justify-center rounded-full bg-success px-1.5 text-[8px] font-black text-white ring-2 ring-panel"
+                                      >
+                                        {redundancyBadge}
+                                      </span>
+                                    )}
 
                                     {isEditing && (
                                       <button
@@ -4470,7 +4515,8 @@ export default function ArchitectureWorkspace({
                                       </button>
                                     )}
                                   </div>
-                                </foreignObject>
+                                  </foreignObject>
+                                </g>
                               );
                             })}
                           </svg>
