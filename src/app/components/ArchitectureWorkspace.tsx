@@ -457,11 +457,13 @@ interface JobStatusResponse {
 }
 
 const JOB_POLL_INTERVAL_MS = 2000;
-// The LLM fallback chain can legitimately take up to ~35s under load (see
-// backend/app/config.py's llm_per_model_timeout_seconds comment) -- 90s gives that comfortable
-// headroom before this gives up and shows a timeout error, rather than bailing right as a slow
-// but otherwise-healthy generation was about to finish.
-const JOB_POLL_TIMEOUT_MS = 90000;
+// Architecture generation's own per-model timeout is 100s (see backend/app/config.py's
+// llm_architecture_generation_timeout_seconds), and the fallback chain can burn through more than
+// one "real" (not near-instantly-failing) attempt before one succeeds -- a live dogfooding session
+// measured this. 260s stays safely under the arq worker's own 300s job_timeout (see
+// backend/app/worker.py) while giving genuine headroom for two full-budget attempts in the chain,
+// rather than bailing right as a slow but otherwise-healthy generation was about to finish.
+const JOB_POLL_TIMEOUT_MS = 260000;
 
 /** Polls `fetchStatus` every JOB_POLL_INTERVAL_MS until the job reaches "complete" or "failed",
  * or throws a timeout error after JOB_POLL_TIMEOUT_MS. `fetchStatus` itself is responsible for

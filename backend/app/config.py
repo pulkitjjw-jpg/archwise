@@ -38,6 +38,18 @@ class Settings(BaseSettings):
     # generating a large response. Individual call sites may override this for known-heavy calls.
     llm_per_model_timeout_seconds: float = 15.0
     llm_validation_fix_timeout_seconds: float = 10.0
+    # Architecture generation is the heaviest call in the app -- per-component cloudMappings for
+    # every provider, for every component in the architecture -- and got heavier again as more
+    # component types (lb/dns/monitoring/notification, WAF config) were added. A live dogfooding
+    # session measured a real successful completion (via gemini-2.5-flash, the paid last-resort
+    # tier) at 66-73s for a moderately complex project even BEFORE those additions; the previous
+    # hardcoded 30.0s budget in llm.py was cutting every attempt off mid-generation, not just under
+    # rare load -- confirmed live: every one of 8 consecutive real generation attempts (across two
+    # different architectures) failed with "timed out after 30.0s" on the SAME two models
+    # (nvidia/nemotron and the gemini-2.5-flash paid fallback) that are the only ones in the chain
+    # that don't fail near-instantly for an unrelated reason (a deprecated free-tier model slug, or
+    # upstream rate limiting). 100s gives real headroom above the measured 66-73s baseline.
+    llm_architecture_generation_timeout_seconds: float = 100.0
     redis_url: str = "redis://localhost:6379/0"
 
     # Clerk (replaces the old bcrypt+Redis-session auth system). clerk_secret_key is used both

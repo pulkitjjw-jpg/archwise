@@ -1523,15 +1523,17 @@ Do not use markdown code block formatting (like ```json) in your response, retur
         {"role": "user", "content": json.dumps(input_context)},
     ]
 
-    # Deeply-nested output (per-component cloudMappings for 3 providers each) is the largest and
-    # slowest-to-generate response of any call site -- give each chain tier double the default
-    # timeout so a legitimately-still-generating model isn't mistaken for a hung one.
+    # Deeply-nested output (per-component cloudMappings for every provider, for every component)
+    # is the largest and slowest-to-generate response of any call site -- give each chain tier a
+    # dedicated, generous timeout (see settings.llm_architecture_generation_timeout_seconds' own
+    # docstring for why the old flat 30.0s was cutting off real, still-succeeding generations) so
+    # a legitimately-still-generating model isn't mistaken for a hung one.
     return await _call_llm_with_fallback_chain(
         api_key,
         messages_for_api,
         "Architecture generation",
         expected_keys=["components", "connections", "assumptions", "risks", "recommendation"],
-        timeout_seconds=30.0,
+        timeout_seconds=settings.llm_architecture_generation_timeout_seconds,
     )
 
 
