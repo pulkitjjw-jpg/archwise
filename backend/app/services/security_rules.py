@@ -41,7 +41,13 @@ def _finding(severity: str, title: str, description: str, component: dict | None
     }
 
 
-def run_security_rules(components: list[dict], connections: list[dict], industry_context: dict, provider: str) -> list[dict]:
+def run_security_rules(
+    components: list[dict],
+    connections: list[dict],
+    industry_context: dict,
+    provider: str,
+    dr_strategy: str = "none",
+) -> list[dict]:
     findings: list[dict] = []
     by_id = {c["id"]: c for c in components if "id" in c}
     industry = (industry_context or {}).get("industry", "none")
@@ -209,5 +215,47 @@ def run_security_rules(components: list[dict], connections: list[dict], industry
                     "Set a backup retention period appropriate for recovery requirements (commonly 7-30+ days).",
                 )
             )
+
+    # 6. Missing multi-region disaster-recovery strategy -- gated on dr_strategy (Phase 5),
+    #    computed exactly once via the shared nfr_signals.determine_dr_strategy and threaded in by
+    #    the caller (architecture_generation.py). dr_strategy != "none" already encodes "industry
+    #    is fintech/healthtech OR is_high_scale OR is_high_security" (determine_dr_strategy's own
+    #    decision logic), so re-deriving those NFR signals here would just duplicate that function --
+    #    this check only needs to know whether a DR tier SHOULD be active, then verify the
+    #    database/dns components actually carry the config for it. Under the normal generation
+    #    pipeline this rarely fires (lld_rules.py sets the same config from the same signal), but it
+    #    catches the real gaps: a legacy architecture generated before this feature existed, or a
+    #    manual edit that stripped the DR config back out.
+    if dr_strategy != "none":
+        for c in _find(components, "database"):
+            config = _lld_config(c, provider)
+            db_dr = config.get("drStrategy")
+            if not db_dr or db_dr == "none":
+                findings.append(
+                    _finding(
+                        HIGH,
+                        "No disaster-recovery strategy for a system that can't afford extended downtime",
+                        f'"{c.get("name", c["id"])}" has no disaster-recovery configuration recorded, despite this '
+                        "design's scale/compliance profile calling for one (regulated industry and/or high expected "
+                        "scale).",
+                        c,
+                        "Configure a cross-region DR strategy (at minimum a pilot-light cross-region replica) for this database.",
+                    )
+                )
+        for c in _find(components, "dns"):
+            config = _lld_config(c, provider)
+            routing_policy = config.get("routingPolicy", "Simple")
+            if routing_policy == "Simple":
+                findings.append(
+                    _finding(
+                        HIGH,
+                        "No disaster-recovery strategy for a system that can't afford extended downtime",
+                        f'"{c.get("name", c["id"])}" still routes with a plain single-region policy, despite this '
+                        "design's scale/compliance profile calling for a DR-aware failover/latency-based routing "
+                        "policy.",
+                        c,
+                        "Configure failover or latency-based DNS routing to a secondary region so a regional outage doesn't take the whole system down.",
+                    )
+                )
 
     return findings

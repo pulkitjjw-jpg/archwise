@@ -5,7 +5,33 @@ test files are collected)."""
 
 import pytest
 
-from app.services.nfr_signals import is_budget_tight, is_high_scale, parse_budget_amount
+from app.services.nfr_signals import determine_dr_strategy, is_budget_tight, is_high_scale, parse_budget_amount
+
+
+def make_nfr(
+    *,
+    expectedScale: str = "1,000 users",
+    budget: str = "$2,000/month",
+    teamMaturity: str = "senior engineers",
+    compliance: str = "none",
+    dataNature: str = "structured business records",
+    readWritePattern: str = "balanced",
+    latencySensitivity: str = "medium",
+) -> dict:
+    return {
+        "expectedScale": expectedScale,
+        "budget": budget,
+        "teamMaturity": teamMaturity,
+        "compliance": compliance,
+        "dataNature": dataNature,
+        "readWritePattern": readWritePattern,
+        "latencySensitivity": latencySensitivity,
+    }
+
+
+NONE_INDUSTRY = {"industry": "none"}
+FINTECH_INDUSTRY = {"industry": "fintech"}
+HEALTHTECH_INDUSTRY = {"industry": "healthtech"}
 
 
 class TestParseBudgetAmount:
@@ -102,3 +128,64 @@ class TestIsHighScale:
     )
     def test_low_scale_signals(self, scale_str):
         assert is_high_scale(scale_str) is False
+
+
+class TestDetermineDrStrategy:
+    """Phase 5: the exact decision boundary described in determine_dr_strategy's own docstring --
+    "warm-standby" needs BOTH is_high_scale AND is_regulated (or an explicit phrase), "pilot-light"
+    needs exactly one of the two signals, "none" needs neither."""
+
+    def test_generic_low_scale_unregulated_project_gets_none(self):
+        nfr = make_nfr()
+        assert determine_dr_strategy(nfr, NONE_INDUSTRY) == "none"
+
+    def test_high_scale_alone_gets_pilot_light(self):
+        nfr = make_nfr(expectedScale="high scale, 1 million users")
+        assert determine_dr_strategy(nfr, NONE_INDUSTRY) == "pilot-light"
+
+    def test_high_security_compliance_alone_gets_pilot_light(self):
+        nfr = make_nfr(compliance="HIPAA required")
+        assert determine_dr_strategy(nfr, NONE_INDUSTRY) == "pilot-light"
+
+    def test_fintech_industry_alone_gets_pilot_light(self):
+        nfr = make_nfr()
+        assert determine_dr_strategy(nfr, FINTECH_INDUSTRY) == "pilot-light"
+
+    def test_healthtech_industry_alone_gets_pilot_light(self):
+        nfr = make_nfr()
+        assert determine_dr_strategy(nfr, HEALTHTECH_INDUSTRY) == "pilot-light"
+
+    def test_high_scale_and_high_security_together_get_warm_standby(self):
+        nfr = make_nfr(expectedScale="high scale, 1 million users", compliance="PCI-DSS required")
+        assert determine_dr_strategy(nfr, NONE_INDUSTRY) == "warm-standby"
+
+    def test_high_scale_and_fintech_industry_together_get_warm_standby(self):
+        nfr = make_nfr(expectedScale="high scale, 1 million users")
+        assert determine_dr_strategy(nfr, FINTECH_INDUSTRY) == "warm-standby"
+
+    @pytest.mark.parametrize(
+        "phrase",
+        [
+            "cannot afford downtime",
+            "can't afford downtime",
+            "business continuity is critical",
+            "needs a disaster recovery plan",
+            "must maintain 99.99% uptime",
+            "system must be always available, no exceptions",
+        ],
+    )
+    def test_explicit_dr_phrase_forces_warm_standby_even_at_low_scale(self, phrase):
+        nfr = make_nfr(expectedScale="500 users", compliance=phrase)
+        assert determine_dr_strategy(nfr, NONE_INDUSTRY) == "warm-standby"
+
+    def test_explicit_phrase_can_appear_in_any_nfr_field_not_just_compliance(self):
+        nfr = make_nfr(expectedScale="500 users", dataNature="records that cannot afford downtime")
+        assert determine_dr_strategy(nfr, NONE_INDUSTRY) == "warm-standby"
+
+    def test_industry_context_none_object_treated_same_as_missing(self):
+        nfr = make_nfr()
+        assert determine_dr_strategy(nfr, None) == "none"
+
+    def test_none_industry_dict_without_high_scale_or_security_stays_none(self):
+        nfr = make_nfr(expectedScale="500 users", compliance="none")
+        assert determine_dr_strategy(nfr, {"industry": "none"}) == "none"

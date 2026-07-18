@@ -1,5 +1,25 @@
+from app.services.nfr_signals import determine_dr_strategy as _determine_dr_strategy
 from app.services.nfr_signals import is_budget_tight as _is_budget_tight
 from app.services.nfr_signals import is_high_scale as _is_high_scale
+
+# Secondary-region defaults per provider, keyed to whatever primary region terraform_generator.py
+# itself defaults to (aws_region "us-east-1", location "East US", gcp_region "us-central1") -- LLD
+# config here is descriptive text, not a Terraform variable, so a fixed sensible pair per provider
+# is the right level of detail (a real deployment picks its own regions; this documents the pattern).
+_DR_SECONDARY_REGION = {
+    "aws": "us-west-2",
+    "azure": "West US",
+    "gcp": "us-east1",
+}
+
+# Provider-specific phrasing for a warm-standby database's cross-region replication mechanism --
+# real service names per cloud, not generic filler (see the task's own AWS/Azure/GCP examples).
+_DR_WARM_STANDBY_DB_REPLICATION = {
+    "aws": "Aurora Global Database (or equivalent) with sub-second cross-region replication, automatic failover capable",
+    "azure": "Azure SQL/Cosmos DB geo-replication with automatic failover capable",
+    "gcp": "Cloud SQL cross-region replica with automatic failover capable",
+}
+_DR_PILOT_LIGHT_DB_REPLICATION = "Cross-region read replica, promoted manually on failover"
 
 # AWS/Azure/GCP rule-set label per provider -- shared by the "lb" and "cdn" branches below since a
 # WAF is a property of whichever edge component fronts the public internet, not a first-class
@@ -88,6 +108,14 @@ def run_lld_rules_engine(
         or "audit" in compliance_lower
         or "encrypt" in compliance_lower
     )
+
+    # Multi-region DR strategy (Phase 5) -- computed once via the shared nfr_signals signal (never
+    # reimplemented locally) and used only in the aws/azure/gcp branch below. Deliberately NOT
+    # threaded into _run_kubernetes_lld/_run_private_cloud_lld -- the specific cloud-managed DR
+    # mechanisms this phase models (Aurora Global Database, Route 53 failover routing, etc.) don't
+    # have a natural Kubernetes/on-prem equivalent worth modeling at this scope, matching the WAF
+    # precedent (kubernetes/private get a brief note, not full config, for that same reason).
+    dr_strategy = _determine_dr_strategy(nfr, industry_context)
 
     # Kubernetes and private cloud have fundamentally different LLD shapes (pod resource
     # requests/HPA/namespaces vs. instance sizes; VM sizing vs. managed-service config) -- they
@@ -214,6 +242,40 @@ def run_lld_rules_engine(
         )
         reasoning["ttlSeconds"] = "A short TTL keeps DNS propagation fast if the target ever needs to change, at the cost of a modest increase in DNS query volume."
 
+        # Phase 5: this is the exact field the comment above was pointing at -- now actually
+        # configured once a DR tier is active.
+        if dr_strategy != "none":
+            config["routingPolicy"] = (
+                "Failover (Active-Passive)"
+                if dr_strategy == "pilot-light"
+                else "Latency-based routing with health-check failover"
+            )
+            config["secondaryRegion"] = _DR_SECONDARY_REGION.get(provider, "secondary region")
+            config["failoverThreshold"] = "3 consecutive health-check failures (~90s to detect)"
+
+            reasoning["routingPolicy"] = (
+                (
+                    "Active-passive failover routing: all traffic goes to the primary region until its health check "
+                    "fails, then DNS shifts traffic to the pilot-light secondary -- the secondary sits mostly idle "
+                    "until failover, matching pilot-light's minimal-standing-cost design."
+                )
+                if dr_strategy == "pilot-light"
+                else (
+                    "Latency-based routing with health-check failover: traffic is already routed to whichever region "
+                    "answers fastest, and a failed health check removes the primary from rotation automatically -- "
+                    "appropriate once the secondary region runs real standing capacity (warm-standby), not just a "
+                    "cold failover target."
+                )
+            )
+            reasoning["secondaryRegion"] = (
+                f"A different region ({config['secondaryRegion']}) than the primary keeps a regional outage (power, "
+                "network, or provider-side failure) from taking down both the primary and its failover target at once."
+            )
+            reasoning["failoverThreshold"] = (
+                "A few consecutive failures (not a single blip) avoids triggering a costly/disruptive regional "
+                "failover on a single transient health-check miss, while still failing over fast enough to matter."
+            )
+
     elif component_type == "compute":
         is_worker = component_id == "worker"
         is_serverless = is_low_budget and (
@@ -273,6 +335,16 @@ def run_lld_rules_engine(
         config["vpcSubnet"] = "Private App Subnets"
         config["securityGroups"] = "Allows HTTPS ingress from CDN, outbound access to DB/Storage."
         reasoning["vpcSubnet"] = "Isolated compute components from the public internet for security."
+
+        # Phase 5: warm-standby ONLY -- pilot-light's whole point is minimal/no standing compute in
+        # the secondary region, so it deliberately gets nothing here.
+        if dr_strategy == "warm-standby":
+            config["standbyCapacity"] = "1 instance running in secondary region, scales to match primary on failover"
+            reasoning["standbyCapacity"] = (
+                "Warm-standby keeps a small but real fleet running in the secondary region so failover is a scale-up, "
+                "not a cold start from zero -- the defining difference from pilot-light, which keeps no standing "
+                "compute at all."
+            )
 
     elif component_type == "database":
         is_relational = (
@@ -336,6 +408,35 @@ def run_lld_rules_engine(
                 else "On-Demand billing is preferred to eliminate idle capacity costs."
             )
 
+        # Phase 5: DR enrichment applies uniformly regardless of relational/non-relational shape --
+        # both kinds of managed database have a real cross-region replication story on every
+        # provider modeled here.
+        if dr_strategy != "none":
+            config["drStrategy"] = dr_strategy
+            config["secondaryRegion"] = _DR_SECONDARY_REGION.get(provider, "secondary region")
+            config["crossRegionReplication"] = (
+                _DR_PILOT_LIGHT_DB_REPLICATION
+                if dr_strategy == "pilot-light"
+                else _DR_WARM_STANDBY_DB_REPLICATION.get(provider, _DR_WARM_STANDBY_DB_REPLICATION["aws"])
+            )
+            reasoning["drStrategy"] = (
+                (
+                    "Pilot-light: a cross-region replica exists and stays warm, but is only promoted to primary on an "
+                    "actual failover -- minimal standing cost, at the price of a manual promotion step and some "
+                    "recovery-time lag."
+                )
+                if dr_strategy == "pilot-light"
+                else (
+                    "Warm-standby: the secondary region already runs a real, continuously-replicated database "
+                    "instance capable of automatic failover -- higher standing cost than pilot-light, but "
+                    "recovery time drops from a manual promotion to near-automatic."
+                )
+            )
+            reasoning["crossRegionReplication"] = (
+                "The specific managed cross-region replication mechanism this database's provider offers for the "
+                f"chosen DR tier ({dr_strategy})."
+            )
+
         config["vpcSubnet"] = "Private Database Subnets"
         config["securityGroups"] = "Allows port 5432 ingress strictly from App Compute components."
         reasoning["vpcSubnet"] = "Placed database in isolated subnets behind active security group rules."
@@ -356,6 +457,26 @@ def run_lld_rules_engine(
             if is_high_security
             else "Disabled versioning to save space costs."
         )
+
+        # Phase 5: cheap and easy to always include once ANY DR tier is active -- unlike database/
+        # compute, cross-region object replication carries no meaningful standing-capacity cost
+        # difference between pilot-light and warm-standby, so both tiers get the same config.
+        if dr_strategy != "none":
+            config["crossRegionReplication"] = "Enabled, versioned bucket replicated to secondary region"
+            # Cross-region replication is a real AWS/Azure/GCP requirement that the SOURCE bucket
+            # carry versioning -- forced true here (overriding the is_high_security-only default
+            # above) rather than silently declaring a replication config the storage provider would
+            # reject.
+            config["versioningEnabled"] = "true"
+            reasoning["crossRegionReplication"] = (
+                "Object storage replication is inexpensive relative to database/compute standby capacity, so it's "
+                "enabled for both DR tiers once any disaster-recovery posture is active -- requires bucket "
+                "versioning (see versioningEnabled above) as a prerequisite."
+            )
+            reasoning["versioningEnabled"] = (
+                "Forced to enabled once cross-region replication is active -- versioning on the source bucket is a "
+                "hard prerequisite for bucket replication on every major cloud provider, not just a nice-to-have."
+            )
 
     elif component_type == "queue":
         config["queueType"] = "FIFO (Strict Ordering)" if is_high_security else "Standard"

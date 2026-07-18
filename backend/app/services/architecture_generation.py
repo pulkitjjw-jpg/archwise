@@ -12,12 +12,18 @@ from app.services.cloud_mapping import get_cloud_mapping
 from app.services.industry_rules import run_industry_rules
 from app.services.lld_rules import run_lld_rules_engine
 from app.services.llm import validate_and_generate_architecture
+from app.services.nfr_signals import determine_dr_strategy
 from app.services.rules_engine import run_rules_engine
 from app.services.security_rules import run_security_rules
 
 
-def build_cloud_mapping(provider: str, component: dict, reqs_context: dict, industry_context: dict) -> dict:
-    mapping = get_cloud_mapping(provider, component["type"], component["id"], reqs_context)
+def build_cloud_mapping(
+    provider: str, component: dict, reqs_context: dict, industry_context: dict, dr_strategy: str = "none"
+) -> dict:
+    mapping = get_cloud_mapping(provider, component["type"], component["id"], reqs_context, dr_strategy)
+    # run_lld_rules_engine recomputes dr_strategy itself from reqs_context/industry_context (both
+    # already in scope there) via the same shared nfr_signals.determine_dr_strategy -- no need to
+    # thread it through as a second parameter here too.
     lld = run_lld_rules_engine(provider, component["type"], component["id"], reqs_context, None, industry_context)
     return {
         "serviceName": mapping["serviceName"],
@@ -63,15 +69,25 @@ async def generate_architecture_bundle(
     all_connections = baseline["connections"] + industry_result["connections"]
     all_rules_trace = baseline["rulesTrace"] + industry_result["rulesTrace"]
 
+    # 1b. Multi-region DR strategy (Phase 5) -- computed exactly once, here, since this is the one
+    # place NFR + industry_context are both already available without threading either through
+    # rules_engine.py (which only ever produces the baseline component list and never touches cloud
+    # mapping directly). Passed alongside industry_context into build_cloud_mapping below so
+    # cloud_mapping.py's cost folding and lld_rules.py's dns/database/storage/compute enrichment
+    # (recomputed there from the same reqs_context/industry_context) always agree on which tier is
+    # active. "none" for every generic project -- byte-for-byte unaffected, matching every prior
+    # phase's additive-only precedent.
+    dr_strategy = determine_dr_strategy(reqs_context["nonFunctional"], industry_context)
+
     # 2. Resolve mappings, costs, and LLD baselines for AWS, Azure, and GCP for each component --
     # these three go to the LLM for validation/enrichment.
     mapped_baseline_components = [
         {
             **c,
             "cloudMappings": {
-                "aws": build_cloud_mapping("aws", c, reqs_context, industry_context),
-                "azure": build_cloud_mapping("azure", c, reqs_context, industry_context),
-                "gcp": build_cloud_mapping("gcp", c, reqs_context, industry_context),
+                "aws": build_cloud_mapping("aws", c, reqs_context, industry_context, dr_strategy),
+                "azure": build_cloud_mapping("azure", c, reqs_context, industry_context, dr_strategy),
+                "gcp": build_cloud_mapping("gcp", c, reqs_context, industry_context, dr_strategy),
             },
         }
         for c in all_components
@@ -79,11 +95,13 @@ async def generate_architecture_bundle(
 
     # 2b. Kubernetes + private-cloud mappings, computed but kept OUT of the LLM payload (fully
     # deterministic, no managed-service pricing nuance to "validate" -- see generate_architecture's
-    # original comment on why this stays out of the LLM's prompt/output size).
+    # original comment on why this stays out of the LLM's prompt/output size). DR strategy isn't
+    # modeled for these two providers (see lld_rules.py's identical scope decision) -- passed
+    # through harmlessly, get_cloud_mapping's kubernetes/private branches simply don't use it.
     extra_provider_mappings_by_id = {
         c["id"]: {
-            "kubernetes": build_cloud_mapping("kubernetes", c, reqs_context, industry_context),
-            "private": build_cloud_mapping("private", c, reqs_context, industry_context),
+            "kubernetes": build_cloud_mapping("kubernetes", c, reqs_context, industry_context, dr_strategy),
+            "private": build_cloud_mapping("private", c, reqs_context, industry_context, dr_strategy),
         }
         for c in all_components
     }
@@ -140,9 +158,11 @@ async def generate_architecture_bundle(
             },
         )
 
-    # 6. Deterministic security-posture audit (Workstream T4) for all 5 providers.
+    # 6. Deterministic security-posture audit (Workstream T4) for all 5 providers. dr_strategy is
+    # passed through so run_security_rules can flag a database/dns component missing its DR config
+    # despite the architecture's own NFR/industry profile calling for one (see security_rules.py).
     security_findings = {
-        prov: run_security_rules(enriched["components"], enriched["connections"], industry_context, prov)
+        prov: run_security_rules(enriched["components"], enriched["connections"], industry_context, prov, dr_strategy)
         for prov in ("aws", "azure", "gcp", "kubernetes", "private")
     }
 

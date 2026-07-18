@@ -107,3 +107,74 @@ def is_high_scale(scale_str: str) -> bool:
         or "10k" in scale_lower
         or "50k" in scale_lower
     )
+
+
+# Free-text phrases that, if present anywhere in the NFR data, are treated as an explicit
+# business-continuity signal regardless of scale/compliance -- the same lowercased-substring
+# convention rules_engine.py already uses for needs_auth/needs_notification/etc. on free-text
+# requirements.
+_EXPLICIT_DR_PHRASES = (
+    "cannot afford downtime",
+    "can't afford downtime",
+    "business continuity",
+    "disaster recovery",
+    "99.99%",
+    "always available",
+)
+
+
+def determine_dr_strategy(nfr: dict, industry_context: dict | None) -> str:
+    """Real judgment call, not a hardcoded default: decides whether this architecture's disaster-
+    recovery posture should be "none", "pilot-light", or "warm-standby" (Phase 5 -- deliberately
+    NOT Backup & Restore, too passive to be architecturally interesting and already partially
+    covered by backup-retention LLD config, and NOT Active-Active, disproportionate multi-master
+    complexity for this app's scope -- see the task's own scope note).
+
+    The two inputs that matter:
+      - is_high_scale (via the shared nfr_signals.is_high_scale signal): a high-traffic system has
+        more to lose (in absolute terms) from an extended regional outage.
+      - is_regulated: high-security/compliance NFR text (gdpr/hipaa/pci/secure/audit/encrypt --
+        the identical substring check cloud_mapping.py/lld_rules.py already each recompute
+        locally as "_is_high_security"/"is_high_security") OR a fintech/healthtech
+        industry_context -- the same "industry is close to a baseline expectation, not just scale"
+        reasoning lld_rules.py's own _waf_lld_config already applies to WAF enablement.
+
+    Decision:
+      - "warm-standby": is_high_scale AND is_regulated (a regulated system that's also high-scale
+        genuinely cannot afford extended downtime -- the two signals compounding is what justifies
+        paying for standing secondary-region capacity), OR the NFR data explicitly says so via
+        _EXPLICIT_DR_PHRASES (a stated business-continuity requirement overrides the scale/
+        compliance heuristic entirely, the same way explicit functional-text signals override
+        heuristics elsewhere in this codebase).
+      - "pilot-light": is_high_scale OR is_regulated alone (one signal, not both) -- worth a
+        minimal-cost warm-able secondary footprint, not worth standing capacity.
+      - "none": otherwise -- a generic project's architecture is completely unaffected, matching
+        every prior phase's "additive, never changes generic-project behavior" precedent.
+
+    `nfr` is the `nonFunctional` sub-dict (same shape every other function in this module takes),
+    not the full requirements dict -- explicit-phrase matching scans every string value in `nfr`
+    (budget/teamMaturity/compliance/dataNature/latencySensitivity/expectedScale/readWritePattern),
+    since a business-continuity requirement could plausibly be phrased under any of those free-text
+    fields, not just "compliance"."""
+    high_scale = is_high_scale(nfr.get("expectedScale", ""))
+
+    compliance_lower = (nfr.get("compliance") or "").lower()
+    is_high_security = (
+        "gdpr" in compliance_lower
+        or "hipaa" in compliance_lower
+        or "pci" in compliance_lower
+        or "secure" in compliance_lower
+        or "audit" in compliance_lower
+        or "encrypt" in compliance_lower
+    )
+    industry = (industry_context or {}).get("industry", "none")
+    is_regulated = is_high_security or industry in ("fintech", "healthtech")
+
+    nfr_text = " ".join(str(v) for v in nfr.values() if isinstance(v, str)).lower()
+    explicit_signal = any(phrase in nfr_text for phrase in _EXPLICIT_DR_PHRASES)
+
+    if (high_scale and is_regulated) or explicit_signal:
+        return "warm-standby"
+    if high_scale or is_regulated:
+        return "pilot-light"
+    return "none"

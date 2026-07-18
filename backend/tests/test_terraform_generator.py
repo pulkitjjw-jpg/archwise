@@ -543,6 +543,178 @@ WAF_ENABLED_STACKS = {
 }
 
 
+def _with_dr_config(components: list[dict], provider: str, dr_strategy: str) -> list[dict]:
+    """Returns a deep-enough copy of `components` with the database/dns/storage/compute components'
+    LLD config enriched with the exact keys lld_rules.py's Phase 5 DR enrichment would actually set
+    for the given tier -- mirrors the real shape closely enough for generate_terraform_code's own
+    _get_dr_strategy helper (which reads config["drStrategy"] off the database component) and the
+    DR-specific resource emission this file exercises."""
+    secondary_region = {"aws": "us-west-2", "azure": "West US", "gcp": "us-east1"}.get(provider, "secondary-region")
+    db_replication = (
+        "Cross-region read replica, promoted manually on failover"
+        if dr_strategy == "pilot-light"
+        else "Aurora Global Database (or equivalent) with sub-second cross-region replication, automatic failover capable"
+    )
+    out = []
+    for c in components:
+        c = {**c, "cloudMappings": {p: dict(m) for p, m in c["cloudMappings"].items()}}
+        mapping = c["cloudMappings"].get(provider)
+        if not mapping:
+            out.append(c)
+            continue
+        lld = dict(mapping.get("lld") or {"config": {}, "reasoning": {}})
+        config = dict(lld.get("config") or {})
+        if c["type"] == "database":
+            config["drStrategy"] = dr_strategy
+            config["secondaryRegion"] = secondary_region
+            config["crossRegionReplication"] = db_replication
+        elif c["type"] == "dns":
+            config["routingPolicy"] = "Failover (Active-Passive)" if dr_strategy == "pilot-light" else "Latency-based routing with health-check failover"
+            config["secondaryRegion"] = secondary_region
+        elif c["type"] == "storage":
+            config["crossRegionReplication"] = "Enabled, versioned bucket replicated to secondary region"
+            config["versioningEnabled"] = "true"
+        elif c["type"] == "compute" and dr_strategy == "warm-standby" and c["id"] != "worker":
+            config["standbyCapacity"] = "1 instance running in secondary region, scales to match primary on failover"
+        lld["config"] = config
+        mapping = {**mapping, "lld": lld}
+        c["cloudMappings"] = {**c["cloudMappings"], provider: mapping}
+        out.append(c)
+    return out
+
+
+DR_KITCHEN_SINK_STACKS = {}
+for _tier in ("pilot-light", "warm-standby"):
+    for _name in ("aws_container", "aws_serverless"):
+        _provider, _stack, _conns = KITCHEN_SINK_STACKS[_name]
+        DR_KITCHEN_SINK_STACKS[f"{_name}_{_tier.replace('-', '_')}"] = (
+            _provider,
+            _with_dr_config(_stack, _provider, _tier),
+            _conns,
+        )
+# Azure/GCP get a warm-standby variant each -- AWS gets both tiers (see test module docstring on
+# why AWS is the most detailed implementation).
+for _name in ("azure_container", "gcp_container"):
+    _provider, _stack, _conns = KITCHEN_SINK_STACKS[_name]
+    DR_KITCHEN_SINK_STACKS[f"{_name}_warm_standby"] = (_provider, _with_dr_config(_stack, _provider, "warm-standby"), _conns)
+
+
+class TestDrStrategyTerraformResources:
+    """Regex-level checks that the real DR resources land in the right files -- see
+    TestDrStrategyTerraformValidate below for the authoritative real `terraform validate` check."""
+
+    def test_aws_dr_inactive_by_default_no_dr_resources(self):
+        provider, stack, conns = KITCHEN_SINK_STACKS["aws_container"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        combined = "\n".join(files.values())
+        assert "aws.secondary" not in combined
+        assert "aws_route53" not in combined
+        assert "postgres_replica" not in combined
+
+    def test_aws_pilot_light_gets_secondary_provider_and_replica_no_standby_compute(self):
+        provider, stack, conns = DR_KITCHEN_SINK_STACKS["aws_container_pilot_light"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        assert 'alias  = "secondary"' in files["main.tf"]
+        assert 'variable "secondary_region"' in files["variables.tf"]
+        assert 'resource "aws_db_instance" "postgres_replica"' in files["database.tf"]
+        assert "replicate_source_db = aws_db_instance.postgres.arn" in files["database.tf"]
+        # pilot-light: no standing standby compute
+        assert "aws_lambda_function.standby" not in files["compute.tf"]
+        assert 'resource "aws_lambda_function" "standby"' not in files["compute.tf"]
+
+    def test_aws_warm_standby_gets_standby_compute_and_multi_az_replica(self):
+        provider, stack, conns = DR_KITCHEN_SINK_STACKS["aws_container_warm_standby"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        assert 'resource "aws_lambda_function" "standby"' in files["compute.tf"]
+        assert 'resource "aws_lambda_function_url" "standby"' in files["compute.tf"]
+        assert "multi_az            = true" in files["database.tf"]
+
+    def test_aws_storage_replication_resources_present(self):
+        provider, stack, conns = DR_KITCHEN_SINK_STACKS["aws_container_pilot_light"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        storage = files["storage.tf"]
+        assert 'resource "aws_s3_bucket" "secondary_blobs"' in storage
+        assert 'resource "aws_s3_bucket_versioning" "secondary_blobs"' in storage
+        assert 'resource "aws_iam_role" "s3_replication"' in storage
+        assert 'resource "aws_s3_bucket_replication_configuration" "blobs"' in storage
+
+    def test_aws_dns_failover_records_present(self):
+        provider, stack, conns = DR_KITCHEN_SINK_STACKS["aws_container_pilot_light"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        networking = files["networking.tf"]
+        assert 'resource "aws_route53_health_check" "primary"' in networking
+        assert 'resource "aws_route53_record" "primary"' in networking
+        assert 'resource "aws_route53_record" "secondary"' in networking
+        assert 'type = "PRIMARY"' in networking
+        assert 'type = "SECONDARY"' in networking
+
+    def test_azure_dr_gets_flexible_server_replica_and_ragrs_storage(self):
+        provider, stack, conns = DR_KITCHEN_SINK_STACKS["azure_container_warm_standby"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        assert 'resource "azurerm_postgresql_flexible_server" "db_replica"' in files["database.tf"]
+        assert 'create_mode         = "Replica"' in files["database.tf"]
+        assert 'account_replication_type = "RAGRS"' in files["storage.tf"]
+        assert 'resource "azurerm_traffic_manager_profile" "app"' in files["compute.tf"]
+
+    def test_azure_dr_inactive_by_default_no_dr_resources(self):
+        provider, stack, conns = KITCHEN_SINK_STACKS["azure_container"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        combined = "\n".join(files.values())
+        assert "db_replica" not in combined
+        assert "traffic_manager" not in combined
+        assert 'account_replication_type = "LRS"' in files["storage.tf"]
+
+    def test_gcp_dr_gets_read_replica_and_dual_region_bucket(self):
+        provider, stack, conns = DR_KITCHEN_SINK_STACKS["gcp_container_warm_standby"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        assert 'resource "google_sql_database_instance" "db_replica"' in files["database.tf"]
+        assert "master_instance_name = google_sql_database_instance.db.name" in files["database.tf"]
+        assert 'location      = "NAM4"' in files["storage.tf"]
+
+    def test_gcp_dr_inactive_by_default_no_dr_resources(self):
+        provider, stack, conns = KITCHEN_SINK_STACKS["gcp_container"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        combined = "\n".join(files.values())
+        assert "db_replica" not in combined
+        assert 'location      = var.gcp_region' in files["storage.tf"]
+
+
+class TestDrStrategyTerraformValidate:
+    """Authoritative check: real `terraform init && terraform validate` against the generated DR
+    output, for both DR tiers on AWS (the task's own stated minimum) plus a warm-standby variant
+    each for Azure/GCP. Same terraform-CLI-availability skip as TestTerraformValidate."""
+
+    @staticmethod
+    @pytest.fixture(scope="class")
+    def terraform_available():
+        import shutil
+
+        if shutil.which("terraform") is None:
+            pytest.skip("terraform CLI not installed in this environment")
+
+    @pytest.mark.parametrize("name", list(DR_KITCHEN_SINK_STACKS.keys()))
+    def test_generated_dr_terraform_validates(self, terraform_available, name, tmp_path):
+        import subprocess
+
+        provider, stack, conns = DR_KITCHEN_SINK_STACKS[name]
+        files = generate_terraform_code(provider, "DrValidateTest", stack, conns, None)
+        for filename, content in files.items():
+            if not filename.endswith(".tf"):
+                continue
+            (tmp_path / filename).write_text(content)
+
+        init = subprocess.run(
+            ["terraform", "init", "-backend=false", "-input=false"],
+            cwd=tmp_path, capture_output=True, text=True, timeout=120,
+        )
+        assert init.returncode == 0, f"{name}: terraform init failed:\n{init.stdout}\n{init.stderr}"
+
+        validate = subprocess.run(
+            ["terraform", "validate"], cwd=tmp_path, capture_output=True, text=True, timeout=60,
+        )
+        assert validate.returncode == 0, f"{name}: terraform validate failed:\n{validate.stdout}\n{validate.stderr}"
+
+
 class TestNoDuplicateResourceDeclarations:
     """Regression coverage for the Azure duplicate-declaration bug: an architecture with BOTH a
     main "compute" component and a "worker" component (both type=="compute", a common combination

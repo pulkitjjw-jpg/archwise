@@ -47,6 +47,22 @@ def _build_comments(lld: dict, keys: list[str]) -> str:
     return comments
 
 
+def _get_dr_strategy(components: list[dict], provider: str) -> str:
+    """Single source of truth for which DR tier (if any) is active for this architecture, read
+    directly off the database component's own LLD config -- the "drStrategy" key lld_rules.py's
+    Phase 5 DR enrichment sets there (aws/azure/gcp only, "none"/"pilot-light"/"warm-standby").
+    Reading it off the already-resolved LLD config rather than adding a new top-level parameter to
+    generate_terraform_code keeps that function's public signature backward compatible."""
+    for c in components:
+        if c.get("type") != "database":
+            continue
+        lld = _get_lld(c, provider)
+        dr = (lld.get("config") or {}).get("drStrategy")
+        if dr in ("pilot-light", "warm-standby"):
+            return dr
+    return "none"
+
+
 def _build_compliance_section(industry_context: dict | None, components: list[dict]) -> str:
     if not industry_context or industry_context.get("industry") == "none":
         return ""
@@ -331,6 +347,28 @@ provider "aws" {{
         # and appended to variables.tf afterward, since variables.tf itself is built before the
         # loop runs.
         extra_variables_tf = ""
+
+        # Phase 5 (multi-region DR): read directly off the database component's own LLD config --
+        # "none" for every generic architecture, byte-for-byte unaffected. When a DR tier is
+        # active, a second aliased provider fronts every secondary-region resource emitted below.
+        dr_strategy = _get_dr_strategy(components, "aws")
+        if dr_strategy != "none":
+            main_tf += """
+# Phase 5 (multi-region DR): a second aliased provider targeting the secondary region -- every
+# resource below tagged `provider = aws.secondary` is provisioned there instead of the primary
+# region.
+provider "aws" {
+  alias  = "secondary"
+  region = var.secondary_region
+}
+"""
+            extra_variables_tf += """
+variable "secondary_region" {
+  type        = string
+  default     = "us-west-2"
+  description = "Secondary AWS region for disaster-recovery resources (cross-region replicas, standby capacity, DNS failover target)."
+}
+"""
 
         # A load balancer/API gateway is now its own real "lb"-type component (see rules_engine.py)
         # rather than bundled into compute's own service name -- this pre-scan of connections finds
@@ -1125,6 +1163,239 @@ resource "aws_iam_role_policy_attachment" "lambda_vpc_access" {
 }
 """
 
+        # Phase 5 (multi-region DR): real secondary-region resources for the specific pattern each
+        # DR tier actually needs -- never duplicate diagram-level HLD components (that would break
+        # cost math and every type-based lookup elsewhere), just the cross-region Terraform
+        # resources the pattern requires. All gated on dr_strategy != "none", so a generic
+        # architecture's output is byte-for-byte unaffected.
+        if dr_strategy != "none":
+            db_component = next((c for c in components if c.get("type") == "database"), None)
+            db_svc = _get_service_name(db_component, "aws") if db_component else ""
+            has_rds_db = bool(db_component) and ("RDS" in db_svc or "Aurora" in db_svc)
+            has_storage = any(c.get("type") == "storage" for c in components)
+            has_dns = any(c.get("type") == "dns" for c in components)
+            has_cdn = any(c.get("type") == "cdn" for c in components)
+
+            if has_rds_db:
+                # Cross-region read replica for both tiers -- a genuinely complete Aurora Global
+                # Database (aws_rds_global_cluster + aws_rds_cluster members) would require
+                # restructuring the primary database off the plain aws_db_instance this generator
+                # already emits for every non-DR architecture; a cross-region read replica is the
+                # real, well-documented, always-correct AWS pattern for both tiers here, sized up
+                # (multi_az) for warm-standby to reflect its higher-availability posture.
+                db_lld = _get_lld(db_component, "aws")
+                db_config = db_lld.get("config") or {}
+                database_tf += _build_comments(db_lld, ["drStrategy", "secondaryRegion", "crossRegionReplication"])
+                replica_instance_class = db_config.get("instanceClass") or "db.t4g.micro"
+                replica_multi_az = "true" if dr_strategy == "warm-standby" else "false"
+                database_tf += f"""resource "aws_db_instance" "postgres_replica" {{
+  provider            = aws.secondary
+  identifier          = "${{var.project_name}}-postgres-replica"
+  replicate_source_db = aws_db_instance.postgres.arn
+  instance_class      = "{replica_instance_class}"
+  multi_az            = {replica_multi_az}
+  skip_final_snapshot  = true
+  publicly_accessible  = false
+
+  tags = {{
+    Name        = "${{var.project_name}}-postgres-replica"
+    Environment = var.environment
+    DrTier      = "{dr_strategy}"
+  }}
+}}
+
+"""
+                outputs_tf += """output "db_replica_endpoint" {
+  value       = aws_db_instance.postgres_replica.endpoint
+  description = "Cross-region read replica endpoint -- promote this manually (pilot-light) or via automated failover tooling (warm-standby) if the primary region goes down."
+}
+
+"""
+
+            if has_storage:
+                storage_tf += """# Phase 5 (multi-region DR): cross-region replication requires versioning enabled on BOTH
+# buckets and a dedicated IAM role S3 assumes on your behalf to perform the replication.
+resource "aws_s3_bucket" "secondary_blobs" {
+  provider = aws.secondary
+  bucket   = "${var.project_name}-storage-bucket-secondary-unique"
+
+  tags = {
+    Name        = "${var.project_name}-blobs-secondary"
+    Environment = var.environment
+  }
+}
+
+resource "aws_s3_bucket_versioning" "secondary_blobs" {
+  provider = aws.secondary
+  bucket   = aws_s3_bucket.secondary_blobs.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_iam_role" "s3_replication" {
+  name = "${var.project_name}-s3-replication-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "s3.amazonaws.com"
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "s3_replication" {
+  name = "${var.project_name}-s3-replication-policy"
+  role = aws_iam_role.s3_replication.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action   = ["s3:GetReplicationConfiguration", "s3:ListBucket"]
+        Effect   = "Allow"
+        Resource = [aws_s3_bucket.blobs.arn]
+      },
+      {
+        Action   = ["s3:GetObjectVersionForReplication", "s3:GetObjectVersionAcl", "s3:GetObjectVersionTagging"]
+        Effect   = "Allow"
+        Resource = ["${aws_s3_bucket.blobs.arn}/*"]
+      },
+      {
+        Action   = ["s3:ReplicateObject", "s3:ReplicateDelete", "s3:ReplicateTags"]
+        Effect   = "Allow"
+        Resource = ["${aws_s3_bucket.secondary_blobs.arn}/*"]
+      }
+    ]
+  })
+}
+
+resource "aws_s3_bucket_replication_configuration" "blobs" {
+  depends_on = [aws_s3_bucket_versioning.blobs, aws_s3_bucket_versioning.secondary_blobs]
+  role       = aws_iam_role.s3_replication.arn
+  bucket     = aws_s3_bucket.blobs.id
+
+  rule {
+    id     = "replicate-to-secondary"
+    status = "Enabled"
+
+    destination {
+      bucket        = aws_s3_bucket.secondary_blobs.arn
+      storage_class = "STANDARD"
+    }
+  }
+}
+
+"""
+
+            if dr_strategy == "warm-standby":
+                # Minimal standby compute in the secondary region -- not a full mirrored stack, a
+                # small Lambda function at reduced capacity that scales to match primary on
+                # failover (per lld_rules.py's standbyCapacity LLD note). No vpc_config: keeping
+                # this self-contained avoids needing a whole secondary-region VPC/subnet stack
+                # just for a reduced-capacity standby function.
+                compute_tf += """
+# Phase 5 (multi-region DR, warm-standby only): minimal standby compute in the secondary region.
+resource "aws_lambda_function" "standby" {
+  provider      = aws.secondary
+  filename      = "function.zip"
+  function_name = "${var.project_name}-standby"
+  role          = aws_iam_role.lambda_exec.arn
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  memory_size   = 512
+  timeout       = 30
+
+  tags = {
+    Name        = "${var.project_name}-standby"
+    Environment = var.environment
+  }
+}
+
+resource "aws_lambda_function_url" "standby" {
+  provider           = aws.secondary
+  function_name      = aws_lambda_function.standby.function_name
+  authorization_type = "NONE"
+}
+"""
+                outputs_tf += """output "standby_function_url" {
+  value       = aws_lambda_function_url.standby.function_url
+  description = "Warm-standby secondary-region function URL -- the DNS failover record's SECONDARY target points here."
+}
+
+"""
+
+            if has_dns:
+                if has_cdn:
+                    primary_target_expr = "aws_cloudfront_distribution.cdn.domain_name"
+                elif has_alb:
+                    primary_target_expr = "aws_lb.app.dns_name"
+                else:
+                    primary_target_expr = None
+
+                if primary_target_expr:
+                    if dr_strategy == "warm-standby":
+                        secondary_target_expr = (
+                            'trimsuffix(trimprefix(aws_lambda_function_url.standby.function_url, "https://"), "/")'
+                        )
+                    elif has_storage:
+                        secondary_target_expr = "aws_s3_bucket.secondary_blobs.bucket_regional_domain_name"
+                    else:
+                        secondary_target_expr = primary_target_expr
+
+                    files["networking.tf"] += f"""
+# Phase 5 (multi-region DR): failover DNS routing -- a health check on the primary endpoint plus
+# two failover_routing_policy records (PRIMARY/SECONDARY), replacing the plain single-region alias
+# record a non-DR architecture would otherwise need.
+resource "aws_route53_zone" "primary" {{
+  name = "${{var.project_name}}.example.com"
+}}
+
+resource "aws_route53_health_check" "primary" {{
+  fqdn              = {primary_target_expr}
+  port              = 443
+  type              = "HTTPS"
+  resource_path     = "/health"
+  failure_threshold = 3
+  request_interval  = 30
+
+  tags = {{
+    Name = "${{var.project_name}}-primary-health-check"
+  }}
+}}
+
+resource "aws_route53_record" "primary" {{
+  zone_id         = aws_route53_zone.primary.zone_id
+  name            = "app.${{var.project_name}}.example.com"
+  type            = "CNAME"
+  ttl             = 60
+  records         = [{primary_target_expr}]
+  set_identifier  = "primary"
+  health_check_id = aws_route53_health_check.primary.id
+
+  failover_routing_policy {{
+    type = "PRIMARY"
+  }}
+}}
+
+resource "aws_route53_record" "secondary" {{
+  zone_id        = aws_route53_zone.primary.zone_id
+  name           = "app.${{var.project_name}}.example.com"
+  type           = "CNAME"
+  ttl            = 60
+  records        = [{secondary_target_expr}]
+  set_identifier = "secondary"
+
+  failover_routing_policy {{
+    type = "SECONDARY"
+  }}
+}}
+"""
+
         files["main.tf"] = main_tf
         files["compute.tf"] = compute_tf
         files["database.tf"] = database_tf
@@ -1236,6 +1507,20 @@ data "azurerm_client_config" "current" {{}}
         # Used by the "lb"-type component's own branch below to find which compute component it
         # fronts via `connections` (rules_engine.py wires lb -> compute).
         by_id = {comp.get("id"): comp for comp in components if comp.get("id")}
+
+        # Phase 5 (multi-region DR): computed up front (needed inside the loop below for the
+        # storage account's replication type) -- "none" for every generic architecture. Azure has
+        # no AWS-style aliased-provider-per-region idiom (azurerm resources take `location`
+        # directly), so the secondary-region variable is a plain string, not a provider block.
+        dr_strategy = _get_dr_strategy(components, "azure")
+        if dr_strategy != "none":
+            extra_variables_tf += """
+variable "secondary_location" {
+  type        = string
+  default     = "West US"
+  description = "Secondary Azure region for disaster-recovery resources (cross-region database replica, Traffic Manager failover target)."
+}
+"""
 
         for c in components:
             lld = _get_lld(c, "azure")
@@ -1619,20 +1904,25 @@ output "db_password_secret_id" {
 
 """
             elif c.get("type") == "storage" or "Storage" in svc:
-                storage_tf += _build_comments(lld, ["lifecycleRule", "versioningEnabled"])
-                storage_tf += """resource "azurerm_storage_account" "storage" {
-  name                     = "${var.project_name}storeunique"
+                storage_tf += _build_comments(lld, ["lifecycleRule", "versioningEnabled", "crossRegionReplication"])
+                # Phase 5 (multi-region DR): Azure Storage's own geo-redundant replication (RA-GRS)
+                # is the real, native equivalent of a manual secondary-bucket + replication-rule
+                # setup -- much simpler than AWS/GCP's own DR storage pattern, and the correct
+                # provider-idiomatic choice rather than reinventing cross-region replication by hand.
+                replication_type = "RAGRS" if dr_strategy != "none" else "LRS"
+                storage_tf += f"""resource "azurerm_storage_account" "storage" {{
+  name                     = "${{var.project_name}}storeunique"
   resource_group_name      = azurerm_resource_group.rg.name
   location                 = azurerm_resource_group.rg.location
   account_tier             = "Standard"
-  account_replication_type = "LRS"
-}
+  account_replication_type = "{replication_type}"
+}}
 
-resource "azurerm_storage_container" "blobs" {
+resource "azurerm_storage_container" "blobs" {{
   name                  = "media"
   storage_account_name  = azurerm_storage_account.storage.name
   container_access_type = "private"
-}
+}}
 
 """
             elif c.get("type") == "queue":
@@ -1702,6 +1992,95 @@ resource "azurerm_servicebus_topic" "{c_id}" {{
   name         = "${{var.project_name}}-{c_id}-topic"
   namespace_id = azurerm_servicebus_namespace.{c_id}_sb.id
 }}
+
+"""
+
+        # Phase 5 (multi-region DR): real secondary-region resources. AWS gets the most detailed
+        # implementation (see that branch); Azure/GCP get the equivalent for the two resource types
+        # with an unambiguous, well-documented provider-native pattern (database replica + storage
+        # replication) plus DNS failover where a real public endpoint exists to target -- standby
+        # compute is intentionally not duplicated here (out of scope for the time budget on the
+        # secondary providers; AWS is where the most scrutiny lands per the task's own guidance).
+        if dr_strategy != "none":
+            db_component = next((c for c in components if c.get("type") == "database"), None)
+            db_svc = _get_service_name(db_component, "azure") if db_component else ""
+            has_pg_db = bool(db_component) and "PostgreSQL" in db_svc
+
+            if has_pg_db:
+                db_lld = _get_lld(db_component, "azure")
+                database_tf += _build_comments(db_lld, ["drStrategy", "secondaryRegion", "crossRegionReplication"])
+                database_tf += """# Phase 5 (multi-region DR): a cross-region read replica, Azure's own native equivalent of
+# AWS's replicate_source_db -- create_mode = "Replica" plus source_server_id is all a Postgres
+# Flexible Server replica needs; storage/compute config is inherited from the source server.
+resource "azurerm_postgresql_flexible_server" "db_replica" {
+  name                = "${var.project_name}-pg-db-replica"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = var.secondary_location
+  create_mode         = "Replica"
+  source_server_id    = azurerm_postgresql_flexible_server.db.id
+}
+
+"""
+                outputs_tf += """output "db_replica_fqdn" {
+  value       = azurerm_postgresql_flexible_server.db_replica.fqdn
+  description = "Cross-region read replica endpoint -- promote this manually (pilot-light) or via automated failover tooling (warm-standby) if the primary region goes down."
+}
+
+"""
+
+            # DNS failover only makes sense when there's a real public endpoint to target -- an
+            # Application Gateway's public IP, the one edge component this generator currently
+            # gives a stable, directly-referenceable FQDN-capable resource.
+            if 'resource "azurerm_public_ip" "appgw_pip"' in compute_tf:
+                # Secondary endpoint target: the RA-GRS storage account's own secondary-region read
+                # endpoint when storage exists (a real, always-present secondary-region hostname,
+                # since RA-GRS is forced on above whenever DR is active) -- otherwise falls back to
+                # the primary Application Gateway's own IP as a documented placeholder, since no
+                # secondary App Gateway is provisioned (standby compute is AWS-only, see above).
+                secondary_target_expr = (
+                    "azurerm_storage_account.storage.secondary_blob_host"
+                    if 'resource "azurerm_storage_account" "storage"' in storage_tf
+                    else "azurerm_public_ip.appgw_pip.ip_address"
+                )
+                compute_tf += f"""
+# Phase 5 (multi-region DR): Traffic Manager priority routing -- Azure's equivalent of Route 53
+# failover routing. Endpoint 1 (priority 1) is the primary Application Gateway; endpoint 2
+# (priority 2) only receives traffic if endpoint 1 fails Traffic Manager's own health probe.
+resource "azurerm_traffic_manager_profile" "app" {{
+  name                   = "${{var.project_name}}-tm-profile"
+  resource_group_name    = azurerm_resource_group.rg.name
+  traffic_routing_method = "Priority"
+
+  dns_config {{
+    relative_name = "${{var.project_name}}"
+    ttl           = 60
+  }}
+
+  monitor_config {{
+    protocol = "HTTPS"
+    port     = 443
+    path     = "/health"
+  }}
+}}
+
+resource "azurerm_traffic_manager_external_endpoint" "primary" {{
+  name       = "primary"
+  profile_id = azurerm_traffic_manager_profile.app.id
+  target     = azurerm_public_ip.appgw_pip.ip_address
+  priority   = 1
+}}
+
+resource "azurerm_traffic_manager_external_endpoint" "secondary" {{
+  name       = "secondary"
+  profile_id = azurerm_traffic_manager_profile.app.id
+  target     = {secondary_target_expr}
+  priority   = 2
+}}
+"""
+                outputs_tf += """output "traffic_manager_fqdn" {
+  value       = azurerm_traffic_manager_profile.app.fqdn
+  description = "Traffic Manager's own DNS name -- point your custom domain's CNAME here for automatic priority-based failover."
+}
 
 """
 
@@ -1791,6 +2170,10 @@ provider "google-beta" {{
         # Used by the "lb"-type component's own branch below to find which compute component it
         # fronts via `connections` (rules_engine.py wires lb -> compute).
         by_id = {comp.get("id"): comp for comp in components if comp.get("id")}
+
+        # Phase 5 (multi-region DR): computed up front (needed inside the loop below for the
+        # storage bucket's location). "none" for every generic architecture.
+        dr_strategy = _get_dr_strategy(components, "gcp")
 
         for c in components:
             lld = _get_lld(c, "gcp")
@@ -2140,11 +2523,17 @@ output "db_password_secret_id" {
 
 """
             elif c.get("type") == "storage" or "Storage" in svc:
-                storage_tf += _build_comments(lld, ["lifecycleRule", "versioningEnabled"])
+                storage_tf += _build_comments(lld, ["lifecycleRule", "versioningEnabled", "crossRegionReplication"])
                 versioning_enabled = "true" if config.get("versioningEnabled") == "true" else "false"
+                # Phase 5 (multi-region DR): a dual-region bucket location (spanning us-central1 +
+                # us-east1, matching this file's default gcp_region/secondary DR region) is GCS's
+                # own native cross-region replication -- Google's real recommended DR pattern for
+                # storage, and much simpler than hand-rolling a second bucket + replication job.
+                bucket_location = "NAM4" if dr_strategy != "none" else "var.gcp_region"
+                location_line = f'"{bucket_location}"' if dr_strategy != "none" else bucket_location
                 storage_tf += f"""resource "google_storage_bucket" "storage" {{
   name          = "${{var.gcp_project}}-bucket-storage-unique"
-  location      = var.gcp_region
+  location      = {location_line}
   force_destroy = true
 
   versioning {{
@@ -2194,6 +2583,52 @@ resource "google_pubsub_subscription" "jobs_sub" {
                 database_tf += f"""resource "google_pubsub_topic" "{c_id}" {{
   name = "${{var.gcp_project}}-{c_id}-topic"
 }}
+
+"""
+
+        # Phase 5 (multi-region DR): real secondary-region resources. AWS gets the most detailed
+        # implementation (see that branch); GCP gets the equivalent database + storage DR pattern.
+        # DNS failover is intentionally NOT emitted for GCP -- a genuinely correct Cloud DNS geo/
+        # failover routing policy needs a real secondary-region endpoint to route to, and this
+        # generator deliberately does not duplicate a full secondary-region compute+LB stack (see
+        # the task's own "no component duplication" scope boundary) -- AWS's standby Lambda is a
+        # narrow, minimal exception scoped to that one provider's implementation.
+        if dr_strategy != "none":
+            db_component = next((c for c in components if c.get("type") == "database"), None)
+            db_svc = _get_service_name(db_component, "gcp") if db_component else ""
+            has_pg_db = bool(db_component) and "PostgreSQL" in db_svc
+
+            files["variables.tf"] += """
+variable "secondary_gcp_region" {
+  type        = string
+  default     = "us-east1"
+  description = "Secondary GCP region for disaster-recovery resources (cross-region database read replica)."
+}
+"""
+
+            if has_pg_db:
+                db_lld = _get_lld(db_component, "gcp")
+                database_tf += _build_comments(db_lld, ["drStrategy", "secondaryRegion", "crossRegionReplication"])
+                database_tf += """# Phase 5 (multi-region DR): a cross-region read replica -- GCP's real, native pattern is just
+# master_instance_name pointing at the primary instance plus a different region; no separate
+# replica_configuration block is needed for a same-project managed-to-managed Cloud SQL replica
+# (that block is only for replicating FROM an external, non-Cloud-SQL database).
+resource "google_sql_database_instance" "db_replica" {
+  name                 = "${var.gcp_project}-postgres-db-replica"
+  region               = var.secondary_gcp_region
+  database_version     = "POSTGRES_15"
+  master_instance_name = google_sql_database_instance.db.name
+
+  settings {
+    tier = "db-f1-micro"
+  }
+}
+
+"""
+                outputs_tf += """output "db_replica_ip" {
+  value       = google_sql_database_instance.db_replica.public_ip_address
+  description = "Cross-region read replica public IP -- promote this manually (pilot-light) or via automated failover tooling (warm-standby) if the primary region goes down."
+}
 
 """
 

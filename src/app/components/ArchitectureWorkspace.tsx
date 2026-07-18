@@ -18,6 +18,7 @@ import {
   type JourneyVerification,
 } from "@/lib/journey-verification";
 import { computeHealthScore, type HealthScore } from "@/lib/health-score";
+import { getDrBadge } from "@/lib/dr-strategy";
 import { getRedundancyBadge, isRedundantConfig } from "@/lib/redundancy";
 import { useStagedLoadingMessage } from "@/app/hooks/useStagedLoadingMessage";
 import { useGrowthTrigger } from "@/app/contexts/GrowthTriggerContext";
@@ -4410,6 +4411,13 @@ export default function ArchitectureWorkspace({
                               const isRedundant = isRedundantConfig(mapping?.lld?.config);
                               const redundancyBadge = isRedundant ? getRedundancyBadge(mapping?.lld?.config) : null;
 
+                              // Disaster-recovery indicator (Phase 5 diagram enhancement) --
+                              // purely visual, same "derive from the LLD config already fetched
+                              // above" pattern as the redundancy badge. Only ever non-null on the
+                              // "dns" component, since that's the single source of truth
+                              // lld_rules.py's Phase 5 DR enrichment writes to (see dr-strategy.ts).
+                              const drBadge = node.type === "dns" ? getDrBadge(mapping?.lld?.config) : null;
+
                               return (
                                 <g key={node.id}>
                                   {isRedundant && (
@@ -4499,6 +4507,14 @@ export default function ArchitectureWorkspace({
                                         className="absolute -bottom-1.5 -right-1.5 flex h-4 flex-none items-center justify-center rounded-full bg-success px-1.5 text-[8px] font-black text-white ring-2 ring-panel"
                                       >
                                         {redundancyBadge}
+                                      </span>
+                                    )}
+                                    {drBadge && (
+                                      <span
+                                        title={`Multi-region disaster recovery is active (${drBadge}) -- see this component's LLD detail for the exact config driving it.`}
+                                        className="absolute -bottom-1.5 -left-1.5 flex h-4 flex-none items-center justify-center rounded-full bg-accent px-1.5 text-[8px] font-black text-white ring-2 ring-panel"
+                                      >
+                                        {drBadge}
                                       </span>
                                     )}
 

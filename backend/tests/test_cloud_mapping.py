@@ -391,3 +391,76 @@ class TestWafCostNoteOnLbAndCdn:
         req = make_requirements(expectedScale="high scale, 1 million users", budget="$50,000/month", teamMaturity="a large senior team")
         mapping = get_cloud_mapping("gcp", "lb", "lb", req)
         assert "WAF" in mapping["costEstimate"]["assumptions"]
+
+
+class TestDrCostFolding:
+    """Phase 5: get_cloud_mapping's optional dr_strategy parameter folds an incremental DR cost
+    onto database/storage/compute costEstimate ranges -- "none" (the default, matching every
+    pre-Phase-5 call site) leaves cost byte-for-byte unaffected."""
+
+    def test_dr_strategy_none_is_default_and_unaffects_cost(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        with_default = get_cloud_mapping("aws", "database", "database", req)
+        with_explicit_none = get_cloud_mapping("aws", "database", "database", req, "none")
+        assert with_default == with_explicit_none
+
+    def test_pilot_light_database_cost_increases(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        baseline = get_cloud_mapping("aws", "database", "database", req)
+        pilot = get_cloud_mapping("aws", "database", "database", req, "pilot-light")
+        assert pilot["costEstimate"]["min"] > baseline["costEstimate"]["min"]
+        assert pilot["costEstimate"]["max"] > baseline["costEstimate"]["max"]
+
+    def test_warm_standby_database_cost_increases_more_than_pilot_light(self):
+        """On a high-cost relational database (Aurora, baseline max=300 at high scale), the
+        warm-standby tier's proportional 30-50%-of-primary bump outweighs pilot-light's flat
+        $15-60 bump -- this only holds for a high-enough baseline cost, which is why this test
+        deliberately forces the relational (not DynamoDB) branch via dataNature, unlike the
+        cheaper default fixture used elsewhere in this class."""
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements(expectedScale="high scale, 1 million users", dataNature="relational transactional records")
+        pilot = get_cloud_mapping("aws", "database", "database", req, "pilot-light")
+        warm = get_cloud_mapping("aws", "database", "database", req, "warm-standby")
+        assert warm["costEstimate"]["max"] > pilot["costEstimate"]["max"]
+
+    def test_storage_cost_increases_for_both_tiers(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        baseline = get_cloud_mapping("aws", "storage", "storage", req)
+        pilot = get_cloud_mapping("aws", "storage", "storage", req, "pilot-light")
+        warm = get_cloud_mapping("aws", "storage", "storage", req, "warm-standby")
+        assert pilot["costEstimate"]["min"] > baseline["costEstimate"]["min"]
+        assert warm["costEstimate"]["min"] > baseline["costEstimate"]["min"]
+
+    def test_compute_cost_only_increases_for_warm_standby_not_pilot_light(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        baseline = get_cloud_mapping("aws", "compute", "compute", req)
+        pilot = get_cloud_mapping("aws", "compute", "compute", req, "pilot-light")
+        warm = get_cloud_mapping("aws", "compute", "compute", req, "warm-standby")
+        assert pilot == baseline
+        assert warm["costEstimate"]["min"] > baseline["costEstimate"]["min"]
+
+    def test_dr_cost_note_appended_to_assumptions(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("aws", "database", "database", req, "warm-standby")
+        assert "disaster" in mapping["costEstimate"]["assumptions"].lower() or "dr" in mapping["costEstimate"]["assumptions"].lower()
+
+    def test_kubernetes_and_private_ignore_dr_strategy(self):
+        """dr_strategy cost folding is scoped to aws/azure/gcp only -- passing it through for
+        kubernetes/private is harmless since those branches never read the parameter."""
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        baseline = get_cloud_mapping("kubernetes", "database", "database", req)
+        with_dr = get_cloud_mapping("kubernetes", "database", "database", req, "warm-standby")
+        assert baseline == with_dr

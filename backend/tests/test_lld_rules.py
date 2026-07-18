@@ -222,6 +222,119 @@ class TestComplianceMandatedConfigAdditions:
         assert "networkSegmentation" not in result["config"]
 
 
+class TestDrStrategyLldConfig:
+    """Phase 5: dns/database/storage/compute LLD enrichment when a DR tier is active, computed
+    internally via nfr_signals.determine_dr_strategy from the same requirements/industry_context
+    already passed to run_lld_rules_engine -- no dr_strategy parameter of its own."""
+
+    def _pilot_light_req(self):
+        # is_high_scale alone -> pilot-light (see TestDetermineDrStrategy in test_nfr_signals.py).
+        return make_requirements(expectedScale="high scale, 1 million users", budget="$50,000/month", teamMaturity="a large senior team")
+
+    def _warm_standby_req(self):
+        # is_high_scale AND is_high_security -> warm-standby.
+        return make_requirements(
+            expectedScale="high scale, 1 million users", compliance="HIPAA required", budget="$50,000/month", teamMaturity="a large senior team"
+        )
+
+    def test_generic_project_gets_no_dr_keys_on_dns(self):
+        req = make_requirements()
+        result = run_lld_rules_engine("aws", "dns", "dns", req)
+        assert "secondaryRegion" not in result["config"]
+        assert "failoverThreshold" not in result["config"]
+        assert result["config"]["routingPolicy"] == "Simple"
+
+    def test_pilot_light_dns_gets_active_passive_failover(self):
+        req = self._pilot_light_req()
+        result = run_lld_rules_engine("aws", "dns", "dns", req)
+        assert result["config"]["routingPolicy"] == "Failover (Active-Passive)"
+        assert result["config"]["secondaryRegion"] == "us-west-2"
+        assert result["config"]["failoverThreshold"]
+        assert result["reasoning"]["secondaryRegion"]
+
+    def test_warm_standby_dns_gets_latency_based_routing(self):
+        req = self._warm_standby_req()
+        result = run_lld_rules_engine("aws", "dns", "dns", req)
+        assert "Latency-based routing" in result["config"]["routingPolicy"]
+        assert result["config"]["secondaryRegion"] == "us-west-2"
+
+    def test_dns_secondary_region_is_provider_specific(self):
+        req = self._pilot_light_req()
+        assert run_lld_rules_engine("azure", "dns", "dns", req)["config"]["secondaryRegion"] == "West US"
+        assert run_lld_rules_engine("gcp", "dns", "dns", req)["config"]["secondaryRegion"] == "us-east1"
+
+    def test_generic_project_database_gets_no_dr_keys(self):
+        req = make_requirements()
+        result = run_lld_rules_engine("aws", "database", "database", req)
+        assert "drStrategy" not in result["config"]
+        assert "crossRegionReplication" not in result["config"]
+
+    def test_pilot_light_database_gets_manual_promotion_replica(self):
+        req = self._pilot_light_req()
+        result = run_lld_rules_engine("aws", "database", "database", req)
+        assert result["config"]["drStrategy"] == "pilot-light"
+        assert result["config"]["secondaryRegion"] == "us-west-2"
+        assert "promoted manually" in result["config"]["crossRegionReplication"]
+
+    def test_warm_standby_database_gets_automatic_failover_replication(self):
+        req = self._warm_standby_req()
+        result = run_lld_rules_engine("aws", "database", "database", req)
+        assert result["config"]["drStrategy"] == "warm-standby"
+        assert "Aurora Global Database" in result["config"]["crossRegionReplication"]
+        assert "automatic failover" in result["config"]["crossRegionReplication"]
+
+    def test_warm_standby_database_cross_region_replication_is_provider_specific(self):
+        req = self._warm_standby_req()
+        azure_result = run_lld_rules_engine("azure", "database", "database", req)
+        gcp_result = run_lld_rules_engine("gcp", "database", "database", req)
+        assert "Cosmos DB" in azure_result["config"]["crossRegionReplication"] or "SQL" in azure_result["config"]["crossRegionReplication"]
+        assert "Cloud SQL" in gcp_result["config"]["crossRegionReplication"]
+
+    def test_generic_project_storage_gets_no_cross_region_replication_key(self):
+        req = make_requirements()
+        result = run_lld_rules_engine("aws", "storage", "storage", req)
+        assert "crossRegionReplication" not in result["config"]
+
+    def test_pilot_light_storage_gets_cross_region_replication_and_forces_versioning(self):
+        req = self._pilot_light_req()
+        result = run_lld_rules_engine("aws", "storage", "storage", req)
+        assert result["config"]["crossRegionReplication"]
+        assert result["config"]["versioningEnabled"] == "true"
+
+    def test_warm_standby_storage_also_gets_cross_region_replication(self):
+        """Storage enrichment is identical for both tiers -- cheap and always-on once any DR tier
+        is active, per lld_rules.py's own design (see the crossRegionReplication comment)."""
+        pilot_result = run_lld_rules_engine("aws", "storage", "storage", self._pilot_light_req())
+        warm_result = run_lld_rules_engine("aws", "storage", "storage", self._warm_standby_req())
+        assert pilot_result["config"]["crossRegionReplication"] == warm_result["config"]["crossRegionReplication"]
+
+    def test_generic_project_compute_gets_no_standby_capacity(self):
+        req = make_requirements()
+        result = run_lld_rules_engine("aws", "compute", "compute", req)
+        assert "standbyCapacity" not in result["config"]
+
+    def test_pilot_light_compute_gets_no_standby_capacity(self):
+        """Pilot-light's whole point is minimal/no standing secondary compute."""
+        req = self._pilot_light_req()
+        result = run_lld_rules_engine("aws", "compute", "compute", req)
+        assert "standbyCapacity" not in result["config"]
+
+    def test_warm_standby_compute_gets_standby_capacity(self):
+        req = self._warm_standby_req()
+        result = run_lld_rules_engine("aws", "compute", "compute", req)
+        assert result["config"]["standbyCapacity"]
+        assert result["reasoning"]["standbyCapacity"]
+
+    def test_kubernetes_and_private_are_unaffected_by_dr_strategy(self):
+        """DR enrichment is scoped to the aws/azure/gcp branch only -- kubernetes/private LLD
+        shapes are untouched even when the same NFR would trigger warm-standby on aws/azure/gcp."""
+        req = self._warm_standby_req()
+        k8s_result = run_lld_rules_engine("kubernetes", "database", "database", req)
+        private_result = run_lld_rules_engine("private", "database", "database", req)
+        assert "drStrategy" not in k8s_result["config"]
+        assert "drStrategy" not in private_result["config"]
+
+
 class TestWafLldConfig:
     """WAF is LLD-only (no new component type) -- config keys land on the EXISTING "lb"/"cdn"
     branches for aws/azure/gcp, triggered by is_high_scale OR is_high_security OR a

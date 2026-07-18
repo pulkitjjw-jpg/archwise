@@ -190,6 +190,55 @@ class TestMissingWafOnPublicEdge:
         assert "Public-facing edge has no WAF despite handling sensitive data" not in _titles(findings)
 
 
+class TestMissingDrStrategy:
+    """Phase 5: gated on dr_strategy (an optional parameter, default "none" -- matches every
+    pre-Phase-5 call site in this file byte-for-byte) being anything other than "none". That
+    already encodes "industry is fintech/healthtech OR is_high_scale OR is_high_security" via
+    nfr_signals.determine_dr_strategy's own decision logic, so this check just verifies the
+    database/dns components actually carry the corresponding LLD config."""
+
+    def test_does_not_fire_when_dr_strategy_is_none_default(self):
+        components = [component("db", "database", lld_config={"encryptionType": "x", "multiAZ": "true", "backupRetention": "7 Days"})]
+        findings = run_security_rules(components, [], NONE_INDUSTRY, PROVIDER)
+        assert "No disaster-recovery strategy for a system that can't afford extended downtime" not in _titles(findings)
+
+    def test_fires_for_database_missing_dr_strategy_when_dr_active(self):
+        components = [component("db", "database", lld_config={"encryptionType": "x", "multiAZ": "true", "backupRetention": "7 Days"})]
+        findings = run_security_rules(components, [], NONE_INDUSTRY, PROVIDER, "pilot-light")
+        assert "No disaster-recovery strategy for a system that can't afford extended downtime" in _titles(findings)
+
+    def test_does_not_fire_when_database_drstrategy_configured(self):
+        components = [
+            component(
+                "db",
+                "database",
+                lld_config={"encryptionType": "x", "multiAZ": "true", "backupRetention": "7 Days", "drStrategy": "pilot-light"},
+            )
+        ]
+        findings = run_security_rules(components, [], NONE_INDUSTRY, PROVIDER, "pilot-light")
+        assert "No disaster-recovery strategy for a system that can't afford extended downtime" not in _titles(findings)
+
+    def test_fires_for_dns_still_using_simple_routing_when_dr_active(self):
+        components = [component("dns", "dns", lld_config={"routingPolicy": "Simple"})]
+        findings = run_security_rules(components, [], NONE_INDUSTRY, PROVIDER, "warm-standby")
+        assert "No disaster-recovery strategy for a system that can't afford extended downtime" in _titles(findings)
+
+    def test_does_not_fire_when_dns_has_failover_routing_configured(self):
+        components = [component("dns", "dns", lld_config={"routingPolicy": "Failover (Active-Passive)"})]
+        findings = run_security_rules(components, [], NONE_INDUSTRY, PROVIDER, "pilot-light")
+        assert "No disaster-recovery strategy for a system that can't afford extended downtime" not in _titles(findings)
+
+    def test_fires_independently_for_database_and_dns_both_missing_config(self):
+        components = [
+            component("db", "database", lld_config={"encryptionType": "x", "multiAZ": "true", "backupRetention": "7 Days"}),
+            component("dns", "dns", lld_config={"routingPolicy": "Simple"}),
+        ]
+        findings = run_security_rules(components, [], NONE_INDUSTRY, PROVIDER, "warm-standby")
+        dr_findings = [f for f in findings if f["title"] == "No disaster-recovery strategy for a system that can't afford extended downtime"]
+        assert len(dr_findings) == 2
+        assert {f["componentId"] for f in dr_findings} == {"db", "dns"}
+
+
 class TestCleanArchitectureProducesZeroFindings:
     def test_well_configured_none_industry_architecture_has_no_findings(self):
         components = [

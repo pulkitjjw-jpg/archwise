@@ -40,19 +40,67 @@ def _waf_cost_note(is_high_scale: bool, is_high_security: bool) -> str:
     )
 
 
-def get_cloud_mapping(provider: str, component_type: str, component_id: str, requirements: dict) -> dict:
+def _apply_dr_cost_increment(mapping: dict, component_type: str, component_id: str, dr_strategy: str) -> dict:
+    """Folds the incremental DR cost onto a component's already-computed costEstimate, once any DR
+    tier (pilot-light/warm-standby) is active. Applied as a single post-processing step over
+    whatever _aws_mapping/_azure_mapping/_gcp_mapping already returned, rather than threading
+    dr_strategy through every one of their individual branches -- the exact same "recompute/apply
+    locally rather than invasively thread a new parameter everywhere" precedent Phase 3 used for
+    is_high_security in the "lb"/"cdn" WAF cost-note branches.
+
+    Storage gets a small bump on both tiers -- cross-region object replication is cheap, and per
+    lld_rules.py it's enabled for both tiers once DR is active at all. Database gets a bump on both
+    tiers -- a standing cross-region replica costs real money even at the pilot-light tier, just
+    less than warm-standby's fully-replicated instance. Compute only gets a bump for warm-standby
+    (roughly 30-50% of its own primary cost, per the task's own cost guidance), since pilot-light's
+    whole point is no standing secondary compute -- matches the standbyCapacity LLD key lld_rules.py
+    only sets for warm-standby."""
+    cost = mapping.get("costEstimate") or {}
+    if component_type == "storage":
+        bump_min, bump_max = (1, 10) if dr_strategy == "pilot-light" else (5, 30)
+        note = " Includes a modest incremental cost for cross-region replication once disaster-recovery is active."
+    elif component_type == "database":
+        if dr_strategy == "pilot-light":
+            bump_min, bump_max = 15, 60
+            note = " Includes a cross-region read replica for pilot-light disaster recovery."
+        else:
+            bump_min = round(cost.get("min", 0) * 0.3)
+            bump_max = round(cost.get("max", 0) * 0.5)
+            note = " Includes a standing secondary-region replica (~30-50% of primary cost) for warm-standby disaster recovery."
+    elif component_type == "compute" and dr_strategy == "warm-standby":
+        bump_min = round(cost.get("min", 0) * 0.3)
+        bump_max = round(cost.get("max", 0) * 0.5)
+        note = " Includes a scaled-down standby fleet in the secondary region (~30-50% of primary cost) for warm-standby disaster recovery."
+    else:
+        return mapping
+
+    mapping["costEstimate"] = {
+        "min": cost.get("min", 0) + bump_min,
+        "max": cost.get("max", 0) + bump_max,
+        "assumptions": (cost.get("assumptions") or "") + note,
+    }
+    return mapping
+
+
+def get_cloud_mapping(
+    provider: str, component_type: str, component_id: str, requirements: dict, dr_strategy: str = "none"
+) -> dict:
     nfr = requirements["nonFunctional"]
     team_lower = nfr["teamMaturity"].lower()
 
     is_high_scale = _is_high_scale(nfr["expectedScale"])
     is_low_budget = _is_budget_tight(nfr["budget"])
 
-    if provider == "aws":
-        return _aws_mapping(component_type, component_id, requirements, is_high_scale, is_low_budget, team_lower)
-    if provider == "azure":
-        return _azure_mapping(component_type, component_id, requirements, is_high_scale, is_low_budget, team_lower)
-    if provider == "gcp":
-        return _gcp_mapping(component_type, component_id, requirements, is_high_scale, is_low_budget, team_lower)
+    if provider in ("aws", "azure", "gcp"):
+        if provider == "aws":
+            mapping = _aws_mapping(component_type, component_id, requirements, is_high_scale, is_low_budget, team_lower)
+        elif provider == "azure":
+            mapping = _azure_mapping(component_type, component_id, requirements, is_high_scale, is_low_budget, team_lower)
+        else:
+            mapping = _gcp_mapping(component_type, component_id, requirements, is_high_scale, is_low_budget, team_lower)
+        if dr_strategy != "none":
+            mapping = _apply_dr_cost_increment(mapping, component_type, component_id, dr_strategy)
+        return mapping
     if provider == "kubernetes":
         # Cloud-agnostic -- costs here are infrastructure share (pod resource requests, PVs) on
         # top of cluster capacity you provision separately (EKS/GKE/AKS/self-hosted), not
