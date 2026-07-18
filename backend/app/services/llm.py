@@ -1118,6 +1118,8 @@ KNOWN_COMPONENT_TYPES = (
     "realtime",
     "lb",
     "dns",
+    "monitoring",
+    "notification",
     "tokenization",
     "audit-log",
     "phi-vault",

@@ -12,6 +12,8 @@ const TYPE_DESCRIPTIONS: Record<string, string> = {
   auth: "Handles user sign-in, passwords, and who's allowed to access what.",
   lb: "The system's front door — spreads incoming traffic across your running instances and stops sending traffic to any that go unhealthy.",
   dns: "Points your custom domain (like yourapp.com) at the right place, and is the mechanism a future multi-region setup would route through.",
+  monitoring: "Watches your running system's logs, metrics, and traces so problems get caught before users report them.",
+  notification: "Sends emails, texts, or push alerts out to your users or other systems, separate from the app's own background task queue.",
   tokenization: "Swaps sensitive data (like card numbers) for safe placeholder tokens, so the real data never touches the rest of your systems directly.",
   "audit-log": "Keeps a tamper-proof record of who did what and when — required for compliance reviews.",
   "phi-vault": "A specially secured, separate store for protected health information, locked down beyond your normal data.",
@@ -85,6 +87,16 @@ const LEARN_CONTENT: Record<string, LearnContent> = {
     analogy: "A phone book that turns a business's name into its actual street address.",
     deeper:
       "People type a memorable name (yourapp.com) instead of a numeric address, and the phone book (DNS) looks up where to actually send them. If a business ever opens a second location, the phone book is also exactly where you'd update the listing to send people to the right one.",
+  },
+  monitoring: {
+    analogy: "A car's dashboard — speedometer, fuel gauge, and warning lights, all in one place.",
+    deeper:
+      "You don't watch it every second, but the moment something's wrong (overheating, low fuel) it tells you before you're stranded on the highway. In software terms: logs, metrics, and traces mean a failing dependency or a creeping slowdown gets caught by an alert, not by a user's angry email.",
+  },
+  notification: {
+    analogy: "A town crier who announces news to everyone who's signed up to hear it, versus a private courier delivering one specific package.",
+    deeper:
+      "This is different from a task queue (which quietly processes work behind the scenes) — a notification is meant to actually reach a person, over email, text, or a push alert, and it needs to handle the real world's messiness: a bounced email, a bad phone number, a retry, or a fallback plan when delivery fails.",
   },
   tokenization: {
     analogy: "Casino chips — you exchange real cash for chips at the door, and the casino floor never touches your cash directly.",

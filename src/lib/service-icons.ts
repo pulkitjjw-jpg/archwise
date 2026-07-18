@@ -37,6 +37,9 @@ const SERVICE_ICON_RULES: IconMatch[] = [
   { keywords: ["comprehend"], icon: "mdi:text-search" },
   { keywords: ["qldb"], icon: "mdi:book-lock-outline" },
   { keywords: ["glue"], icon: "mdi:broom" },
+  { keywords: ["cloudwatch"], icon: "mdi:monitor-dashboard" },
+  { keywords: ["sns", "pinpoint"], icon: "mdi:bell-ring-outline" },
+  { keywords: ["waf", "web application firewall", "cloud armor"], icon: "mdi:shield-check-outline" },
 
   // --- Azure --- (package only ships the generic Azure mark, no per-service icons)
   { keywords: ["cosmos db"], icon: "logos:microsoft-azure" },
@@ -63,6 +66,8 @@ const SERVICE_ICON_RULES: IconMatch[] = [
   { keywords: ["presidio", "de-identif", "masking", "anonymiz"], icon: "mdi:eye-off-outline" },
   { keywords: ["siem", "wazuh", "audit"], icon: "mdi:clipboard-text-clock-outline" },
   { keywords: ["minio", "object storage", "san/nas", "nas gateway"], icon: "mdi:nas" },
+  { keywords: ["prometheus", "grafana", "elk", "operations suite", "log analytics"], icon: "mdi:monitor-dashboard" },
+  { keywords: ["message bus"], icon: "mdi:bell-ring-outline" },
   { keywords: ["helm", "statefulset", "deployment", "cronjob", "keda", "horizontalpodautoscaler", "hpa", "knative", "ingress-nginx", "cert-manager"], icon: "mdi:kubernetes" },
   { keywords: ["vmware", "vsphere"], icon: "logos:vmware" },
   { keywords: ["openstack", "nova"], icon: "logos:openstack-icon" },
@@ -83,6 +88,8 @@ const TYPE_FALLBACK_ICON: Record<string, string> = {
   auth: "mdi:account-key-outline",
   lb: "mdi:scale-balance",
   dns: "mdi:dns-outline",
+  monitoring: "mdi:monitor-dashboard",
+  notification: "mdi:bell-ring-outline",
   tokenization: "mdi:key-chain-variant",
   "audit-log": "mdi:clipboard-text-clock-outline",
   "phi-vault": "mdi:hospital-box-outline",

@@ -13,8 +13,9 @@ def make_requirements(
     teamMaturity: str = "senior engineers",
     compliance: str = "none",
     dataNature: str = "structured business records",
+    functional: list[str] | None = None,
 ) -> dict:
-    return {
+    reqs: dict = {
         "nonFunctional": {
             "expectedScale": expectedScale,
             "readWritePattern": "balanced",
@@ -25,6 +26,9 @@ def make_requirements(
             "compliance": compliance,
         },
     }
+    if functional is not None:
+        reqs["functional"] = functional
+    return reqs
 
 
 FINTECH_CONTEXT = {"industry": "fintech", "flags": {}}
@@ -216,3 +220,123 @@ class TestComplianceMandatedConfigAdditions:
         req = make_requirements()
         result = run_lld_rules_engine("private", "database", "database", req, industry_context=NONE_CONTEXT)
         assert "networkSegmentation" not in result["config"]
+
+
+class TestWafLldConfig:
+    """WAF is LLD-only (no new component type) -- config keys land on the EXISTING "lb"/"cdn"
+    branches for aws/azure/gcp, triggered by is_high_scale OR is_high_security OR a
+    fintech/healthtech industry_context."""
+
+    def test_high_scale_enables_waf_on_lb(self):
+        req = make_requirements(expectedScale="high scale, 1 million users", budget="$50,000/month", teamMaturity="a large senior team")
+        result = run_lld_rules_engine("aws", "lb", "lb", req)
+        assert result["config"]["wafEnabled"] == "true"
+        assert "wafRuleSet" in result["config"]
+        assert result["config"]["rateLimitPerIP"]
+
+    def test_high_security_compliance_enables_waf_on_lb(self):
+        req = make_requirements(compliance="PCI-DSS required", budget="$50,000/month", teamMaturity="a large senior team")
+        result = run_lld_rules_engine("aws", "lb", "lb", req)
+        assert result["config"]["wafEnabled"] == "true"
+
+    def test_fintech_industry_context_enables_waf_even_at_low_scale(self):
+        req = make_requirements(expectedScale="500 users", budget="$50,000/month", teamMaturity="a large senior team")
+        result = run_lld_rules_engine("aws", "lb", "lb", req, industry_context={"industry": "fintech", "flags": {}})
+        assert result["config"]["wafEnabled"] == "true"
+
+    def test_healthtech_industry_context_enables_waf_on_cdn(self):
+        req = make_requirements(expectedScale="500 users", functional=["Users can upload profile pictures"])
+        result = run_lld_rules_engine("aws", "cdn", "cdn", req, industry_context={"industry": "healthtech", "flags": {}})
+        assert result["config"]["wafEnabled"] == "true"
+
+    def test_low_scale_low_security_generic_disables_waf(self):
+        req = make_requirements(expectedScale="500 users", budget="$50,000/month", teamMaturity="a large senior team")
+        result = run_lld_rules_engine("aws", "lb", "lb", req)
+        assert result["config"]["wafEnabled"] == "false"
+        assert "wafRuleSet" not in result["config"]
+        assert "not a security gap" in result["reasoning"]["wafEnabled"]
+
+    def test_provider_specific_rule_set_labels(self):
+        req = make_requirements(expectedScale="high scale, 1 million users")
+        aws_result = run_lld_rules_engine("aws", "lb", "lb", req)
+        azure_result = run_lld_rules_engine("azure", "lb", "lb", req)
+        gcp_result = run_lld_rules_engine("gcp", "lb", "lb", req)
+        assert "AWS Managed Rules" in aws_result["config"]["wafRuleSet"]
+        assert "Azure-managed" in azure_result["config"]["wafRuleSet"]
+        assert "Cloud Armor" in gcp_result["config"]["wafRuleSet"]
+
+    def test_kubernetes_lb_gets_brief_waf_note_not_full_config(self):
+        req = make_requirements(expectedScale="high scale, 1 million users")
+        result = run_lld_rules_engine("kubernetes", "lb", "lb", req)
+        assert "wafEnabled" not in result["config"]
+        assert "ModSecurity" in result["config"]["wafNote"]
+
+    def test_private_cdn_gets_brief_waf_note_not_full_config(self):
+        req = make_requirements(expectedScale="high scale, 1 million users")
+        result = run_lld_rules_engine("private", "cdn", "cdn", req)
+        assert "wafEnabled" not in result["config"]
+        assert "ModSecurity" in result["config"]["wafNote"]
+
+
+class TestMonitoringLldConfig:
+    def test_generic_scale_gets_baseline_retention_and_sampling(self):
+        req = make_requirements(expectedScale="1,000 users")
+        result = run_lld_rules_engine("aws", "monitoring", "monitoring", req)
+        assert result["config"]["logRetentionDays"] == "30"
+        assert result["config"]["tracingSampleRate"] == "100% (full trace)"
+
+    def test_high_scale_reduces_tracing_sample_rate(self):
+        req = make_requirements(expectedScale="high scale, 1 million users")
+        result = run_lld_rules_engine("aws", "monitoring", "monitoring", req)
+        assert result["config"]["tracingSampleRate"] == "5% (sampled)"
+
+    def test_high_security_extends_log_retention(self):
+        req = make_requirements(compliance="HIPAA required")
+        result = run_lld_rules_engine("aws", "monitoring", "monitoring", req)
+        assert result["config"]["logRetentionDays"] == "365 (regulatory)"
+
+    def test_kubernetes_monitoring_uses_kube_prometheus_stack(self):
+        req = make_requirements()
+        result = run_lld_rules_engine("kubernetes", "monitoring", "monitoring", req)
+        assert "kube-prometheus-stack" in result["config"]["deploymentMode"]
+
+    def test_private_monitoring_flags_no_managed_platform(self):
+        req = make_requirements()
+        result = run_lld_rules_engine("private", "monitoring", "monitoring", req)
+        assert "Self-hosted" in result["config"]["deploymentMode"]
+
+
+class TestNotificationLldConfig:
+    def test_defaults_to_email_when_no_channel_specified(self):
+        req = make_requirements(functional=["Users can view their order history"])
+        result = run_lld_rules_engine("aws", "notification", "notification", req)
+        assert result["config"]["deliveryChannels"] == "Email"
+        assert "Defaulted to email" in result["reasoning"]["deliveryChannels"]
+
+    def test_infers_sms_channel_from_functional_requirements(self):
+        req = make_requirements(functional=["System sends SMS reminders before appointments"])
+        result = run_lld_rules_engine("aws", "notification", "notification", req)
+        assert "SMS" in result["config"]["deliveryChannels"]
+        assert "Inferred directly" in result["reasoning"]["deliveryChannels"]
+
+    def test_infers_multiple_channels(self):
+        req = make_requirements(functional=["Users get an email and a push notification when their order ships"])
+        result = run_lld_rules_engine("aws", "notification", "notification", req)
+        assert "Email" in result["config"]["deliveryChannels"]
+        assert "Push" in result["config"]["deliveryChannels"]
+
+    def test_retry_and_dead_letter_handling_always_present(self):
+        req = make_requirements()
+        result = run_lld_rules_engine("aws", "notification", "notification", req)
+        assert result["config"]["retryPolicy"]
+        assert "dead-letter" in result["config"]["deadLetterHandling"]
+
+    def test_kubernetes_notification_flags_external_delivery_dependency(self):
+        req = make_requirements()
+        result = run_lld_rules_engine("kubernetes", "notification", "notification", req)
+        assert "external" in result["config"]["deploymentMode"].lower()
+
+    def test_private_notification_flags_external_delivery_dependency(self):
+        req = make_requirements()
+        result = run_lld_rules_engine("private", "notification", "notification", req)
+        assert "external delivery provider" in result["config"]["externalDependencyFlag"].lower()

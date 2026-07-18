@@ -308,4 +308,65 @@ def run_rules_engine(requirements: dict) -> dict:
         rules_trace.append("Rule-Auth-Compliance")
         connections.append(_connection("compute", "auth", "OIDC/HTTPS"))
 
+    # 8. Monitoring & Observability -- unlike every other rule above, this isn't gated on some
+    # narrow signal in the requirements: it fires whenever a "compute" component exists, which is
+    # unconditionally true for every architecture this engine produces (see section 2 above). A
+    # real reference architecture always needs a way to see what deployed compute is actually
+    # doing -- catching a failing dependency or a creeping latency regression before a user files
+    # a support ticket, and giving the team real data for cost/performance trade-off decisions
+    # instead of guessing. This is a cross-cutting "observer" relationship, not a request-flow hop,
+    # so it gets exactly ONE connection (compute -> monitoring) rather than wiring every other
+    # component to it too -- that would be diagram clutter, not signal. That single connection is
+    # also functionally required: validate_architecture_layout's orphan-component check in
+    # validation.py hard-rejects any component with zero connections.
+    components.append(
+        {
+            "id": "monitoring",
+            "name": "Monitoring & Observability",
+            "type": "monitoring",
+            "description": "Collects logs, metrics, and traces from the running system so failures and performance regressions are caught before users report them.",
+            "rulesFired": [
+                "Rule-Monitoring-Compute: Deployed compute always needs observability -- catching failures early and informing real cost/performance trade-offs, not guessing at them."
+            ],
+            "reasoning": (
+                "Every non-trivial system needs a way to see what it's actually doing in production. Without this, "
+                "the first sign of a failing dependency or a creeping latency regression is a user complaint, not an "
+                "alert -- and the team has no real data to make cost/performance trade-off decisions with, just guesses."
+            ),
+        }
+    )
+    rules_trace.append("Rule-Monitoring-Compute")
+    connections.append(_connection("compute", "monitoring", "Telemetry"))
+
+    # 9. Notification (pub/sub fan-out) -- distinct from the "queue" rule above (point-to-point
+    # async task buffering): this is fan-out delivery of a message to an end user or external
+    # system (email/SMS/push), the same real distinction AWS draws between SQS and SNS. Plain
+    # lowercased-substring matching on functional requirement TEXT, the same convention already
+    # used for needs_auth/needs_queue above -- not the numeric NFR substring-matching bug Phase 1
+    # fixed, since these are word-based checks on free-text requirements, not budget/scale figures.
+    needs_notification = (
+        "notification" in func_str
+        or "email" in func_str
+        or "sms" in func_str
+        or "alert" in func_str
+        or "push notification" in func_str
+        or "reminder" in func_str
+    )
+
+    if needs_notification:
+        components.append(
+            {
+                "id": "notification",
+                "name": "Notification Service",
+                "type": "notification",
+                "description": "Delivers fan-out notifications (email, SMS, push) to end users or external systems, decoupled from the request that triggered them.",
+                "rulesFired": [
+                    "Rule-Notification-FanOut: Functional requirements mention notification/email/SMS/alert/reminder delivery to end users."
+                ],
+                "reasoning": "Suggested by Notification rule: fan-out delivery to end users is a different pattern from internal task buffering (the \"queue\" component above) and is modeled separately, the same distinction AWS draws between SNS and SQS.",
+            }
+        )
+        rules_trace.append("Rule-Notification-FanOut")
+        connections.append(_connection("compute", "notification", "HTTPS"))
+
     return {"components": components, "connections": connections, "rulesTrace": rules_trace}

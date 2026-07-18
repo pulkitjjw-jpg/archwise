@@ -152,6 +152,44 @@ class TestMissingMultiAzOrBackupRetention:
         assert "Database backup retention is effectively disabled" not in _titles(findings)
 
 
+class TestMissingWafOnPublicEdge:
+    def test_fires_when_lb_has_waf_disabled_and_handles_sensitive_data(self):
+        components = [
+            component("lb", "lb", lld_config={"wafEnabled": "false"}),
+            component("phi", "phi-vault", lld_config={"encryptionAtRest": "x"}),
+        ]
+        findings = run_security_rules(components, [], NONE_INDUSTRY, PROVIDER)
+        assert "Public-facing edge has no WAF despite handling sensitive data" in _titles(findings)
+
+    def test_fires_when_cdn_has_waf_disabled_in_regulated_industry(self):
+        components = [component("cdn", "cdn", lld_config={"wafEnabled": "false"})]
+        findings = run_security_rules(components, [], {"industry": "fintech"}, PROVIDER)
+        assert "Public-facing edge has no WAF despite handling sensitive data" in _titles(findings)
+
+    def test_does_not_fire_when_waf_enabled(self):
+        components = [
+            component("lb", "lb", lld_config={"wafEnabled": "true"}),
+            component("phi", "phi-vault", lld_config={"encryptionAtRest": "x"}),
+        ]
+        findings = run_security_rules(components, [], NONE_INDUSTRY, PROVIDER)
+        assert "Public-facing edge has no WAF despite handling sensitive data" not in _titles(findings)
+
+    def test_does_not_fire_when_no_sensitive_data_or_regulated_industry(self):
+        components = [component("lb", "lb", lld_config={"wafEnabled": "false"})]
+        findings = run_security_rules(components, [], NONE_INDUSTRY, PROVIDER)
+        assert "Public-facing edge has no WAF despite handling sensitive data" not in _titles(findings)
+
+    def test_does_not_fire_when_waf_key_absent_entirely(self):
+        """kubernetes/private never set wafEnabled at all (they get a "wafNote" instead) -- absence
+        of the key must never be treated the same as an explicit "false"."""
+        components = [
+            component("lb", "lb", lld_config={"wafNote": "Not natively available"}),
+            component("phi", "phi-vault", lld_config={"encryptionAtRest": "x"}),
+        ]
+        findings = run_security_rules(components, [], NONE_INDUSTRY, PROVIDER)
+        assert "Public-facing edge has no WAF despite handling sensitive data" not in _titles(findings)
+
+
 class TestCleanArchitectureProducesZeroFindings:
     def test_well_configured_none_industry_architecture_has_no_findings(self):
         components = [

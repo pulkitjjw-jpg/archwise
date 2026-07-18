@@ -139,6 +139,34 @@ def run_security_rules(components: list[dict], connections: list[dict], industry
                 )
             )
 
+    # 3b. Public edge with WAF disabled despite handling sensitive data or a regulated industry --
+    #    checks the wafEnabled LLD config key lld_rules.py's "lb"/"cdn" branches add for
+    #    aws/azure/gcp (see the WAF LLD config note above _waf_lld_config in lld_rules.py).
+    #    kubernetes/private never set this key at all (no real WAF concept exists there -- they get
+    #    a "wafNote" instead), so config.get("wafEnabled") returning None on those two providers
+    #    correctly never fires this check. Gated on the same _PUBLIC_ENTRY_TYPES/handles_sensitive
+    #    signals the checks above already use, for the identical reason: a WAF-less public edge is
+    #    only a real finding once sensitive data or a regulated industry is actually in the picture.
+    for c in components:
+        if c.get("type") not in _PUBLIC_ENTRY_TYPES:
+            continue
+        config = _lld_config(c, provider)
+        waf_enabled = config.get("wafEnabled")
+        if waf_enabled is None:
+            continue
+        if waf_enabled.lower().startswith("false") and (handles_sensitive or industry in ("fintech", "healthtech")):
+            findings.append(
+                _finding(
+                    HIGH,
+                    "Public-facing edge has no WAF despite handling sensitive data",
+                    f'"{c.get("name", c["id"])}" is a public-facing entry point with no Web Application Firewall '
+                    "enabled, despite this design handling sensitive data (PHI or payment card data) or operating "
+                    "in a regulated industry.",
+                    c,
+                    "Enable a WAF (AWS WAF / Azure WAF Policy / Google Cloud Armor) in front of this component with a managed OWASP-style rule set.",
+                )
+            )
+
     # 4. Missing audit logging -- industry-gated: audit-log is only ever added by industry_rules
     #    for fintech/healthtech, so its absence there (or wherever sensitive data is handled) is a
     #    real gap, not a false positive on a plain non-industry project.

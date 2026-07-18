@@ -265,3 +265,129 @@ class TestHighScaleAffectsCostBands:
         high_mapping = get_cloud_mapping("aws", "storage", "storage", high_scale_req)
 
         assert high_mapping["costEstimate"]["max"] > low_mapping["costEstimate"]["max"]
+
+
+class TestMonitoringMapping:
+    def test_aws_monitoring_is_cloudwatch(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("aws", "monitoring", "monitoring", req)
+        assert "CloudWatch" in mapping["serviceName"]
+        assert "alternatives" in mapping and len(mapping["alternatives"]) == 1
+        assert "costEstimate" in mapping
+
+    def test_azure_monitoring_is_monitor_plus_app_insights(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("azure", "monitoring", "monitoring", req)
+        assert "Monitor" in mapping["serviceName"]
+        assert "Application Insights" in mapping["serviceName"]
+
+    def test_gcp_monitoring_is_operations_suite(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("gcp", "monitoring", "monitoring", req)
+        assert "Operations Suite" in mapping["serviceName"]
+
+    def test_kubernetes_monitoring_is_self_hosted_prometheus_grafana(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("kubernetes", "monitoring", "monitoring", req)
+        assert "Prometheus" in mapping["serviceName"] and "Grafana" in mapping["serviceName"]
+
+    def test_private_monitoring_is_self_managed(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("private", "monitoring", "monitoring", req)
+        assert "Self-Managed" in mapping["serviceName"]
+
+
+class TestNotificationMapping:
+    def test_aws_notification_is_sns(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("aws", "notification", "notification", req)
+        assert mapping["serviceName"] == "Amazon SNS"
+
+    def test_azure_notification_reuses_service_bus_for_consistency_with_queue(self):
+        """Azure's queue mapping already uses Service Bus -- notification should reuse the same
+        platform (Topics) rather than introducing an unrelated messaging product."""
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        queue_mapping = get_cloud_mapping("azure", "queue", "queue", req)
+        notification_mapping = get_cloud_mapping("azure", "notification", "notification", req)
+        assert "Service Bus" in queue_mapping["serviceName"]
+        assert "Service Bus" in notification_mapping["serviceName"]
+
+    def test_gcp_notification_is_pubsub_same_as_queue(self):
+        """GCP has no dedicated notification product distinct from its own queue -- both resolve
+        to Pub/Sub, and the mapping is honest about that in its reasoning."""
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        queue_mapping = get_cloud_mapping("gcp", "queue", "queue", req)
+        notification_mapping = get_cloud_mapping("gcp", "notification", "notification", req)
+        assert queue_mapping["serviceName"] == "Google Cloud Pub/Sub"
+        assert notification_mapping["serviceName"] == "Google Cloud Pub/Sub"
+
+    def test_kubernetes_notification_is_self_hosted(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("kubernetes", "notification", "notification", req)
+        assert "NATS" in mapping["serviceName"]
+
+    def test_private_notification_flags_external_delivery_dependency(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("private", "notification", "notification", req)
+        assert "Self-Managed" in mapping["serviceName"]
+
+
+class TestWafCostNoteOnLbAndCdn:
+    """The WAF cost note is folded into the existing lb/cdn cost estimate assumptions text
+    (never a separate line) whenever is_high_scale or is_high_security would trigger
+    lld_rules.py's wafEnabled -- see _waf_cost_note in cloud_mapping.py."""
+
+    def test_high_scale_aws_lb_assumptions_mention_waf(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements(expectedScale="high scale, 1 million users", budget="$50,000/month", teamMaturity="a large senior team")
+        mapping = get_cloud_mapping("aws", "lb", "lb", req)
+        assert "WAF" in mapping["costEstimate"]["assumptions"]
+
+    def test_high_security_aws_cdn_assumptions_mention_waf(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements(compliance="PCI-DSS required", functional=["Users can upload profile pictures"])
+        mapping = get_cloud_mapping("aws", "cdn", "cdn", req)
+        assert "WAF" in mapping["costEstimate"]["assumptions"]
+
+    def test_low_scale_low_security_aws_lb_assumptions_do_not_mention_waf(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements(expectedScale="500 users", budget="$2,000/month", teamMaturity="senior engineers")
+        mapping = get_cloud_mapping("aws", "lb", "lb", req)
+        assert "WAF" not in mapping["costEstimate"]["assumptions"]
+
+    def test_high_scale_azure_lb_assumptions_mention_waf(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements(expectedScale="high scale, 1 million users", budget="$50,000/month", teamMaturity="a large senior team")
+        mapping = get_cloud_mapping("azure", "lb", "lb", req)
+        assert "WAF" in mapping["costEstimate"]["assumptions"]
+
+    def test_high_scale_gcp_lb_assumptions_mention_waf(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements(expectedScale="high scale, 1 million users", budget="$50,000/month", teamMaturity="a large senior team")
+        mapping = get_cloud_mapping("gcp", "lb", "lb", req)
+        assert "WAF" in mapping["costEstimate"]["assumptions"]

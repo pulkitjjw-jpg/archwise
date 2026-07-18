@@ -7,6 +7,39 @@ def _mapping(service_name: str, alternatives: list[dict], cost_estimate: dict) -
     return {"serviceName": service_name, "alternatives": alternatives, "costEstimate": cost_estimate}
 
 
+def _is_high_security(requirements: dict) -> bool:
+    """Recomputed locally wherever needed (same precedent as the "lb" branch's own
+    is_serverless_rules recompute below) rather than threaded through as a new parameter --
+    mirrors lld_rules.py's identical is_high_security derivation so the WAF cost note here always
+    agrees with whether lld_rules.py actually turned wafEnabled on."""
+    compliance_lower = requirements["nonFunctional"]["compliance"].lower()
+    return (
+        "gdpr" in compliance_lower
+        or "hipaa" in compliance_lower
+        or "pci" in compliance_lower
+        or "secure" in compliance_lower
+        or "audit" in compliance_lower
+        or "encrypt" in compliance_lower
+    )
+
+
+def _waf_cost_note(is_high_scale: bool, is_high_security: bool) -> str:
+    """Folded into the "lb"/"cdn" cost estimate assumptions strings (aws/azure/gcp only) when a
+    WAF would actually be enabled -- see lld_rules.py's wafEnabled trigger (is_high_scale or
+    is_high_security or fintech/healthtech industry). Deliberately a small, clearly-labeled
+    incremental estimate, not a separate cost line -- this function only sees is_high_scale/
+    is_high_security (not industry_context, which isn't threaded into this module at all), so a
+    WAF enabled purely by industry_context on an otherwise low-scale/low-security architecture
+    won't get this note -- an accepted, documented gap, not a bug."""
+    if not (is_high_scale or is_high_security):
+        return ""
+    return (
+        " If a WAF is attached (see LLD wafEnabled), add roughly $5-10/month base + ~$1/month per "
+        "managed rule group + a small per-request inspection fee -- a rough incremental estimate, "
+        "not a separately tracked line item."
+    )
+
+
 def get_cloud_mapping(provider: str, component_type: str, component_id: str, requirements: dict) -> dict:
     nfr = requirements["nonFunctional"]
     team_lower = nfr["teamMaturity"].lower()
@@ -90,7 +123,8 @@ def _aws_mapping(
                     "CloudFront data transfer out costs for high volume traffic."
                     if is_high_scale
                     else "CloudFront free tier covers up to 1TB of data transfer out."
-                ),
+                )
+                + _waf_cost_note(is_high_scale, _is_high_security(requirements)),
             },
         )
 
@@ -189,6 +223,7 @@ def _aws_mapping(
         is_serverless_rules = is_low_budget and (
             "junior" in team_lower or "small" in team_lower or team_lower == "not_specified"
         )
+        is_high_sec = _is_high_security(requirements)
         if is_serverless_rules:
             return _mapping(
                 "Amazon API Gateway (HTTP API)",
@@ -206,7 +241,8 @@ def _aws_mapping(
                 {
                     "min": 0,
                     "max": 80 if is_high_scale else 10,
-                    "assumptions": "API Gateway HTTP API requests ($1.00/million) -- no fixed baseline cost, scales to zero with traffic.",
+                    "assumptions": "API Gateway HTTP API requests ($1.00/million) -- no fixed baseline cost, scales to zero with traffic."
+                    + _waf_cost_note(is_high_scale, is_high_sec),
                 },
             )
         return _mapping(
@@ -225,7 +261,8 @@ def _aws_mapping(
             {
                 "min": 18,
                 "max": 60 if is_high_scale else 20,
-                "assumptions": "ALB fixed hourly charge (~$18/month) plus Load Balancer Capacity Unit (LCU) charges that scale with traffic.",
+                "assumptions": "ALB fixed hourly charge (~$18/month) plus Load Balancer Capacity Unit (LCU) charges that scale with traffic."
+                + _waf_cost_note(is_high_scale, is_high_sec),
             },
         )
 
@@ -496,6 +533,48 @@ def _aws_mapping(
             },
         )
 
+    if component_type == "monitoring":
+        return _mapping(
+            "Amazon CloudWatch (Logs + Alarms + Dashboards)",
+            [
+                {
+                    "serviceName": "Datadog / New Relic (Third-Party APM)",
+                    "reason": "Chose native CloudWatch for zero extra vendor integration and billing that stays inside the existing AWS bill. A third-party APM (Datadog/New Relic) gives richer cross-service tracing and a nicer dashboard UI, at a real per-host/per-GB SaaS cost on top of AWS.",
+                    "costEstimate": {
+                        "min": 15,
+                        "max": 250 if is_high_scale else 70,
+                        "assumptions": "Datadog Pro tier per-host pricing (~$15-23/host/month) plus ingested log volume charges.",
+                    },
+                }
+            ],
+            {
+                "min": 3,
+                "max": 90 if is_high_scale else 20,
+                "assumptions": "CloudWatch Logs ingestion/storage + custom metrics + dashboard widgets -- scales with log volume and alarm count, cheap at low scale.",
+            },
+        )
+
+    if component_type == "notification":
+        return _mapping(
+            "Amazon SNS",
+            [
+                {
+                    "serviceName": "Amazon Pinpoint (Multi-Channel Campaigns)",
+                    "reason": "Chose SNS for simple, cheap fan-out delivery to email/SMS/push endpoints. Pinpoint adds campaign templating, audience segmentation, and delivery analytics, at a materially higher cost for capabilities this use case may not need yet.",
+                    "costEstimate": {
+                        "min": 30,
+                        "max": 300 if is_high_scale else 90,
+                        "assumptions": "Pinpoint per-message channel pricing (SMS/push/email) plus a monthly active-endpoint charge.",
+                    },
+                }
+            ],
+            {
+                "min": 0,
+                "max": 40 if is_high_scale else 5,
+                "assumptions": "SNS pay-per-notification pricing (~$0.50/million for email, ~$0.0075/SMS in the US) -- the first 1,000 email notifications/month are free.",
+            },
+        )
+
     return _mapping(f"AWS Mapped Service ({component_type})", [], {"min": 0, "max": 0, "assumptions": "Generic AWS component."})
 
 
@@ -545,7 +624,8 @@ def _azure_mapping(
             {
                 "min": 35 if is_high_scale else 10,
                 "max": 160 if is_high_scale else 35,
-                "assumptions": "Azure Front Door Standard base fee ($35/mo) + data egress charges.",
+                "assumptions": "Azure Front Door Standard base fee ($35/mo) + data egress charges."
+                + _waf_cost_note(is_high_scale, _is_high_security(requirements)),
             },
         )
 
@@ -639,6 +719,7 @@ def _azure_mapping(
         is_serverless_rules = is_low_budget and (
             "junior" in team_lower or "small" in team_lower or team_lower == "not_specified"
         )
+        is_high_sec = _is_high_security(requirements)
         if is_serverless_rules:
             return _mapping(
                 "Azure API Management",
@@ -656,7 +737,8 @@ def _azure_mapping(
                 {
                     "min": 0,
                     "max": 85 if is_high_scale else 10,
-                    "assumptions": "API Management Consumption tier -- billed per API call, no fixed baseline cost.",
+                    "assumptions": "API Management Consumption tier -- billed per API call, no fixed baseline cost."
+                    + _waf_cost_note(is_high_scale, is_high_sec),
                 },
             )
         return _mapping(
@@ -675,7 +757,8 @@ def _azure_mapping(
             {
                 "min": 18,
                 "max": 55 if is_high_scale else 20,
-                "assumptions": "Application Gateway Standard_v2 baseline cost (~$18/month) plus capacity unit charges that scale with traffic.",
+                "assumptions": "Application Gateway Standard_v2 baseline cost (~$18/month) plus capacity unit charges that scale with traffic."
+                + _waf_cost_note(is_high_scale, is_high_sec),
             },
         )
 
@@ -946,6 +1029,48 @@ def _azure_mapping(
             },
         )
 
+    if component_type == "monitoring":
+        return _mapping(
+            "Azure Monitor + Application Insights",
+            [
+                {
+                    "serviceName": "Datadog / New Relic (Third-Party APM)",
+                    "reason": "Chose native Azure Monitor + Application Insights for zero extra vendor integration and billing that stays inside the existing Azure bill. A third-party APM (Datadog/New Relic) gives richer cross-cloud tracing and a nicer dashboard UI, at a real per-host/per-GB SaaS cost on top of Azure.",
+                    "costEstimate": {
+                        "min": 15,
+                        "max": 250 if is_high_scale else 70,
+                        "assumptions": "Datadog Pro tier per-host pricing (~$15-23/host/month) plus ingested log volume charges.",
+                    },
+                }
+            ],
+            {
+                "min": 3,
+                "max": 90 if is_high_scale else 20,
+                "assumptions": "Log Analytics ingestion/retention + Application Insights telemetry volume -- scales with log/trace volume, cheap at low scale.",
+            },
+        )
+
+    if component_type == "notification":
+        return _mapping(
+            "Azure Service Bus (Topics)",
+            [
+                {
+                    "serviceName": "Azure Notification Hubs",
+                    "reason": "Chose Service Bus Topics to reuse the same messaging platform this design already uses for its queue (see the \"queue\" mapping above), avoiding a second messaging service to operate. Notification Hubs is purpose-built for mobile push fan-out at massive device-registration scale, the better fit if push to a large mobile user base is the primary channel.",
+                    "costEstimate": {
+                        "min": 0,
+                        "max": 50 if is_high_scale else 10,
+                        "assumptions": "Notification Hubs Free tier covers up to 1M pushes/month; paid tiers scale with registered device count.",
+                    },
+                }
+            ],
+            {
+                "min": 10,
+                "max": 45 if is_high_scale else 18,
+                "assumptions": "Service Bus Standard tier base price (~$10/mo, includes 10M operations), shared across topics and queues in the same namespace.",
+            },
+        )
+
     return _mapping(f"Azure Mapped Service ({component_type})", [], {"min": 0, "max": 0, "assumptions": "Generic Azure component."})
 
 
@@ -995,7 +1120,8 @@ def _gcp_mapping(
             {
                 "min": 15 if is_high_scale else 5,
                 "max": 130 if is_high_scale else 15,
-                "assumptions": "Cache lookup costs + Cloud CDN data egress fees.",
+                "assumptions": "Cache lookup costs + Cloud CDN data egress fees."
+                + _waf_cost_note(is_high_scale, _is_high_security(requirements)),
             },
         )
 
@@ -1089,6 +1215,7 @@ def _gcp_mapping(
         is_serverless_rules = is_low_budget and (
             "junior" in team_lower or "small" in team_lower or team_lower == "not_specified"
         )
+        is_high_sec = _is_high_security(requirements)
         if is_serverless_rules:
             return _mapping(
                 "Google Cloud API Gateway",
@@ -1106,7 +1233,8 @@ def _gcp_mapping(
                 {
                     "min": 0,
                     "max": 80 if is_high_scale else 10,
-                    "assumptions": "API Gateway request pricing -- billed per call, no fixed baseline cost.",
+                    "assumptions": "API Gateway request pricing -- billed per call, no fixed baseline cost."
+                    + _waf_cost_note(is_high_scale, is_high_sec),
                 },
             )
         return _mapping(
@@ -1125,7 +1253,8 @@ def _gcp_mapping(
             {
                 "min": 18,
                 "max": 55 if is_high_scale else 20,
-                "assumptions": "Global external HTTPS Load Balancer forwarding rule baseline (~$18/month) plus data processing fees.",
+                "assumptions": "Global external HTTPS Load Balancer forwarding rule baseline (~$18/month) plus data processing fees."
+                + _waf_cost_note(is_high_scale, is_high_sec),
             },
         )
 
@@ -1393,6 +1522,48 @@ def _gcp_mapping(
                 "min": 10,
                 "max": 150 if is_high_scale else 40,
                 "assumptions": "Cloud DLP API priced per unit of data inspected/transformed, run as a nightly batch job over new PHI records.",
+            },
+        )
+
+    if component_type == "monitoring":
+        return _mapping(
+            "Google Cloud Operations Suite (Monitoring + Logging)",
+            [
+                {
+                    "serviceName": "Datadog / New Relic (Third-Party APM)",
+                    "reason": "Chose native Cloud Operations Suite for zero extra vendor integration and billing that stays inside the existing GCP bill. A third-party APM (Datadog/New Relic) gives richer cross-cloud tracing and a nicer dashboard UI, at a real per-host/per-GB SaaS cost on top of GCP.",
+                    "costEstimate": {
+                        "min": 15,
+                        "max": 250 if is_high_scale else 70,
+                        "assumptions": "Datadog Pro tier per-host pricing (~$15-23/host/month) plus ingested log volume charges.",
+                    },
+                }
+            ],
+            {
+                "min": 3,
+                "max": 90 if is_high_scale else 20,
+                "assumptions": "Cloud Logging ingestion/storage + Cloud Monitoring custom metrics and dashboards -- scales with log volume, cheap at low scale (50GB/month logging is free).",
+            },
+        )
+
+    if component_type == "notification":
+        return _mapping(
+            "Google Cloud Pub/Sub",
+            [
+                {
+                    "serviceName": "Third-Party Multi-Channel Provider (e.g. Twilio, SendGrid)",
+                    "reason": "Chose Pub/Sub because GCP has no dedicated end-user notification product distinct from its own queue -- Pub/Sub already serves both the queue and fan-out-notification roles here, unlike AWS/Azure's SNS-vs-SQS split. A third-party provider (Twilio/SendGrid) is the right call once actual SMS/email/push delivery to end users (not just internal fan-out) is needed, since Pub/Sub itself has no delivery channel of its own.",
+                    "costEstimate": {
+                        "min": 20,
+                        "max": 300 if is_high_scale else 80,
+                        "assumptions": "Twilio/SendGrid per-message channel pricing (SMS/email/push) plus a monthly platform fee.",
+                    },
+                }
+            ],
+            {
+                "min": 0,
+                "max": 30 if is_high_scale else 5,
+                "assumptions": "Pub/Sub message volume pricing (first 10GB/month free) -- the same pricing shape as the \"queue\" mapping above, since it's the same underlying service.",
             },
         )
 
@@ -1741,6 +1912,48 @@ def _kubernetes_mapping(component_type: str, component_id: str, is_high_scale: b
             },
         )
 
+    if component_type == "monitoring":
+        return _mapping(
+            "Prometheus + Grafana (kube-prometheus-stack, Helm Chart)",
+            [
+                {
+                    "serviceName": "Managed Observability (e.g. Datadog/Grafana Cloud)",
+                    "reason": "Chose the self-hosted kube-prometheus-stack to keep metrics/logs/dashboards inside the cluster's own infrastructure with no per-host SaaS billing. A managed observability platform removes the operational burden of running and scaling Prometheus' own storage, at a real per-host/per-GB vendor cost.",
+                    "costEstimate": {
+                        "min": 15,
+                        "max": 250 if is_high_scale else 70,
+                        "assumptions": "Managed observability SaaS per-host/per-GB-ingested pricing.",
+                    },
+                }
+            ],
+            {
+                "min": 10,
+                "max": 120 if is_high_scale else 35,
+                "assumptions": "Prometheus + Grafana + Alertmanager pods with persistent volumes for metrics storage; scales with retention window and cluster size.",
+            },
+        )
+
+    if component_type == "notification":
+        return _mapping(
+            "NATS JetStream (Pub/Sub Fan-Out, Helm Chart)",
+            [
+                {
+                    "serviceName": "External Managed Notification Service (e.g. SNS/Pub/Sub) via K8s Secret",
+                    "reason": "Chose self-hosted NATS JetStream pub/sub for fan-out delivery inside the cluster's own infrastructure footprint. An external managed service (SNS/Pub/Sub) offloads actual email/SMS/push delivery to real end-user channels, which nothing self-hosted in-cluster can do on its own anyway.",
+                    "costEstimate": {
+                        "min": 0,
+                        "max": 40 if is_high_scale else 5,
+                        "assumptions": "External managed notification service billed by the cloud host, reached from in-cluster pods via a Kubernetes Secret holding credentials.",
+                    },
+                }
+            ],
+            {
+                "min": 8,
+                "max": 100 if is_high_scale else 30,
+                "assumptions": "NATS JetStream StatefulSet (3-node cluster) with persistent volumes; a real delivery channel (email/SMS/push provider) still needs to be wired in as an external dependency, since nothing in-cluster can deliver to end users directly.",
+            },
+        )
+
     return _mapping(
         f"Kubernetes Mapped Workload ({component_type})", [], {"min": 0, "max": 0, "assumptions": "Generic in-cluster workload."}
     )
@@ -2058,6 +2271,48 @@ def _private_mapping(component_type: str, component_id: str, is_high_scale: bool
                 "min": 100 if is_high_scale else 40,
                 "max": 350 if is_high_scale else 120,
                 "assumptions": "Dedicated VM running Presidio Analyzer + Anonymizer, invoked by a scheduled batch job.",
+            },
+        )
+
+    if component_type == "monitoring":
+        return _mapping(
+            "Self-Managed Monitoring Stack (Prometheus/Grafana or ELK) on Dedicated VM",
+            [
+                {
+                    "serviceName": "Hosted SaaS Observability (Off-Premises)",
+                    "reason": "Chose a self-hosted stack to keep telemetry data on-premises, matching this deployment's general data-residency posture. A hosted SaaS observability platform removes all storage/scaling operational burden but means logs and metrics leave the private network.",
+                    "costEstimate": {
+                        "min": 15,
+                        "max": 250 if is_high_scale else 70,
+                        "assumptions": "Hosted SaaS observability per-host/per-GB-ingested pricing, plus egress from the private network to reach it.",
+                    },
+                }
+            ],
+            {
+                "min": 60 if is_high_scale else 25,
+                "max": 200 if is_high_scale else 70,
+                "assumptions": "Dedicated VM(s) running Prometheus/Grafana or an ELK stack. Storage capacity for metrics/log retention must be sized and monitored like any other stateful service here.",
+            },
+        )
+
+    if component_type == "notification":
+        return _mapping(
+            "Self-Managed Message Bus (RabbitMQ/NATS Pub/Sub) + External Delivery Provider",
+            [
+                {
+                    "serviceName": "Direct Integration with a Third-Party Delivery API (No Internal Bus)",
+                    "reason": "Chose a self-managed pub/sub bus to decouple triggering a notification from actually sending it, matching how other messaging is handled on this infrastructure. Calling a delivery provider's API directly is simpler if fan-out volume is low enough that decoupling isn't worth the extra moving part.",
+                    "costEstimate": {
+                        "min": 0,
+                        "max": 0,
+                        "assumptions": "No internal bus cost -- cost shows up entirely as the delivery provider's per-message billing instead.",
+                    },
+                }
+            ],
+            {
+                "min": 60 if is_high_scale else 25,
+                "max": 200 if is_high_scale else 70,
+                "assumptions": "Dedicated VM running a self-managed message bus. An external delivery provider (email/SMS/push gateway) is still required and billed separately -- nothing on-premises can deliver directly to end-user inboxes/devices.",
             },
         )
 

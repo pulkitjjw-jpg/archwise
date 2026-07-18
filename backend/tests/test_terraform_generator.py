@@ -419,27 +419,43 @@ def _kitchen_sink(
     queue_svc: str,
     lb_svc: str,
     dns_svc: str,
+    monitoring_svc: str,
+    notification_svc: str,
+    *,
+    waf_enabled: bool = False,
 ) -> tuple[list[dict], list[dict]]:
     """compute + worker (both type=="compute", the combination that exposed the Azure shared-
-    resource duplicate-declaration bug) + every other component type, including the new "lb" and
-    "dns" components -- the broadest realistic architecture this generator has to handle in one
-    pass (the same "kitchen sink" shape used for the real `terraform validate` verification)."""
+    resource duplicate-declaration bug) + every other component type, including "lb"/"dns" (Phase
+    2) and "monitoring"/"notification" (Phase 3) -- the broadest realistic architecture this
+    generator has to handle in one pass (the same "kitchen sink" shape used for the real
+    `terraform validate` verification). `waf_enabled` drives the "lb"/"cdn" components' own
+    wafEnabled LLD config key, mirroring what lld_rules.py would actually set for a high-scale/
+    high-security/fintech-or-healthtech architecture."""
+    lb_cdn_config = (
+        {"wafEnabled": "true", "wafRuleSet": "Managed Rule Set", "rateLimitPerIP": "2000 requests / 5 min"}
+        if waf_enabled
+        else {}
+    )
     components = [
         _component("compute", "compute", "API", {provider: compute_svc}, {"minInstances": "2"}),
         _component("worker", "compute", "Worker", {provider: worker_svc}),
         _component("database", "database", "DB", {provider: db_svc}),
         _component("cache", "cache", "Cache", {provider: cache_svc}),
         _component("storage", "storage", "Storage", {provider: storage_svc}),
-        _component("cdn", "cdn", "CDN", {provider: cdn_svc}),
+        _component("cdn", "cdn", "CDN", {provider: cdn_svc}, lb_cdn_config),
         _component("auth", "auth", "Auth", {provider: auth_svc}),
         _component("queue", "queue", "Queue", {provider: queue_svc}),
-        _component("lb", "lb", "LB", {provider: lb_svc}),
+        _component("lb", "lb", "LB", {provider: lb_svc}, lb_cdn_config),
         _component("dns", "dns", "DNS", {provider: dns_svc}),
+        _component("monitoring", "monitoring", "Monitoring", {provider: monitoring_svc}, {"logRetentionDays": "30"}),
+        _component("notification", "notification", "Notify", {provider: notification_svc}, {"deliveryChannels": "Email"}),
     ]
     connections = [
         {"from": "cdn", "to": "lb", "protocol": "HTTPS"},
         {"from": "lb", "to": "compute", "protocol": "HTTPS"},
         {"from": "dns", "to": "lb", "protocol": "DNS"},
+        {"from": "compute", "to": "monitoring", "protocol": "Telemetry"},
+        {"from": "compute", "to": "notification", "protocol": "HTTPS"},
     ]
     return components, connections
 
@@ -450,6 +466,7 @@ KITCHEN_SINK_STACKS = {
         *_kitchen_sink(
             "aws", "Amazon ECS Fargate", "AWS Lambda (Worker)", "Amazon RDS PostgreSQL", "Amazon ElastiCache", "Amazon S3",
             "Amazon CloudFront", "Amazon Cognito", "Amazon SQS", "Application Load Balancer", "Amazon Route 53",
+            "Amazon CloudWatch", "Amazon SNS",
         ),
     ),
     "aws_serverless": (
@@ -457,6 +474,7 @@ KITCHEN_SINK_STACKS = {
         *_kitchen_sink(
             "aws", "AWS Lambda", "AWS Lambda (Worker)", "Amazon DynamoDB", "Amazon ElastiCache", "Amazon S3",
             "Amazon CloudFront", "Amazon Cognito", "Amazon SQS", "Amazon API Gateway (HTTP API)", "Amazon Route 53",
+            "Amazon CloudWatch", "Amazon SNS",
         ),
     ),
     "azure_container": (
@@ -464,6 +482,7 @@ KITCHEN_SINK_STACKS = {
         *_kitchen_sink(
             "azure", "Azure Container Apps", "Azure Container Apps (Worker)", "Azure Database for PostgreSQL", "Azure Cache for Redis", "Azure Blob Storage",
             "Azure Front Door", "Azure AD B2C", "Azure Service Bus", "Azure Application Gateway", "Azure DNS",
+            "Azure Monitor", "Azure Service Bus (Topics)",
         ),
     ),
     "azure_serverless": (
@@ -471,6 +490,7 @@ KITCHEN_SINK_STACKS = {
         *_kitchen_sink(
             "azure", "Azure Functions", "Azure Functions (Worker)", "Azure Database for PostgreSQL", "Azure Cache for Redis", "Azure Blob Storage",
             "Azure Front Door", "Azure AD B2C", "Azure Service Bus", "Azure API Management", "Azure DNS",
+            "Azure Monitor", "Azure Service Bus (Topics)",
         ),
     ),
     "gcp_container": (
@@ -478,6 +498,7 @@ KITCHEN_SINK_STACKS = {
         *_kitchen_sink(
             "gcp", "Google Cloud Run", "Google Cloud Run (Worker)", "Cloud SQL for PostgreSQL", "Memorystore for Redis", "Cloud Storage",
             "Cloud CDN", "Firebase Authentication", "Cloud Pub/Sub", "Google Cloud Load Balancing (HTTPS)", "Google Cloud DNS",
+            "Google Cloud Operations Suite", "Google Cloud Pub/Sub",
         ),
     ),
     "gcp_serverless": (
@@ -485,6 +506,38 @@ KITCHEN_SINK_STACKS = {
         *_kitchen_sink(
             "gcp", "Google Cloud Functions", "Google Cloud Functions (Worker)", "Cloud SQL for PostgreSQL", "Memorystore for Redis", "Cloud Storage",
             "Cloud CDN", "Firebase Authentication", "Cloud Pub/Sub", "Google Cloud API Gateway", "Google Cloud DNS",
+            "Google Cloud Operations Suite", "Google Cloud Pub/Sub",
+        ),
+    ),
+}
+
+# Dedicated WAF-enabled variants (container compute only, one per provider) -- a high-scale/
+# fintech architecture where lld_rules.py would actually set wafEnabled="true" on the "lb"/"cdn"
+# components, exercising the aws_wafv2_web_acl(+association)/azurerm_web_application_firewall_policy/
+# google_compute_security_policy resources against the real provider schemas.
+WAF_ENABLED_STACKS = {
+    "aws_container_waf": (
+        "aws",
+        *_kitchen_sink(
+            "aws", "Amazon ECS Fargate", "AWS Lambda (Worker)", "Amazon RDS PostgreSQL", "Amazon ElastiCache", "Amazon S3",
+            "Amazon CloudFront", "Amazon Cognito", "Amazon SQS", "Application Load Balancer", "Amazon Route 53",
+            "Amazon CloudWatch", "Amazon SNS", waf_enabled=True,
+        ),
+    ),
+    "azure_container_waf": (
+        "azure",
+        *_kitchen_sink(
+            "azure", "Azure Container Apps", "Azure Container Apps (Worker)", "Azure Database for PostgreSQL", "Azure Cache for Redis", "Azure Blob Storage",
+            "Azure Front Door", "Azure AD B2C", "Azure Service Bus", "Azure Application Gateway", "Azure DNS",
+            "Azure Monitor", "Azure Service Bus (Topics)", waf_enabled=True,
+        ),
+    ),
+    "gcp_container_waf": (
+        "gcp",
+        *_kitchen_sink(
+            "gcp", "Google Cloud Run", "Google Cloud Run (Worker)", "Cloud SQL for PostgreSQL", "Memorystore for Redis", "Cloud Storage",
+            "Cloud CDN", "Firebase Authentication", "Cloud Pub/Sub", "Google Cloud Load Balancing (HTTPS)", "Google Cloud DNS",
+            "Google Cloud Operations Suite", "Google Cloud Pub/Sub", waf_enabled=True,
         ),
     ),
 }
@@ -547,3 +600,172 @@ class TestTerraformValidate:
             ["terraform", "validate"], cwd=tmp_path, capture_output=True, text=True, timeout=60,
         )
         assert validate.returncode == 0, f"{name}: terraform validate failed:\n{validate.stdout}\n{validate.stderr}"
+
+
+class TestWafTerraformValidate:
+    """Dedicated real `terraform validate` check for the WAF-enabled path specifically -- a
+    high-scale/fintech-style architecture where lld_rules.py would set wafEnabled="true" on the
+    "lb"/"cdn" components. Exercises aws_wafv2_web_acl + aws_wafv2_web_acl_association (ALB) /
+    aws_wafv2_web_acl + inline web_acl_id (CloudFront), azurerm_web_application_firewall_policy
+    (Application Gateway, WAF_v2 SKU), and google_compute_security_policy (backend service) against
+    the real provider schemas. Same terraform-CLI-availability skip as TestTerraformValidate above."""
+
+    @staticmethod
+    @pytest.fixture(scope="class")
+    def terraform_available():
+        import shutil
+
+        if shutil.which("terraform") is None:
+            pytest.skip("terraform CLI not installed in this environment")
+
+    @pytest.mark.parametrize("name", list(WAF_ENABLED_STACKS.keys()))
+    def test_waf_enabled_terraform_validates(self, terraform_available, name, tmp_path):
+        import subprocess
+
+        provider, stack, conns = WAF_ENABLED_STACKS[name]
+        files = generate_terraform_code(provider, "WafValidateTest", stack, conns, None)
+
+        # Sanity check the WAF resources are actually present before spending a real `terraform
+        # validate` run on them -- if the wafEnabled="true" LLD config didn't produce a WAF
+        # resource at all, this test would otherwise "pass" for a reason that proves nothing.
+        combined = "\n".join(files.values())
+        if provider == "aws":
+            assert "aws_wafv2_web_acl" in combined
+            assert "aws_wafv2_web_acl_association" in combined
+        elif provider == "azure":
+            assert "azurerm_web_application_firewall_policy" in combined
+        elif provider == "gcp":
+            assert "google_compute_security_policy" in combined
+
+        for filename, content in files.items():
+            if not filename.endswith(".tf"):
+                continue
+            (tmp_path / filename).write_text(content)
+
+        init = subprocess.run(
+            ["terraform", "init", "-backend=false", "-input=false"],
+            cwd=tmp_path, capture_output=True, text=True, timeout=120,
+        )
+        assert init.returncode == 0, f"{name}: terraform init failed:\n{init.stdout}\n{init.stderr}"
+
+        validate = subprocess.run(
+            ["terraform", "validate"], cwd=tmp_path, capture_output=True, text=True, timeout=60,
+        )
+        assert validate.returncode == 0, f"{name}: terraform validate failed:\n{validate.stdout}\n{validate.stderr}"
+
+
+class TestMonitoringTerraformResources:
+    def test_aws_monitoring_emits_log_group_dashboard_and_cpu_alarm(self):
+        provider, stack, conns = KITCHEN_SINK_STACKS["aws_container"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        compute = files["compute.tf"]
+        assert 'resource "aws_cloudwatch_log_group" "monitoring"' in compute
+        assert 'resource "aws_cloudwatch_dashboard" "monitoring"' in compute
+        assert 'resource "aws_cloudwatch_metric_alarm" "monitoring_high_cpu"' in compute
+        assert "aws_ecs_cluster.compute_cluster.name" in compute
+
+    def test_aws_monitoring_attaches_lambda_error_alarm_for_serverless_compute(self):
+        provider, stack, conns = KITCHEN_SINK_STACKS["aws_serverless"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        compute = files["compute.tf"]
+        assert 'resource "aws_cloudwatch_metric_alarm" "monitoring_error_rate"' in compute
+        assert "aws_lambda_function.compute.function_name" in compute
+
+    def test_azure_monitoring_emits_log_analytics_and_app_insights(self):
+        provider, stack, conns = KITCHEN_SINK_STACKS["azure_container"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        compute = files["compute.tf"]
+        assert 'resource "azurerm_log_analytics_workspace" "monitoring"' in compute
+        assert 'resource "azurerm_application_insights" "monitoring"' in compute
+        assert "azurerm_application_insights.monitoring.connection_string" in files["outputs.tf"]
+
+    def test_gcp_monitoring_emits_log_bucket_config(self):
+        provider, stack, conns = KITCHEN_SINK_STACKS["gcp_container"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        assert 'resource "google_logging_project_bucket_config" "monitoring"' in files["compute.tf"]
+
+    def test_private_monitoring_gets_null_resource_placeholder(self):
+        components = [_component("monitoring", "monitoring", "Monitoring", {"private": "Self-Managed Monitoring Stack"})]
+        files = generate_terraform_code("private", "TestProj", components, [], None)
+        assert 'resource "null_resource" "monitoring_manual_provisioning"' in files["compute.tf"]
+
+
+class TestNotificationTerraformResources:
+    def test_aws_notification_emits_sns_topic_and_subscription(self):
+        provider, stack, conns = KITCHEN_SINK_STACKS["aws_container"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        database = files["database.tf"]
+        assert 'resource "aws_sns_topic" "notification"' in database
+        assert 'resource "aws_sns_topic_subscription" "notification_email"' in database
+        assert "aws_sns_topic.notification.arn" in files["outputs.tf"]
+        assert 'variable "notification_notification_email"' in files["variables.tf"]
+
+    def test_azure_notification_emits_service_bus_topic(self):
+        provider, stack, conns = KITCHEN_SINK_STACKS["azure_container"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        database = files["database.tf"]
+        assert 'resource "azurerm_servicebus_namespace" "notification_sb"' in database
+        assert 'resource "azurerm_servicebus_topic" "notification"' in database
+
+    def test_gcp_notification_emits_pubsub_topic(self):
+        provider, stack, conns = KITCHEN_SINK_STACKS["gcp_container"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        assert 'resource "google_pubsub_topic" "notification"' in files["database.tf"]
+
+    def test_private_notification_gets_null_resource_placeholder(self):
+        components = [_component("notification", "notification", "Notify", {"private": "Self-Managed Message Bus"})]
+        files = generate_terraform_code("private", "TestProj", components, [], None)
+        assert 'resource "null_resource" "notification_manual_provisioning"' in files["compute.tf"]
+
+
+class TestWafTerraformResources:
+    def test_aws_alb_gets_web_acl_and_association_when_enabled(self):
+        provider, stack, conns = WAF_ENABLED_STACKS["aws_container_waf"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        compute = files["compute.tf"]
+        assert 'resource "aws_wafv2_web_acl" "lb_waf"' in compute
+        assert 'resource "aws_wafv2_web_acl_association" "lb_waf"' in compute
+        assert "resource_arn = aws_lb.app.arn" in compute
+
+    def test_aws_cloudfront_gets_inline_web_acl_id_not_association(self):
+        provider, stack, conns = WAF_ENABLED_STACKS["aws_container_waf"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        storage = files["storage.tf"]
+        assert 'resource "aws_wafv2_web_acl" "cdn_waf"' in storage
+        assert "web_acl_id" in storage
+        # CloudFront must NOT get a web_acl_association resource -- that resource type only
+        # supports regional resources, never CLOUDFRONT-scope Web ACLs.
+        assert "aws_wafv2_web_acl_association" not in storage
+
+    def test_aws_no_waf_resources_when_disabled(self):
+        provider, stack, conns = KITCHEN_SINK_STACKS["aws_container"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        combined = "\n".join(files.values())
+        assert "aws_wafv2_web_acl" not in combined
+
+    def test_azure_appgw_gets_waf_policy_and_waf_v2_sku_when_enabled(self):
+        provider, stack, conns = WAF_ENABLED_STACKS["azure_container_waf"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        compute = files["compute.tf"]
+        assert 'resource "azurerm_web_application_firewall_policy" "appgw_waf"' in compute
+        assert "firewall_policy_id  = azurerm_web_application_firewall_policy.appgw_waf.id" in compute
+        assert 'name     = "WAF_v2"' in compute
+
+    def test_azure_no_waf_resources_when_disabled(self):
+        provider, stack, conns = KITCHEN_SINK_STACKS["azure_container"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        compute = files["compute.tf"]
+        assert "azurerm_web_application_firewall_policy" not in compute
+        assert 'name     = "Standard_v2"' in compute
+
+    def test_gcp_backend_service_gets_security_policy_when_enabled(self):
+        provider, stack, conns = WAF_ENABLED_STACKS["gcp_container_waf"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        compute = files["compute.tf"]
+        assert 'resource "google_compute_security_policy" "lb_waf"' in compute
+        assert "security_policy       = google_compute_security_policy.lb_waf.id" in compute
+
+    def test_gcp_no_waf_resources_when_disabled(self):
+        provider, stack, conns = KITCHEN_SINK_STACKS["gcp_container"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        assert "google_compute_security_policy" not in files["compute.tf"]

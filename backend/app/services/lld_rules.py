@@ -1,6 +1,61 @@
 from app.services.nfr_signals import is_budget_tight as _is_budget_tight
 from app.services.nfr_signals import is_high_scale as _is_high_scale
 
+# AWS/Azure/GCP rule-set label per provider -- shared by the "lb" and "cdn" branches below since a
+# WAF is a property of whichever edge component fronts the public internet, not a first-class
+# component of its own (see rules_engine.py's comments near the "lb"/"dns" additions for the
+# identical reasoning already applied to NAT Gateway/IGW -- a hollow third node here would be
+# diagram clutter, not signal).
+_WAF_RULE_SET_BY_PROVIDER = {
+    "aws": "AWS Managed Rules - Core Rule Set + SQL Injection Rule Set",
+    "azure": "Azure-managed Default Rule Set (DRS)",
+    "gcp": "Google Cloud Armor - OWASP Top 10 preconfigured rules",
+}
+
+
+def _waf_lld_config(provider: str, is_high_scale: bool, is_high_security: bool, industry_context: dict | None) -> tuple[dict, dict]:
+    """Shared helper for the "lb" and "cdn" branches (aws/azure/gcp only) -- returns the config/
+    reasoning key-value pairs to merge in for the wafEnabled decision. Enabled when the workload is
+    high-scale (worth the marginal per-request inspection cost), high-security/compliance-flagged,
+    or the project is fintech/healthtech, where a WAF in front of the public edge is close to a
+    baseline expectation rather than optional hardening. Otherwise disabled, with reasoning framed
+    as a reasonable cost-saving choice at this scale/sensitivity, not a security gap."""
+    industry = (industry_context or {}).get("industry", "none")
+    should_enable = is_high_scale or is_high_security or industry in ("fintech", "healthtech")
+
+    config: dict[str, str] = {"wafEnabled": "true" if should_enable else "false"}
+    reasoning: dict[str, str] = {}
+
+    if should_enable:
+        config["wafRuleSet"] = _WAF_RULE_SET_BY_PROVIDER.get(provider, "Provider-managed OWASP Top 10 rule set")
+        config["rateLimitPerIP"] = "2000 requests / 5 min"
+
+        reasons = []
+        if is_high_scale:
+            reasons.append(
+                "the workload is high-scale, where a WAF's marginal per-request inspection cost is worth it to absorb "
+                "a larger volume of malicious/bot traffic"
+            )
+        if is_high_security:
+            reasons.append(
+                "the project's compliance/security posture calls for defense-in-depth at the edge, not just "
+                "application-layer controls"
+            )
+        if industry in ("fintech", "healthtech"):
+            reasons.append(
+                f"the project is flagged as {industry}, where a WAF in front of the public edge is close to a "
+                "baseline expectation rather than optional hardening"
+            )
+        reasoning["wafEnabled"] = "Enabled because " + "; and ".join(reasons) + "."
+    else:
+        reasoning["wafEnabled"] = (
+            "Disabled -- at this scale and sensitivity, the added cost and operational overhead (rule tuning, "
+            "false-positive management) of a WAF is a reasonable trade-off to skip for now, not a security gap. "
+            "Revisit if scale or compliance requirements change."
+        )
+
+    return config, reasoning
+
 
 def run_lld_rules_engine(
     provider: str,
@@ -80,6 +135,10 @@ def run_lld_rules_engine(
             else "Disabled Origin Shield as scale is moderate, avoiding extra gateway pricing."
         )
 
+        waf_config, waf_reasoning = _waf_lld_config(provider, is_high_scale, is_high_security, industry_context)
+        config.update(waf_config)
+        reasoning.update(waf_reasoning)
+
     elif component_type == "lb":
         # Same is_serverless recompute as the "compute" branch below -- a service_name_override
         # (manual service-swap) or the deterministic scale/budget/team signal both need to agree
@@ -136,6 +195,10 @@ def run_lld_rules_engine(
             reasoning["listenerProtocol"] = (
                 "TLS terminates at the load balancer rather than on individual compute instances, so the certificate is issued, rotated, and audited in exactly one place."
             )
+
+        waf_config, waf_reasoning = _waf_lld_config(provider, is_high_scale, is_high_security, industry_context)
+        config.update(waf_config)
+        reasoning.update(waf_reasoning)
 
     elif component_type == "dns":
         config["hostedZoneType"] = "Public"
@@ -385,6 +448,58 @@ def run_lld_rules_engine(
             "Safe Harbor is the more auditable of HIPAA's two de-identification standards and doesn't require a statistician's expert determination."
         )
 
+    elif component_type == "monitoring":
+        config["logRetentionDays"] = "365 (regulatory)" if is_high_security else "30"
+        config["alertingPhilosophy"] = (
+            "Alert on symptoms (error rate, latency, saturation), not causes -- paging on every CPU blip creates alert fatigue that buries the alert that actually matters."
+        )
+        config["tracingEnabled"] = "true"
+        config["tracingSampleRate"] = "5% (sampled)" if is_high_scale else "100% (full trace)"
+        config["metricNamespace"] = "app/production"
+
+        reasoning["logRetentionDays"] = (
+            "Extended retention aligns with regulatory record-keeping expectations for compliance-sensitive workloads."
+            if is_high_security
+            else "30 days is enough to debug most incidents while keeping storage costs down; extend it if a compliance requirement says otherwise."
+        )
+        reasoning["tracingSampleRate"] = (
+            "Tracing every single request at high request volume gets expensive fast, both in storage and in the "
+            "tracing backend's own ingestion cost -- a 5% sample still surfaces the same latency/error patterns "
+            "statistically, at a fraction of the cost."
+            if is_high_scale
+            else "Traffic is low enough that tracing every request is still cheap, and full fidelity makes debugging any single request trivial."
+        )
+        reasoning["alertingPhilosophy"] = "A small number of high-signal alerts that actually get acted on beats a large number that get muted."
+
+    elif component_type == "notification":
+        func_str = " ".join(requirements.get("functional", [])).lower()
+        channels: list[str] = []
+        if "sms" in func_str or "text message" in func_str:
+            channels.append("SMS")
+        if "push notification" in func_str or "push" in func_str:
+            channels.append("Push")
+        if "email" in func_str:
+            channels.append("Email")
+        inferred = bool(channels)
+        if not channels:
+            channels = ["Email"]
+
+        config["deliveryChannels"] = ", ".join(channels)
+        config["retryPolicy"] = "3 attempts, exponential backoff (1m / 5m / 15m)"
+        config["deadLetterHandling"] = (
+            "Failed deliveries after the final retry route to a dead-letter queue, retained 14 days for manual inspection/replay"
+        )
+
+        reasoning["deliveryChannels"] = (
+            "Inferred directly from the stated functional requirements' mention of these channels."
+            if inferred
+            else "Defaulted to email -- the stated functional requirements didn't call out a specific channel (SMS/push); confirm this matches the actual product need."
+        )
+        reasoning["retryPolicy"] = "A few retries with backoff absorb a transient provider hiccup without hammering the delivery provider over a permanent failure."
+        reasoning["deadLetterHandling"] = (
+            "A notification that fails every retry needs to land somewhere reviewable -- a silent failure here is exactly the kind of gap a user only discovers when someone complains they never got the email."
+        )
+
     else:
         config["genericType"] = "Generic Config"
         reasoning["genericType"] = "Standard deployment config."
@@ -441,6 +556,7 @@ def _run_kubernetes_lld(
         config["namespace"] = "ingress-system"
         reasoning["replicas"] = "Two Ingress-NGINX replicas avoid a single point of failure for all cluster traffic entry."
         reasoning["tlsMode"] = "cert-manager automates certificate issuance and renewal rather than requiring manual cert rotation."
+        config["wafNote"] = "Not natively available -- consider a self-hosted ModSecurity/ingress-level WAF (e.g. OWASP CRS via ModSecurity-nginx) if this workload's scale/compliance profile warrants it."
 
     elif component_type == "lb":
         config["replicas"] = "3" if is_high_scale else "2"
@@ -456,6 +572,7 @@ def _run_kubernetes_lld(
         reasoning["healthCheckPath"] = (
             "Ingress-NGINX health-checks each backend Service's endpoints directly via Kubernetes readiness probes, not a separate synthetic external check."
         )
+        config["wafNote"] = "Not natively available -- consider a self-hosted ModSecurity/ingress-level WAF (e.g. OWASP CRS via ModSecurity-nginx) if this workload's scale/compliance profile warrants it."
 
     elif component_type == "dns":
         config["deploymentMode"] = "ExternalDNS Operator (In-Cluster)"
@@ -580,6 +697,28 @@ def _run_kubernetes_lld(
         config["namespace"] = "data"
         reasoning["deploymentMode"] = "Runs as a scheduled batch job against new PHI records rather than an always-on Deployment, since de-identification doesn't need to be real-time."
 
+    elif component_type == "monitoring":
+        config["namespace"] = "monitoring"
+        config["deploymentMode"] = "kube-prometheus-stack (Helm chart: Prometheus + Grafana + Alertmanager)"
+        config["retentionDays"] = "90" if is_high_security else "15"
+        config["tracingSampleRate"] = "5% (sampled, via OpenTelemetry Collector)" if is_high_scale else "100% (full trace)"
+        reasoning["retentionDays"] = (
+            "Extended in-cluster retention for compliance-sensitive workloads -- consider remote-writing to a long-term store (e.g. Thanos/Mimir) beyond this window."
+            if is_high_security
+            else "Short retention keeps Prometheus' local storage footprint small; extend it or add remote-write if longer history is needed."
+        )
+        reasoning["tracingSampleRate"] = (
+            "Sampling keeps the OpenTelemetry Collector's ingestion volume manageable at high request rates."
+            if is_high_scale
+            else "Full-fidelity tracing is still cheap to store at this request volume."
+        )
+
+    elif component_type == "notification":
+        config["namespace"] = "app"
+        config["deploymentMode"] = "NATS JetStream (Helm chart) + a small notification-dispatch Deployment calling the external delivery provider's API"
+        config["retryPolicy"] = "3 attempts, exponential backoff"
+        reasoning["deploymentMode"] = "JetStream durably queues the fan-out event; the dispatch Deployment is what actually calls the configured external email/SMS/push provider, since nothing in-cluster can deliver to an end-user inbox or phone directly."
+
     else:
         config["genericType"] = "Generic in-cluster workload"
         config["namespace"] = "app"
@@ -616,6 +755,7 @@ def _run_private_cloud_lld(
         config["vmSize"] = "2 vCPU / 4GB RAM"
         config["scalingMode"] = "Manual (no autoscaler)"
         reasoning["scalingMode"] = "No CDN edge network on-premises — traffic capacity is whatever the reverse-proxy VM(s) can handle, sized ahead of time."
+        config["wafNote"] = "Not natively available -- consider a self-hosted ModSecurity/ingress-level WAF (e.g. OWASP CRS via ModSecurity-nginx) if this workload's scale/compliance profile warrants it."
 
     elif component_type == "lb":
         config["vmSize"] = "4 vCPU / 8GB RAM"
@@ -623,6 +763,7 @@ def _run_private_cloud_lld(
         config["healthCheckPath"] = "/health"
         config["haMode"] = "Manual failover (keepalived/VRRP, or a documented manual DNS cutover)"
         reasoning["haMode"] = "On-premises load balancer HA requires a manually configured VRRP/keepalived pair or a documented, tested failover runbook — nothing here does this automatically."
+        config["wafNote"] = "Not natively available -- consider a self-hosted ModSecurity/ingress-level WAF (e.g. OWASP CRS via ModSecurity-nginx) if this workload's scale/compliance profile warrants it."
 
     elif component_type == "dns":
         config["deploymentMode"] = "Manual record management against the existing corporate DNS/BIND server"
@@ -682,6 +823,18 @@ def _run_private_cloud_lld(
     elif component_type == "deidentification":
         config["vmSize"] = "4 vCPU / 8GB RAM"
         config["schedulingMode"] = "Scheduled batch job (cron)"
+
+    elif component_type == "monitoring":
+        config["vmSize"] = "4 vCPU / 8GB RAM"
+        config["deploymentMode"] = "Self-hosted Prometheus + Grafana (or ELK), dedicated VM"
+        config["retentionDays"] = "90" if is_high_security else "15"
+        reasoning["deploymentMode"] = "No managed observability platform on-premises -- log/metric storage capacity must be sized and monitored like any other stateful service here."
+
+    elif component_type == "notification":
+        config["vmCount"] = "1-2 (self-managed message bus)"
+        config["retryPolicy"] = "3 attempts, exponential backoff"
+        config["externalDependencyFlag"] = "An external delivery provider (email/SMS/push gateway) is required -- nothing on-premises can deliver directly to end users"
+        reasoning["externalDependencyFlag"] = "Flagging explicitly: the message bus only handles internal fan-out; actual delivery to a real inbox/phone always exits through an external provider."
 
     else:
         config["genericType"] = "Generic on-premises component"

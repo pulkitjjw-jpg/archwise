@@ -326,6 +326,11 @@ provider "aws" {{
         storage_tf = "# AWS Object Storage Resources\n\n"
         outputs_tf = f"# Terraform Outputs for {project_name}\n\n"
         has_alb = False  # tracks whether an ALB was provisioned so app_sg's ingress rule below can be tightened
+        # Extra `variable` blocks that depend on which components are actually present (e.g. a
+        # notification component's destination-email variable) -- collected during the loop below
+        # and appended to variables.tf afterward, since variables.tf itself is built before the
+        # loop runs.
+        extra_variables_tf = ""
 
         # A load balancer/API gateway is now its own real "lb"-type component (see rules_engine.py)
         # rather than bundled into compute's own service name -- this pre-scan of connections finds
@@ -351,13 +356,19 @@ provider "aws" {{
             c_id = c.get("id")
 
             if c.get("type") == "cdn":
-                storage_tf += _build_comments(lld, ["priceClass", "ipv6Enabled", "originShield"])
+                storage_tf += _build_comments(lld, ["priceClass", "ipv6Enabled", "originShield", "wafEnabled", "wafRuleSet", "rateLimitPerIP"])
                 ipv6_enabled = config.get("ipv6Enabled") or "true"
                 price_class = config.get("priceClass") or "PriceClass_100"
+                cdn_waf_enabled = config.get("wafEnabled") == "true"
+                # Rationale: CloudFront attaches a WAFv2 Web ACL via the distribution's own
+                # web_acl_id attribute -- unlike an ALB, CloudFront is NOT a valid target for
+                # aws_wafv2_web_acl_association (that resource only supports regional resources),
+                # so the association here is this inline attribute, not a separate resource.
+                cdn_web_acl_line = "\n  web_acl_id          = aws_wafv2_web_acl.cdn_waf.arn" if cdn_waf_enabled else ""
                 storage_tf += f"""resource "aws_cloudfront_distribution" "cdn" {{
   enabled             = true
   is_ipv6_enabled     = {ipv6_enabled}
-  price_class         = "{price_class}"
+  price_class         = "{price_class}"{cdn_web_acl_line}
 
   origin {{
     domain_name = "example-origin.s3.amazonaws.com"
@@ -395,6 +406,72 @@ provider "aws" {{
   tags = {{
     Name        = "${{var.project_name}}-cdn"
     Environment = var.environment
+  }}
+}}
+
+"""
+                if cdn_waf_enabled:
+                    rate_limit = _parse_int(config.get("rateLimitPerIP"), "2000")
+                    # Rationale: scope = "CLOUDFRONT" WAFv2 Web ACLs must be created in us-east-1 --
+                    # count = 1 (rather than an unconditional resource) keeps this entirely absent
+                    # from the plan when wafEnabled is "false", instead of an always-declared
+                    # resource with a disabled flag.
+                    storage_tf += f"""resource "aws_wafv2_web_acl" "cdn_waf" {{
+  name  = "${{var.project_name}}-cdn-waf"
+  scope = "CLOUDFRONT"
+
+  default_action {{
+    allow {{}}
+  }}
+
+  rule {{
+    name     = "AWSManagedRulesCommonRuleSet"
+    priority = 1
+
+    override_action {{
+      none {{}}
+    }}
+
+    statement {{
+      managed_rule_group_statement {{
+        name        = "AWSManagedRulesCommonRuleSet"
+        vendor_name = "AWS"
+      }}
+    }}
+
+    visibility_config {{
+      cloudwatch_metrics_enabled = true
+      metric_name                = "cdnWafCommonRuleSet"
+      sampled_requests_enabled   = true
+    }}
+  }}
+
+  rule {{
+    name     = "RateLimitRule"
+    priority = 2
+
+    action {{
+      block {{}}
+    }}
+
+    statement {{
+      rate_based_statement {{
+        limit              = {rate_limit}
+        aggregate_key_type = "IP"
+      }}
+    }}
+
+    visibility_config {{
+      cloudwatch_metrics_enabled = true
+      metric_name                = "cdnWafRateLimit"
+      sampled_requests_enabled   = true
+    }}
+  }}
+
+  visibility_config {{
+    cloudwatch_metrics_enabled = true
+    metric_name                = "${{var.project_name}}-cdn-waf"
+    sampled_requests_enabled   = true
   }}
 }}
 
@@ -564,7 +641,7 @@ resource "aws_lambda_permission" "{target_id}_apigw" {{
                         # compute's ECS service with its target group; the app_sg ingress rule below
                         # is tightened to only trust the ALB.
                         has_alb = True
-                        compute_tf += _build_comments(lld, ["healthCheckPath", "healthCheckIntervalSec", "healthCheckTimeoutSec", "idleTimeoutSec", "listenerProtocol"])
+                        compute_tf += _build_comments(lld, ["healthCheckPath", "healthCheckIntervalSec", "healthCheckTimeoutSec", "idleTimeoutSec", "listenerProtocol", "wafEnabled", "wafRuleSet", "rateLimitPerIP"])
                         compute_tf += f"""resource "aws_security_group" "alb_sg" {{
   name        = "${{var.project_name}}-${{var.environment}}-alb-sg"
   description = "Allows inbound HTTP/HTTPS traffic to the ALB from the internet"
@@ -630,6 +707,76 @@ resource "aws_lb_listener" "app" {{
     type             = "forward"
     target_group_arn = aws_lb_target_group.app.arn
   }}
+}}
+
+"""
+                        if config.get("wafEnabled") == "true":
+                            rate_limit = _parse_int(config.get("rateLimitPerIP"), "2000")
+                            compute_tf += f"""resource "aws_wafv2_web_acl" "lb_waf" {{
+  name  = "${{var.project_name}}-lb-waf"
+  scope = "REGIONAL"
+
+  default_action {{
+    allow {{}}
+  }}
+
+  rule {{
+    name     = "AWSManagedRulesCommonRuleSet"
+    priority = 1
+
+    override_action {{
+      none {{}}
+    }}
+
+    statement {{
+      managed_rule_group_statement {{
+        name        = "AWSManagedRulesCommonRuleSet"
+        vendor_name = "AWS"
+      }}
+    }}
+
+    visibility_config {{
+      cloudwatch_metrics_enabled = true
+      metric_name                = "lbWafCommonRuleSet"
+      sampled_requests_enabled   = true
+    }}
+  }}
+
+  rule {{
+    name     = "RateLimitRule"
+    priority = 2
+
+    action {{
+      block {{}}
+    }}
+
+    statement {{
+      rate_based_statement {{
+        limit              = {rate_limit}
+        aggregate_key_type = "IP"
+      }}
+    }}
+
+    visibility_config {{
+      cloudwatch_metrics_enabled = true
+      metric_name                = "lbWafRateLimit"
+      sampled_requests_enabled   = true
+    }}
+  }}
+
+  visibility_config {{
+    cloudwatch_metrics_enabled = true
+    metric_name                = "${{var.project_name}}-lb-waf"
+    sampled_requests_enabled   = true
+  }}
+}}
+
+# Rationale: an ALB (a REGIONAL-scope resource) is associated with its WAFv2 Web ACL via this
+# explicit association resource -- unlike CloudFront, which attaches its (CLOUDFRONT-scope) Web
+# ACL via the distribution's own web_acl_id attribute instead (see the "cdn" branch above).
+resource "aws_wafv2_web_acl_association" "lb_waf" {{
+  resource_arn = aws_lb.app.arn
+  web_acl_arn  = aws_wafv2_web_acl.lb_waf.arn
 }}
 
 """
@@ -785,6 +932,120 @@ resource "aws_s3_bucket_versioning" "blobs" {{
 }}
 
 """
+            elif c.get("type") == "monitoring":
+                compute_tf += _build_comments(lld, ["logRetentionDays", "tracingSampleRate", "alertingPhilosophy"])
+                retention_days = _parse_int(config.get("logRetentionDays"), "30")
+                compute_tf += f"""resource "aws_cloudwatch_log_group" "{c_id}" {{
+  name              = "/${{var.project_name}}/{c_id}"
+  retention_in_days = {retention_days}
+
+  tags = {{
+    Name        = "${{var.project_name}}-{c_id}"
+    Environment = var.environment
+  }}
+}}
+
+resource "aws_cloudwatch_dashboard" "{c_id}" {{
+  dashboard_name = "${{var.project_name}}-{c_id}-dashboard"
+
+  dashboard_body = jsonencode({{
+    widgets = [
+      {{
+        type   = "log"
+        x      = 0
+        y      = 0
+        width  = 24
+        height = 6
+        properties = {{
+          query  = "SOURCE '${{aws_cloudwatch_log_group.{c_id}.name}}' | fields @timestamp, @message | sort @timestamp desc | limit 100"
+          region = var.aws_region
+          title  = "Recent Application Logs"
+        }}
+      }}
+    ]
+  }})
+}}
+
+"""
+                # Rationale: found via the same connections-scanning pattern the "lb"/"dns"
+                # branches already use to find which compute component they front -- rules_engine.py
+                # always wires "compute" -> "monitoring", so this alarm attaches to whichever real
+                # compute resource that component actually resolved to (Lambda or ECS Fargate).
+                target_compute_id = None
+                for conn in connections:
+                    if conn.get("to") == c_id:
+                        candidate = by_id.get(conn.get("from"))
+                        if candidate and candidate.get("type") == "compute":
+                            target_compute_id = conn.get("from")
+                            break
+
+                if target_compute_id:
+                    target_svc = _get_service_name(by_id.get(target_compute_id, {}), "aws")
+                    if "Lambda" in target_svc:
+                        compute_tf += f"""resource "aws_cloudwatch_metric_alarm" "{c_id}_error_rate" {{
+  alarm_name          = "${{var.project_name}}-{target_compute_id}-error-rate"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "Errors"
+  namespace           = "AWS/Lambda"
+  period              = 300
+  statistic           = "Sum"
+  threshold           = 5
+  alarm_description   = "Alerts when the {target_compute_id} Lambda function's error count exceeds a low, easily-actionable threshold."
+
+  dimensions = {{
+    FunctionName = aws_lambda_function.{target_compute_id}.function_name
+  }}
+}}
+
+"""
+                    else:
+                        compute_tf += f"""resource "aws_cloudwatch_metric_alarm" "{c_id}_high_cpu" {{
+  alarm_name          = "${{var.project_name}}-{target_compute_id}-high-cpu"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/ECS"
+  period              = 300
+  statistic           = "Average"
+  threshold           = 80
+  alarm_description   = "Alerts when {target_compute_id}'s ECS service CPU utilization stays high -- a signal to investigate before it becomes user-visible latency."
+
+  dimensions = {{
+    ClusterName = aws_ecs_cluster.{target_compute_id}_cluster.name
+    ServiceName = aws_ecs_service.{target_compute_id}_service.name
+  }}
+}}
+
+"""
+            elif c.get("type") == "notification":
+                database_tf += _build_comments(lld, ["deliveryChannels", "retryPolicy", "deadLetterHandling"])
+                database_tf += f"""resource "aws_sns_topic" "{c_id}" {{
+  name = "${{var.project_name}}-{c_id}-topic"
+}}
+
+# Rationale: the actual subscriber endpoint is deployment-specific (a real inbox, phone number, or
+# downstream system) -- left as a variable the user fills in rather than a placeholder literal.
+resource "aws_sns_topic_subscription" "{c_id}_email" {{
+  topic_arn = aws_sns_topic.{c_id}.arn
+  protocol  = "email"
+  endpoint  = var.{c_id}_notification_email
+}}
+
+"""
+                outputs_tf += f"""output "{c_id}_topic_arn" {{
+  value       = aws_sns_topic.{c_id}.arn
+  description = "SNS topic ARN for {c_id} -- publish to this from application code to trigger notifications."
+}}
+
+"""
+                extra_variables_tf += f"""
+variable "{c_id}_notification_email" {{
+  type        = string
+  default     = "changeme@example.com"
+  description = "Destination email address for the {c_id} SNS topic subscription -- replace with a real address before deploying."
+}}
+"""
 
         # Add Security groups and IAM placeholders in compute.tf
         # Rationale: once an ALB fronts the compute layer, app_sg should only trust traffic that has
@@ -869,6 +1130,7 @@ resource "aws_iam_role_policy_attachment" "lambda_vpc_access" {
         files["database.tf"] = database_tf
         files["storage.tf"] = storage_tf
         files["outputs.tf"] = outputs_tf
+        files["variables.tf"] += extra_variables_tf
 
     elif provider == "azure":
         # ----------------------------------------------------
@@ -959,6 +1221,9 @@ data "azurerm_client_config" "current" {{}}
         database_tf = "# Azure Database Resources\n\n"
         storage_tf = "# Azure Storage & CDN Resources\n\n"
         outputs_tf = f"# Azure Outputs for {project_name}\n\n"
+        # Extra `variable` blocks that depend on which components are actually present -- see the
+        # identical AWS-branch rationale above; variables.tf itself is built before this loop runs.
+        extra_variables_tf = ""
 
         # Shared/singleton resources emitted at most once even when multiple compute-type
         # components exist (e.g. a main "compute" component plus a "worker" component both mapped
@@ -1167,7 +1432,15 @@ XML
                     else:
                         # "Azure Application Gateway" -- routes to the Container App's own managed
                         # ingress FQDN via an FQDN-based backend pool.
-                        compute_tf += _build_comments(lld, ["healthCheckPath", "healthCheckIntervalSec", "healthCheckTimeoutSec", "idleTimeoutSec", "listenerProtocol"])
+                        compute_tf += _build_comments(lld, ["healthCheckPath", "healthCheckIntervalSec", "healthCheckTimeoutSec", "idleTimeoutSec", "listenerProtocol", "wafEnabled", "wafRuleSet", "rateLimitPerIP"])
+                        appgw_waf_enabled = config.get("wafEnabled") == "true"
+                        # Rationale: WAF policy association requires the WAF_v2 SKU tier -- Standard_v2
+                        # has no firewall_policy_id support. Switching the sku here (rather than always
+                        # provisioning WAF_v2) keeps the non-WAF path on the cheaper Standard_v2 tier.
+                        appgw_sku_name = "WAF_v2" if appgw_waf_enabled else "Standard_v2"
+                        appgw_firewall_policy_line = (
+                            "\n  firewall_policy_id  = azurerm_web_application_firewall_policy.appgw_waf.id" if appgw_waf_enabled else ""
+                        )
                         compute_tf += f"""resource "azurerm_public_ip" "appgw_pip" {{
   name                = "${{var.project_name}}-appgw-pip"
   resource_group_name = azurerm_resource_group.rg.name
@@ -1179,11 +1452,11 @@ XML
 resource "azurerm_application_gateway" "appgw" {{
   name                = "${{var.project_name}}-appgw"
   resource_group_name = azurerm_resource_group.rg.name
-  location            = azurerm_resource_group.rg.location
+  location            = azurerm_resource_group.rg.location{appgw_firewall_policy_line}
 
   sku {{
-    name     = "Standard_v2"
-    tier     = "Standard_v2"
+    name     = "{appgw_sku_name}"
+    tier     = "{appgw_sku_name}"
     capacity = 1
   }}
 
@@ -1232,6 +1505,29 @@ resource "azurerm_application_gateway" "appgw" {{
     priority                   = 100
   }}
 }}
+
+"""
+                        if appgw_waf_enabled:
+                            compute_tf += """resource "azurerm_web_application_firewall_policy" "appgw_waf" {
+  name                = "${var.project_name}-appgw-waf-policy"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
+
+  managed_rules {
+    managed_rule_set {
+      type    = "OWASP"
+      version = "3.2"
+    }
+  }
+
+  policy_settings {
+    enabled                     = true
+    mode                        = "Prevention"
+    request_body_check          = true
+    file_upload_limit_in_mb     = 100
+    max_request_body_size_in_kb = 128
+  }
+}
 
 """
                         outputs_tf += """output "appgw_public_ip" {
@@ -1366,12 +1662,55 @@ resource "azurerm_servicebus_queue" "jobs" {
 }
 
 """
+            elif c.get("type") == "monitoring":
+                compute_tf += _build_comments(lld, ["logRetentionDays", "tracingSampleRate", "alertingPhilosophy"])
+                retention_days = _parse_int(config.get("logRetentionDays"), "30")
+                compute_tf += f"""resource "azurerm_log_analytics_workspace" "{c_id}" {{
+  name                = "${{var.project_name}}-{c_id}-law"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
+  sku                 = "PerGB2018"
+  retention_in_days   = {retention_days}
+}}
+
+resource "azurerm_application_insights" "{c_id}" {{
+  name                = "${{var.project_name}}-{c_id}-appinsights"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
+  workspace_id        = azurerm_log_analytics_workspace.{c_id}.id
+  application_type    = "web"
+}}
+
+"""
+                outputs_tf += f"""output "{c_id}_app_insights_connection_string" {{
+  value       = azurerm_application_insights.{c_id}.connection_string
+  description = "Application Insights connection string -- configure the app's telemetry SDK with this at runtime, never hardcode it."
+  sensitive   = true
+}}
+
+"""
+            elif c.get("type") == "notification":
+                database_tf += _build_comments(lld, ["deliveryChannels", "retryPolicy", "deadLetterHandling"])
+                database_tf += f"""resource "azurerm_servicebus_namespace" "{c_id}_sb" {{
+  name                = "${{var.project_name}}-{c_id}-sb"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  sku                 = "Standard"
+}}
+
+resource "azurerm_servicebus_topic" "{c_id}" {{
+  name         = "${{var.project_name}}-{c_id}-topic"
+  namespace_id = azurerm_servicebus_namespace.{c_id}_sb.id
+}}
+
+"""
 
         files["main.tf"] = main_tf
         files["compute.tf"] = compute_tf
         files["database.tf"] = database_tf
         files["storage.tf"] = storage_tf
         files["outputs.tf"] = outputs_tf
+        files["variables.tf"] += extra_variables_tf
 
     elif provider == "gcp":
         # ----------------------------------------------------
@@ -1605,7 +1944,9 @@ resource "google_api_gateway_gateway" "{target_id}_gateway" {{
                     else:
                         # "Google Cloud Load Balancing (HTTPS)" -- a serverless NEG-backed global
                         # HTTPS load balancer, the real GCP pattern for fronting a public Cloud Run service.
-                        compute_tf += _build_comments(lld, ["healthCheckPath", "healthCheckIntervalSec", "healthCheckTimeoutSec", "idleTimeoutSec", "listenerProtocol"])
+                        compute_tf += _build_comments(lld, ["healthCheckPath", "healthCheckIntervalSec", "healthCheckTimeoutSec", "idleTimeoutSec", "listenerProtocol", "wafEnabled", "wafRuleSet", "rateLimitPerIP"])
+                        lb_waf_enabled = config.get("wafEnabled") == "true"
+                        lb_security_policy_line = "\n  security_policy       = google_compute_security_policy.lb_waf.id" if lb_waf_enabled else ""
                         compute_tf += f"""resource "google_cloud_run_service_iam_member" "{target_id}_public" {{
   location = google_cloud_run_service.{target_id}.location
   project  = google_cloud_run_service.{target_id}.project
@@ -1627,7 +1968,7 @@ resource "google_compute_region_network_endpoint_group" "{target_id}_neg" {{
 resource "google_compute_backend_service" "{target_id}_backend" {{
   name                  = "${{var.gcp_project}}-{target_id}-backend"
   protocol              = "HTTP"
-  load_balancing_scheme = "EXTERNAL_MANAGED"
+  load_balancing_scheme = "EXTERNAL_MANAGED"{lb_security_policy_line}
 
   backend {{
     group = google_compute_region_network_endpoint_group.{target_id}_neg.id
@@ -1654,6 +1995,65 @@ resource "google_compute_global_forwarding_rule" "{target_id}_forwarding_rule" {
   port_range            = "80"
   ip_address            = google_compute_global_address.{target_id}_lb_ip.id
   load_balancing_scheme = "EXTERNAL_MANAGED"
+}}
+
+"""
+                        if lb_waf_enabled:
+                            rate_limit = _parse_int(config.get("rateLimitPerIP"), "2000")
+                            compute_tf += f"""resource "google_compute_security_policy" "lb_waf" {{
+  name = "${{var.gcp_project}}-lb-waf"
+
+  rule {{
+    action   = "deny(403)"
+    priority = 1000
+
+    match {{
+      expr {{
+        expression = "evaluatePreconfiguredExpr('xss-stable') || evaluatePreconfiguredExpr('sqli-stable')"
+      }}
+    }}
+
+    description = "Block common XSS/SQLi patterns using Cloud Armor preconfigured WAF rules."
+  }}
+
+  rule {{
+    action   = "throttle"
+    priority = 2000
+
+    match {{
+      versioned_expr = "SRC_IPS_V1"
+      config {{
+        src_ip_ranges = ["*"]
+      }}
+    }}
+
+    rate_limit_options {{
+      conform_action = "allow"
+      exceed_action  = "deny(429)"
+      enforce_on_key = "IP"
+
+      rate_limit_threshold {{
+        count        = {rate_limit}
+        interval_sec = 300
+      }}
+    }}
+
+    description = "Rate limit per-IP request volume."
+  }}
+
+  rule {{
+    action   = "allow"
+    priority = 2147483647
+
+    match {{
+      versioned_expr = "SRC_IPS_V1"
+      config {{
+        src_ip_ranges = ["*"]
+      }}
+    }}
+
+    description = "Default allow rule."
+  }}
 }}
 
 """
@@ -1773,6 +2173,27 @@ resource "google_pubsub_subscription" "jobs_sub" {
   memory_size_gb = 1
   region         = var.gcp_region
 }
+
+"""
+            elif c.get("type") == "monitoring":
+                compute_tf += _build_comments(lld, ["logRetentionDays", "tracingSampleRate", "alertingPhilosophy"])
+                retention_days = _parse_int(config.get("logRetentionDays"), "30")
+                # Rationale: kept bounded, per the task's own scope guidance -- this configures the
+                # project's default log bucket retention (a real, minimal resource directly wired to
+                # the LLD's logRetentionDays value), not a full alerting-rules platform.
+                compute_tf += f"""resource "google_logging_project_bucket_config" "{c_id}" {{
+  project        = var.gcp_project
+  location       = "global"
+  retention_days = {retention_days}
+  bucket_id      = "_Default"
+}}
+
+"""
+            elif c.get("type") == "notification":
+                database_tf += _build_comments(lld, ["deliveryChannels", "retryPolicy", "deadLetterHandling"])
+                database_tf += f"""resource "google_pubsub_topic" "{c_id}" {{
+  name = "${{var.gcp_project}}-{c_id}-topic"
+}}
 
 """
 

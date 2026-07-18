@@ -353,6 +353,92 @@ class TestAuthRule:
         assert "auth" not in component_ids(result)
 
 
+class TestMonitoringRule:
+    def test_monitoring_always_added_alongside_compute(self):
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements()
+        result = run_rules_engine(req)
+
+        assert "monitoring" in component_ids(result)
+        assert "Rule-Monitoring-Compute" in result["rulesTrace"]
+        monitoring = next(c for c in result["components"] if c["id"] == "monitoring")
+        assert monitoring["type"] == "monitoring"
+        assert {"from": "compute", "to": "monitoring", "protocol": "Telemetry"} in result["connections"]
+
+    def test_monitoring_added_even_for_serverless_compute(self):
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(budget="$50/month", teamMaturity="a junior team, first project")
+        result = run_rules_engine(req)
+
+        assert "monitoring" in component_ids(result)
+
+    def test_only_one_connection_into_monitoring(self):
+        """A cross-cutting observer relationship, not a request-flow hop -- exactly one connection
+        (compute -> monitoring), not one from every other component too."""
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(
+            functional=["Users can upload profile pictures", "Background jobs process uploads"],
+            readWritePattern="read-heavy",
+        )
+        result = run_rules_engine(req)
+
+        monitoring_inbound = [conn for conn in result["connections"] if conn["to"] == "monitoring"]
+        assert monitoring_inbound == [{"from": "compute", "to": "monitoring", "protocol": "Telemetry"}]
+
+
+class TestNotificationRule:
+    def test_triggered_by_notification_keyword(self):
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(functional=["Users receive email notifications when their order ships"])
+        result = run_rules_engine(req)
+
+        assert "notification" in component_ids(result)
+        assert "Rule-Notification-FanOut" in result["rulesTrace"]
+        notification = next(c for c in result["components"] if c["id"] == "notification")
+        assert notification["type"] == "notification"
+        assert {"from": "compute", "to": "notification", "protocol": "HTTPS"} in result["connections"]
+
+    def test_triggered_by_sms_keyword(self):
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(functional=["System sends SMS reminders before appointments"])
+        result = run_rules_engine(req)
+
+        assert "notification" in component_ids(result)
+
+    def test_triggered_by_alert_keyword(self):
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(functional=["Admins get an alert when fraud is suspected"])
+        result = run_rules_engine(req)
+
+        assert "notification" in component_ids(result)
+
+    def test_not_triggered_without_notification_signals(self):
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements()
+        result = run_rules_engine(req)
+
+        assert "notification" not in component_ids(result)
+        assert "Rule-Notification-FanOut" not in result["rulesTrace"]
+
+    def test_notification_distinct_from_queue(self):
+        """Fan-out notification delivery and internal task-buffering queue are different component
+        types that can both fire independently -- the SNS-vs-SQS distinction this rule models."""
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(functional=["Background jobs send email notifications to users"])
+        result = run_rules_engine(req)
+
+        assert "notification" in component_ids(result)
+        assert "queue" in component_ids(result)
+
+
 class TestEveryComponentHasReasoning:
     def test_every_generated_component_carries_a_reasoning_string(self):
         from app.services.rules_engine import run_rules_engine
