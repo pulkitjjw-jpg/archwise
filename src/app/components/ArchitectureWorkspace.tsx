@@ -20,6 +20,7 @@ import {
 import { computeHealthScore, type HealthScore } from "@/lib/health-score";
 import { getDrBadge } from "@/lib/dr-strategy";
 import { getRedundancyBadge, isRedundantConfig } from "@/lib/redundancy";
+import { getAccountStrategyBanner } from "@/lib/account-strategy";
 import { useStagedLoadingMessage } from "@/app/hooks/useStagedLoadingMessage";
 import { useGrowthTrigger } from "@/app/contexts/GrowthTriggerContext";
 import { FIELD_EXPLANATIONS } from "@/lib/field-explanations";
@@ -1525,6 +1526,22 @@ export default function ArchitectureWorkspace({
   const { nodes: bookendNodes, connections: bookendConnections } = buildFlowBookends(diagramComponents, diagramConnections);
   const layoutComponents = [...diagramComponents, ...bookendNodes];
   const layoutConnections = [...diagramConnections, ...bookendConnections];
+
+  // Phase 7 (multi-account environment separation) -- a WHOLE-DIAGRAM notice, not a per-node badge
+  // like DR/redundancy above (see src/lib/account-strategy.ts's own docstring for the full
+  // reasoning). Every component in a single diagram represents one environment's topology,
+  // deployed independently N times into N separate accounts/subscriptions/projects -- there is no
+  // "which components belong to which environment" split in this app's data model, since every
+  // component belongs to every environment's identical topology. That's exactly why this is
+  // rendered as one small banner above the whole diagram below, and deliberately NOT as a React
+  // Flow swimlane/group-node boundary drawn around a subset of components -- there is no subset to
+  // draw a boundary around, so attempting one would be actively misleading (implying some
+  // components are "dev-only" or "prod-only", which isn't true) rather than more accurate, for a
+  // much larger and riskier frontend change than this phase's scope justifies.
+  const computeComponentForAccountBanner = diagramComponents.find((c) => c.type === "compute");
+  const accountStrategyBanner = computeComponentForAccountBanner
+    ? getAccountStrategyBanner(getMappingForProvider(computeComponentForAccountBanner, activeProvider)?.lld?.config)
+    : null;
 
   // Manual drag-to-reposition overrides (Workstream Q) -- local state seeded from whatever the
   // loaded architecture version already has saved, optimistically updated on drag and persisted
@@ -3884,6 +3901,25 @@ export default function ArchitectureWorkspace({
                         </ul>
                       </div>
                     )}
+                  </div>
+                )}
+
+                {/* Multi-Account Deployment banner (Phase 7) -- see the accountStrategyBanner
+                    computation above for why this is a single whole-diagram notice rather than a
+                    per-node badge or a swimlane/group-node boundary. Only rendered for aws/azure/gcp
+                    (getAccountStrategyBanner returns null for kubernetes/private, since neither has
+                    "accountSeparation" set by lld_rules.py -- see that file's Phase 7 scope note) and
+                    only when this architecture's NFR/team-maturity signals actually triggered
+                    multi-account separation; nothing renders here for the vast majority of projects. */}
+                {accountStrategyBanner && (
+                  <div className="mt-4 flex items-start gap-2.5 rounded-2xl border border-accent/25 bg-accent-soft/60 p-3.5 text-xs text-accent-ink shadow-sm animate-fadeIn">
+                    <span className="text-sm">🏢</span>
+                    <div className="leading-relaxed">
+                      <span className="font-extrabold uppercase text-[9px] tracking-wider text-accent-ink block">
+                        Multi-Account Deployment
+                      </span>
+                      {accountStrategyBanner}
+                    </div>
                   </div>
                 )}
 

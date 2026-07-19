@@ -674,6 +674,51 @@ for _name in ("azure_container", "gcp_container"):
     DR_KITCHEN_SINK_STACKS[f"{_name}_warm_standby"] = (_provider, _with_dr_config(_stack, _provider, "warm-standby"), _conns)
 
 
+_ACCOUNT_STRUCTURE_BY_PROVIDER_FOR_TEST = {
+    "aws": "Separate AWS accounts per environment (dev/staging/prod)",
+    "azure": "Separate Azure subscriptions per environment (dev/staging/prod)",
+    "gcp": "Separate GCP projects per environment (dev/staging/prod)",
+}
+_CROSS_ACCOUNT_ACCESS_PATTERN_BY_PROVIDER_FOR_TEST = {
+    "aws": "Cross-account IAM role assumption (sts:AssumeRole) from a central CI/CD identity into a per-account TerraformDeployRole",
+    "azure": "A dedicated service principal per subscription, granted Contributor (or narrower) access, authenticated by the central CI/CD pipeline",
+    "gcp": "A project-scoped service account per GCP project, impersonated by the central CI/CD pipeline via short-lived credentials",
+}
+
+
+def _with_account_config(components: list[dict], provider: str) -> list[dict]:
+    """Returns a deep-enough copy of `components` with every "compute"-type component's LLD config
+    enriched with the exact keys lld_rules.py's Phase 7 multi-account enrichment would actually set
+    -- mirrors _with_dr_config's identical shape above (Phase 5), just targeting "compute" instead
+    of "database"/"dns"/"storage"."""
+    structure = _ACCOUNT_STRUCTURE_BY_PROVIDER_FOR_TEST.get(provider, "Separate cloud accounts per environment (dev/staging/prod)")
+    access_pattern = _CROSS_ACCOUNT_ACCESS_PATTERN_BY_PROVIDER_FOR_TEST.get(provider, "Per-environment identity assumed by a central CI/CD pipeline")
+
+    out = []
+    for c in components:
+        c = {**c, "cloudMappings": {p: dict(m) for p, m in c["cloudMappings"].items()}}
+        mapping = c["cloudMappings"].get(provider)
+        if not mapping or c["type"] != "compute":
+            out.append(c)
+            continue
+        lld = dict(mapping.get("lld") or {"config": {}, "reasoning": {}})
+        config = dict(lld.get("config") or {})
+        config["accountSeparation"] = "true"
+        config["accountStructure"] = structure
+        config["crossAccountAccessPattern"] = access_pattern
+        lld["config"] = config
+        mapping = {**mapping, "lld": lld}
+        c["cloudMappings"] = {**c["cloudMappings"], provider: mapping}
+        out.append(c)
+    return out
+
+
+ACCOUNT_KITCHEN_SINK_STACKS = {}
+for _name in ("aws_container", "azure_container", "gcp_container"):
+    _provider, _stack, _conns = KITCHEN_SINK_STACKS[_name]
+    ACCOUNT_KITCHEN_SINK_STACKS[f"{_name}_multi_account"] = (_provider, _with_account_config(_stack, _provider), _conns)
+
+
 class TestDrStrategyTerraformResources:
     """Regex-level checks that the real DR resources land in the right files -- see
     TestDrStrategyTerraformValidate below for the authoritative real `terraform validate` check."""
@@ -773,6 +818,144 @@ class TestDrStrategyTerraformValidate:
 
         provider, stack, conns = DR_KITCHEN_SINK_STACKS[name]
         files = generate_terraform_code(provider, "DrValidateTest", stack, conns, None)
+        for filename, content in files.items():
+            if not filename.endswith(".tf"):
+                continue
+            (tmp_path / filename).write_text(content)
+
+        init = subprocess.run(
+            ["terraform", "init", "-backend=false", "-input=false"],
+            cwd=tmp_path, capture_output=True, text=True, timeout=120,
+        )
+        assert init.returncode == 0, f"{name}: terraform init failed:\n{init.stdout}\n{init.stderr}"
+
+        validate = subprocess.run(
+            ["terraform", "validate"], cwd=tmp_path, capture_output=True, text=True, timeout=60,
+        )
+        assert validate.returncode == 0, f"{name}: terraform validate failed:\n{validate.stdout}\n{validate.stderr}"
+
+
+class TestAccountStrategyTerraformResources:
+    """Phase 7 (multi-account environment separation): regex-level checks that the new provider
+    config + environments/*.tfvars files land correctly, AND that the default single-account case
+    stays completely untouched -- see TestAccountStrategyTerraformValidate below for the
+    authoritative real `terraform validate` check."""
+
+    def test_aws_single_account_by_default_no_account_resources(self):
+        provider, stack, conns = KITCHEN_SINK_STACKS["aws_container"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        assert "assume_role" not in files["main.tf"]
+        assert 'variable "account_id"' not in files["variables.tf"]
+        assert not any(name.startswith("environments/") for name in files)
+        assert "Multi-Account Deployment" not in files["README.md"]
+
+    def test_aws_multi_account_gets_assume_role_and_account_id_variable(self):
+        provider, stack, conns = ACCOUNT_KITCHEN_SINK_STACKS["aws_container_multi_account"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        assert "assume_role {" in files["main.tf"]
+        assert 'role_arn = "arn:aws:iam::${var.account_id}:role/TerraformDeployRole"' in files["main.tf"]
+        assert 'variable "account_id"' in files["variables.tf"]
+
+    def test_aws_multi_account_gets_environment_tfvars(self):
+        provider, stack, conns = ACCOUNT_KITCHEN_SINK_STACKS["aws_container_multi_account"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        for env in ("dev", "staging", "prod"):
+            key = f"environments/{env}.tfvars"
+            assert key in files
+            assert f'environment = "{env}"' in files[key]
+            assert f"REPLACE_WITH_YOUR_{env.upper()}_ACCOUNT_ID" in files[key]
+            assert "account_id" in files[key]
+
+    def test_azure_single_account_by_default_no_account_resources(self):
+        provider, stack, conns = KITCHEN_SINK_STACKS["azure_container"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        assert "subscription_id" not in files["main.tf"]
+        assert 'variable "subscription_id"' not in files["variables.tf"]
+        assert not any(name.startswith("environments/") for name in files)
+
+    def test_azure_multi_account_gets_subscription_id_variable(self):
+        provider, stack, conns = ACCOUNT_KITCHEN_SINK_STACKS["azure_container_multi_account"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        assert "subscription_id = var.subscription_id" in files["main.tf"]
+        assert 'variable "subscription_id"' in files["variables.tf"]
+        for env in ("dev", "staging", "prod"):
+            key = f"environments/{env}.tfvars"
+            assert key in files
+            assert f"REPLACE_WITH_YOUR_{env.upper()}_SUBSCRIPTION_ID" in files[key]
+
+    def test_gcp_single_account_by_default_no_extra_files(self):
+        provider, stack, conns = KITCHEN_SINK_STACKS["gcp_container"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        assert not any(name.startswith("environments/") for name in files)
+
+    def test_gcp_multi_account_reuses_existing_gcp_project_variable_no_new_provider_resource(self):
+        """GCP's account-equivalent concept (a project) is already fully parameterized via the
+        pre-existing var.gcp_project -- Phase 7 adds no new Terraform resource/variable for GCP,
+        only the environments/*.tfvars files (see terraform_generator.py's own comment on this)."""
+        provider, stack, conns = ACCOUNT_KITCHEN_SINK_STACKS["gcp_container_multi_account"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        # main.tf's provider "google" block is untouched -- still just project/region, no new field.
+        default_provider, default_stack, default_conns = KITCHEN_SINK_STACKS["gcp_container"]
+        default_files = generate_terraform_code(default_provider, "TestProj", default_stack, default_conns, None)
+        assert files["main.tf"] == default_files["main.tf"]
+        assert files["variables.tf"] == default_files["variables.tf"]
+        for env in ("dev", "staging", "prod"):
+            key = f"environments/{env}.tfvars"
+            assert key in files
+            assert "gcp_project" in files[key]
+            assert f"REPLACE_WITH_YOUR_{env.upper()}_GCP_PROJECT_ID" in files[key]
+
+    def test_readme_multi_account_section_present_only_when_active(self):
+        for name in ("aws_container", "azure_container", "gcp_container"):
+            provider, stack, conns = KITCHEN_SINK_STACKS[name]
+            files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+            assert "Multi-Account Deployment" not in files["README.md"], f"{name}: unexpectedly present by default"
+
+        for name in ACCOUNT_KITCHEN_SINK_STACKS:
+            provider, stack, conns = ACCOUNT_KITCHEN_SINK_STACKS[name]
+            files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+            assert "Multi-Account Deployment" in files["README.md"], f"{name}: missing when active"
+
+    def test_private_hld_never_produces_account_resources(self):
+        """private has no LLD path that ever sets accountSeparation (see lld_rules.py's
+        _run_private_cloud_lld -- private has no account concept at all) -- generate_terraform_code's
+        private branch must never emit account-related resources or tfvars, even if a "private"
+        cloudMappings LLD config were (incorrectly) given the same accountSeparation key aws/azure/
+        gcp use, since _has_multi_account_separation/_build_multi_account_section only ever treat
+        that key as meaningful for aws/azure/gcp."""
+        components = [
+            _component(
+                "compute", "compute", "API", {"private": "Bare Metal Server"},
+                {"accountSeparation": "true", "accountStructure": "Separate AWS accounts per environment (dev/staging/prod)"},
+            )
+        ]
+        files = generate_terraform_code("private", "TestProj", components, [], None)
+        assert not any(name.startswith("environments/") for name in files)
+        assert "Multi-Account Deployment" not in files["README.md"]
+
+
+class TestAccountStrategyTerraformValidate:
+    """Authoritative check: real `terraform init && terraform validate` against the generated
+    multi-account output, for aws/azure/gcp -- same terraform-CLI-availability skip as
+    TestTerraformValidate. Note environments/*.tfvars files are NOT written into tmp_path here
+    (matching every other class in this file, which only ever writes `.tf` files) -- `terraform
+    validate` never reads var files at all (that's a `plan`/`apply`-time concern), so this
+    authoritatively validates the new provider-config HCL is syntactically and schema-correct."""
+
+    @staticmethod
+    @pytest.fixture(scope="class")
+    def terraform_available():
+        import shutil
+
+        if shutil.which("terraform") is None:
+            pytest.skip("terraform CLI not installed in this environment")
+
+    @pytest.mark.parametrize("name", list(ACCOUNT_KITCHEN_SINK_STACKS.keys()))
+    def test_generated_account_terraform_validates(self, terraform_available, name, tmp_path):
+        import subprocess
+
+        provider, stack, conns = ACCOUNT_KITCHEN_SINK_STACKS[name]
+        files = generate_terraform_code(provider, "AccountValidateTest", stack, conns, None)
         for filename, content in files.items():
             if not filename.endswith(".tf"):
                 continue

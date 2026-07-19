@@ -1,3 +1,4 @@
+from app.services.nfr_signals import determine_account_strategy as _determine_account_strategy
 from app.services.nfr_signals import determine_dr_strategy as _determine_dr_strategy
 from app.services.nfr_signals import is_budget_tight as _is_budget_tight
 from app.services.nfr_signals import is_high_scale as _is_high_scale
@@ -30,6 +31,22 @@ _WAF_RULE_SET_BY_PROVIDER = {
     "aws": "AWS Managed Rules - Core Rule Set + SQL Injection Rule Set",
     "azure": "Azure-managed Default Rule Set (DRS)",
     "gcp": "Google Cloud Armor - OWASP Top 10 preconfigured rules",
+}
+
+# Phase 7 (multi-account environment separation) -- provider-specific phrasing for the actual
+# "account"-equivalent concept each cloud uses, and the actual cross-account/cross-subscription/
+# cross-project access mechanism a CI/CD pipeline would use to deploy into any one of them. Real
+# service names/mechanisms per cloud, not generic filler -- same precedent as
+# _DR_WARM_STANDBY_DB_REPLICATION above.
+_ACCOUNT_STRUCTURE_BY_PROVIDER = {
+    "aws": "Separate AWS accounts per environment (dev/staging/prod)",
+    "azure": "Separate Azure subscriptions per environment (dev/staging/prod)",
+    "gcp": "Separate GCP projects per environment (dev/staging/prod)",
+}
+_CROSS_ACCOUNT_ACCESS_PATTERN_BY_PROVIDER = {
+    "aws": "Cross-account IAM role assumption (sts:AssumeRole) from a central CI/CD identity into a per-account TerraformDeployRole",
+    "azure": "A dedicated service principal per subscription, granted Contributor (or narrower) access, authenticated by the central CI/CD pipeline",
+    "gcp": "A project-scoped service account per GCP project, impersonated by the central CI/CD pipeline via short-lived credentials",
 }
 
 
@@ -116,6 +133,20 @@ def run_lld_rules_engine(
     # have a natural Kubernetes/on-prem equivalent worth modeling at this scope, matching the WAF
     # precedent (kubernetes/private get a brief note, not full config, for that same reason).
     dr_strategy = _determine_dr_strategy(nfr, industry_context)
+
+    # Multi-account environment separation (Phase 7) -- computed once via the shared nfr_signals
+    # signal, same "recompute locally from nfr/industry_context, don't thread as an extra
+    # parameter" pattern dr_strategy above already uses. Unlike dr_strategy, this signal has no
+    # cost dimension (deploying the SAME config independently into N accounts doesn't change any
+    # single environment's own resource sizing/cost the way standing DR capacity does), so it's
+    # deliberately NOT threaded into cloud_mapping.py or architecture_generation.py the way
+    # dr_strategy is -- it only ever needs to reach the "compute" branch below and, from there,
+    # terraform_generator.py (which reads it back off compute's own LLD config, mirroring
+    # _get_dr_strategy's "read off the database component" pattern for the "compute" component
+    # instead). Only used in the aws/azure/gcp branch that follows -- kubernetes has no native
+    # "cloud account" equivalent (namespaces/clusters are a different concept) and private cloud
+    # has no account concept at all, matching the WAF/DR precedent of skipping both there.
+    account_strategy = _determine_account_strategy(nfr, industry_context)
 
     # Kubernetes and private cloud have fundamentally different LLD shapes (pod resource
     # requests/HPA/namespaces vs. instance sizes; VM sizing vs. managed-service config) -- they
@@ -344,6 +375,42 @@ def run_lld_rules_engine(
                 "Warm-standby keeps a small but real fleet running in the secondary region so failover is a scale-up, "
                 "not a cold start from zero -- the defining difference from pilot-light, which keeps no standing "
                 "compute at all."
+            )
+
+        # Phase 7 (multi-account environment separation) -- modeled as LLD config on this "compute"
+        # component (every real architecture has at least one, same reasoning this file already
+        # applies to "monitoring fires whenever compute exists") rather than a new top-level HLD
+        # concept. Absent entirely for single-account (the default for every pre-Phase-7 call
+        # site), never set to "false" -- matching how dr_strategy's own keys are only added once a
+        # tier is active rather than always-present-with-a-negative-value.
+        if account_strategy == "multi-account":
+            config["accountSeparation"] = "true"
+            config["accountStructure"] = _ACCOUNT_STRUCTURE_BY_PROVIDER.get(
+                provider, "Separate cloud accounts per environment (dev/staging/prod)"
+            )
+            config["crossAccountAccessPattern"] = _CROSS_ACCOUNT_ACCESS_PATTERN_BY_PROVIDER.get(
+                provider, "Per-environment identity assumed by a central CI/CD pipeline"
+            )
+
+            reasoning["accountSeparation"] = (
+                "Separate accounts per environment give each environment its own hard blast-radius boundary -- a "
+                "misconfigured IAM policy, a runaway resource, or a compromised credential in dev/staging cannot "
+                "reach prod at all, not just 'shouldn't.' Billing and IAM are also cleanly separated per "
+                "environment. The real cost is operational: N accounts means N sets of credentials, N places a "
+                "security patch or quota increase has to be applied, and a genuinely more complex CI/CD identity "
+                "story than a single shared account -- worth it once a team is large/mature enough to actually "
+                "operate that overhead, not a default for a small team."
+            )
+            reasoning["accountStructure"] = (
+                "The same reusable Terraform configuration is deployed independently into each environment's own "
+                "account/subscription/project by swapping variables (see environments/*.tfvars) -- this is "
+                "deliberately NOT the same pattern as multi-region DR, which needs two regions live "
+                "simultaneously in one apply/state. Dev/staging/prod are never live in the same state at once."
+            )
+            reasoning["crossAccountAccessPattern"] = (
+                "A single central CI/CD identity that can assume a scoped role/identity into whichever "
+                "environment's account it's deploying to is the standard way to avoid maintaining N separate "
+                "long-lived credential sets, one per environment, in the pipeline itself."
             )
 
     elif component_type == "database":

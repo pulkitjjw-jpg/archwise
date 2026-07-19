@@ -63,6 +63,64 @@ def _get_dr_strategy(components: list[dict], provider: str) -> str:
     return "none"
 
 
+def _has_multi_account_separation(components: list[dict], provider: str) -> bool:
+    """Single source of truth for whether multi-account/subscription/project environment
+    separation (Phase 7) is active for this architecture, read directly off the "compute"
+    component's own LLD config -- the "accountSeparation" key lld_rules.py's Phase 7 enrichment
+    sets there (aws/azure/gcp only, "true" or absent -- never "false", matching _get_dr_strategy's
+    identical "absent means not active" convention above). Mirrors _get_dr_strategy exactly, just
+    reading off "compute" instead of "database" and returning a bool instead of a tier string,
+    since account separation is a single on/off flag, not a multi-tier decision."""
+    for c in components:
+        if c.get("type") != "compute":
+            continue
+        lld = _get_lld(c, provider)
+        if (lld.get("config") or {}).get("accountSeparation") == "true":
+            return True
+    return False
+
+
+# Phase 7: the Terraform variable each provider's account/subscription/project identifier is
+# already parameterized under (aws: the new `account_id` variable added above; azure: the new
+# `subscription_id` variable; gcp: the pre-existing `var.gcp_project`, already used throughout this
+# file for every resource name -- Phase 7 doesn't add a new GCP variable, it reuses that one) plus
+# a human-readable label for the placeholder value in the generated .tfvars content.
+_ACCOUNT_TFVARS_VAR_BY_PROVIDER = {
+    "aws": ("account_id", "ACCOUNT_ID"),
+    "azure": ("subscription_id", "SUBSCRIPTION_ID"),
+    "gcp": ("gcp_project", "GCP_PROJECT_ID"),
+}
+
+
+def _build_environment_tfvars(provider: str) -> dict[str, str]:
+    """Phase 7: example per-environment `.tfvars` content, only generated when multi-account
+    environment separation is actually active (callers gate this on _has_multi_account_separation)
+    -- the default single-account case gets none of these files, keeping that output byte-for-byte
+    identical to pre-Phase-7 generation. The real deploy pattern this supports: the SAME reusable
+    Terraform configuration is applied independently, once per environment, by passing a different
+    `-var-file` each time (`terraform apply -var-file=environments/prod.tfvars`) -- see this file's
+    README section for the accompanying separate-remote-state-per-environment instructions. This is
+    deliberately NOT Phase 5's DR pattern of aliased providers producing parallel resources in one
+    state; dev/staging/prod are never live in the same apply/state together.
+
+    Placeholder values are honestly marked (matching this file's existing
+    REPLACE_WITH_YOUR_ECR_MODEL_IMAGE_URI precedent in the ml branch) rather than a fake-looking
+    real-ish value someone might accidentally apply against."""
+    var_info = _ACCOUNT_TFVARS_VAR_BY_PROVIDER.get(provider)
+    if not var_info:
+        return {}
+    var_name, placeholder_label = var_info
+
+    files: dict[str, str] = {}
+    for env in ("dev", "staging", "prod"):
+        files[f"environments/{env}.tfvars"] = (
+            f"# Example tfvars for the {env} environment -- see README.md's \"Multi-Account Deployment\" section.\n"
+            f'environment = "{env}"\n'
+            f'{var_name}  = "REPLACE_WITH_YOUR_{env.upper()}_{placeholder_label}"\n'
+        )
+    return files
+
+
 def _build_compliance_section(industry_context: dict | None, components: list[dict]) -> str:
     if not industry_context or industry_context.get("industry") == "none":
         return ""
@@ -196,6 +254,56 @@ documented placeholder. Being honest about what this tool can and can't automate
 """
 
 
+_ACCOUNT_TFVARS_VAR_LABEL_BY_PROVIDER = {
+    "aws": ("AWS account", "account_id", "-var-file=environments/prod.tfvars"),
+    "azure": ("Azure subscription", "subscription_id", "-var-file=environments/prod.tfvars"),
+    "gcp": ("GCP project", "gcp_project", "-var-file=environments/prod.tfvars"),
+}
+
+
+def _build_multi_account_section(provider: str, multi_account: bool) -> str:
+    """README section documenting the real, honest deploy instructions for multi-account
+    environment separation (Phase 7) -- only rendered when accountSeparation is actually active on
+    this architecture's "compute" component AND the provider models a cloud-account concept
+    (aws/azure/gcp; empty string otherwise, matching _build_compliance_section/
+    _build_manual_provisioning_section's identical "return empty string when not applicable"
+    convention). This is a genuinely manual step this generator cannot automate for you --
+    provisioning the destination accounts/subscriptions/projects themselves, and configuring a
+    real separate remote-state backend per environment, both require credentials/access this tool
+    was never given -- matching Phase 6's "honest gap, documented manual step" precedent (see the
+    Azure ML README note there)."""
+    if not multi_account or provider not in _ACCOUNT_TFVARS_VAR_LABEL_BY_PROVIDER:
+        return ""
+
+    account_noun, var_name, example_flag = _ACCOUNT_TFVARS_VAR_LABEL_BY_PROVIDER[provider]
+
+    return f"""
+---
+
+> [!IMPORTANT]
+> ## Multi-Account Deployment
+
+This architecture is modeled as deployed **independently, one environment at a time**, into a
+separate {account_noun} per environment (dev/staging/prod) -- for blast-radius isolation and
+separate billing/IAM boundaries. This is NOT the same shape as this generator's multi-region
+disaster-recovery pattern (which runs two regions live simultaneously in one `apply`/state) --
+dev/staging/prod are never live in the same state together.
+
+**What this Terraform does for you:**
+*   The same reusable configuration in this export targets whichever {account_noun.lower()} `var.{var_name}` is set to.
+*   Example per-environment variable files are included under `environments/` (`dev.tfvars`, `staging.tfvars`, `prod.tfvars`) -- each sets `environment` and a placeholder `{var_name}` you must replace with the real identifier for that {account_noun.lower()}.
+
+**What you are still responsible for (this tool cannot automate it):**
+*   **Provisioning the destination {account_noun.lower()}s themselves** (this is genuinely out of scope for this phase -- see this project's own scope note on why full AWS-Organizations/Landing-Zone account provisioning wasn't built).
+*   **A separate remote-state backend (or at minimum a distinct state key) per environment** -- applying `environments/prod.tfvars` against the state file `environments/dev.tfvars` last wrote to would attempt to reconcile dev's resources against prod's account, which is not what you want. Configure a distinct `key`/prefix per environment in the backend block (see "State Management Configuration" below), and always pass the matching var file:
+    ```bash
+    terraform init -backend-config="key=envs/dev/terraform.tfstate"
+    terraform apply {example_flag}
+    ```
+*   Setting up whatever cross-account/cross-subscription/cross-project identity this config's provider block expects (see `main.tf`) so your CI/CD pipeline can actually authenticate into each environment's {account_noun.lower()}.
+"""
+
+
 def generate_terraform_code(
     provider: str,
     project_name: str,
@@ -321,6 +429,23 @@ resource "aws_db_subnet_group" "db_subnets" {
 }
 """
 
+        # Phase 7 (multi-account environment separation): read directly off the "compute"
+        # component's own LLD config -- "false" for every generic architecture, byte-for-byte
+        # unaffected. Computed BEFORE main_tf is assembled (unlike dr_strategy below, which only
+        # needs to APPEND a second provider block) because this changes the content of the single
+        # default `provider "aws" {}` block itself -- Terraform doesn't allow declaring that block
+        # twice, aliased or not.
+        multi_account = _has_multi_account_separation(components, "aws")
+        aws_assume_role_block = (
+            """
+
+  assume_role {
+    role_arn = "arn:aws:iam::${var.account_id}:role/TerraformDeployRole"
+  }"""
+            if multi_account
+            else ""
+        )
+
         main_tf = f"""# Main Provider Configuration for {project_name}
 
 terraform {{
@@ -333,7 +458,7 @@ terraform {{
 }}
 
 provider "aws" {{
-  region = var.aws_region
+  region = var.aws_region{aws_assume_role_block}
 }}
 """
 
@@ -347,6 +472,14 @@ provider "aws" {{
         # and appended to variables.tf afterward, since variables.tf itself is built before the
         # loop runs.
         extra_variables_tf = ""
+        if multi_account:
+            extra_variables_tf += """
+variable "account_id" {
+  type        = string
+  default     = ""
+  description = "AWS account ID that owns the TerraformDeployRole this config assumes -- the same reusable configuration targets whichever environment's account this is set to (see environments/*.tfvars), rather than duplicating resources per account in one state."
+}
+"""
 
         # Phase 5 (multi-region DR): read directly off the database component's own LLD config --
         # "none" for every generic architecture, byte-for-byte unaffected. When a DR tier is
@@ -1608,6 +1741,8 @@ resource "aws_route53_record" "secondary" {{
         files["storage.tf"] = storage_tf
         files["outputs.tf"] = outputs_tf
         files["variables.tf"] += extra_variables_tf
+        if multi_account:
+            files.update(_build_environment_tfvars("aws"))
 
     elif provider == "azure":
         # ----------------------------------------------------
@@ -1672,6 +1807,13 @@ resource "azurerm_subnet" "appgw_subnet" {
 }
 """
 
+        # Phase 7 (multi-account environment separation): read directly off the "compute"
+        # component's own LLD config -- computed before main_tf is assembled for the same reason
+        # as the AWS branch above (this changes the content of the single default
+        # `provider "azurerm" {}` block itself, not something that can be appended after the fact).
+        multi_account = _has_multi_account_separation(components, "azure")
+        azure_subscription_id_line = "\n  subscription_id = var.subscription_id" if multi_account else ""
+
         main_tf = f"""# Main Provider Configuration for {project_name}
 
 terraform {{
@@ -1688,7 +1830,7 @@ terraform {{
 }}
 
 provider "azurerm" {{
-  features {{}}
+  features {{}}{azure_subscription_id_line}
 }}
 
 data "azurerm_client_config" "current" {{}}
@@ -1701,6 +1843,14 @@ data "azurerm_client_config" "current" {{}}
         # Extra `variable` blocks that depend on which components are actually present -- see the
         # identical AWS-branch rationale above; variables.tf itself is built before this loop runs.
         extra_variables_tf = ""
+        if multi_account:
+            extra_variables_tf += """
+variable "subscription_id" {
+  type        = string
+  default     = ""
+  description = "Azure subscription ID this configuration deploys into -- the same reusable configuration targets whichever environment's subscription this is set to (see environments/*.tfvars), rather than duplicating resources per subscription in one state."
+}
+"""
 
         # Shared/singleton resources emitted at most once even when multiple compute-type
         # components exist (e.g. a main "compute" component plus a "worker" component both mapped
@@ -2407,6 +2557,8 @@ resource "azurerm_traffic_manager_external_endpoint" "secondary" {{
         files["storage.tf"] = storage_tf
         files["outputs.tf"] = outputs_tf
         files["variables.tf"] += extra_variables_tf
+        if multi_account:
+            files.update(_build_environment_tfvars("azure"))
 
     elif provider == "gcp":
         # ----------------------------------------------------
@@ -2491,6 +2643,15 @@ provider "google-beta" {{
         # Phase 5 (multi-region DR): computed up front (needed inside the loop below for the
         # storage bucket's location). "none" for every generic architecture.
         dr_strategy = _get_dr_strategy(components, "gcp")
+
+        # Phase 7 (multi-account environment separation): unlike aws/azure, GCP needs NO new
+        # provider resource here -- `var.gcp_project` is already parameterized and used throughout
+        # this branch for every resource name (see the `provider "google" {}` block above and every
+        # `${var.gcp_project}-...` resource name below). A GCP "project" already IS this cloud's
+        # account-equivalent isolation boundary, so swapping `var.gcp_project` per environment (see
+        # environments/*.tfvars below, generated when this flag is set) already achieves the same
+        # outcome the aws/azure branches need new `account_id`/`subscription_id` variables for.
+        multi_account = _has_multi_account_separation(components, "gcp")
 
         for c in components:
             lld = _get_lld(c, "gcp")
@@ -3039,6 +3200,8 @@ resource "google_sql_database_instance" "db_replica" {
         files["database.tf"] = database_tf
         files["storage.tf"] = storage_tf
         files["outputs.tf"] = outputs_tf
+        if multi_account:
+            files.update(_build_environment_tfvars("gcp"))
 
     elif provider == "private":
         # ----------------------------------------------------
@@ -3149,6 +3312,11 @@ variable "datacenter_name" {{
     # README.MD (Consistent across providers)
     compliance_section = _build_compliance_section(industry_context, components)
     manual_section = _build_manual_provisioning_section(provider, components)
+    # Phase 7: recomputed independently of the aws/azure/gcp/private branches above (each of which
+    # scopes its own `multi_account` local to its own if/elif block) since the README is built once
+    # here regardless of which branch ran -- cheap, pure, and reads the same already-resolved LLD
+    # config _has_multi_account_separation always has, so recomputing costs nothing.
+    multi_account_section = _build_multi_account_section(provider, _has_multi_account_separation(components, provider))
 
     files["README.md"] = f"""# Terraform Configurations for {project_name}
 
@@ -3170,7 +3338,7 @@ This Terraform configuration script was automatically synthesized by the **AI Cl
 > This configuration represents a starting point. It has been derived automatically based on design rules and client brainstorming.
 > You MUST review instance profiles, security group configurations, IAM roles, and pricing implications before running `terraform apply` in any real staging or production environments.
 {compliance_section}
-{manual_section}
+{manual_section}{multi_account_section}
 ---
 
 ## State Management Configuration

@@ -5,7 +5,13 @@ test files are collected)."""
 
 import pytest
 
-from app.services.nfr_signals import determine_dr_strategy, is_budget_tight, is_high_scale, parse_budget_amount
+from app.services.nfr_signals import (
+    determine_account_strategy,
+    determine_dr_strategy,
+    is_budget_tight,
+    is_high_scale,
+    parse_budget_amount,
+)
 
 
 def make_nfr(
@@ -189,3 +195,65 @@ class TestDetermineDrStrategy:
     def test_none_industry_dict_without_high_scale_or_security_stays_none(self):
         nfr = make_nfr(expectedScale="500 users", compliance="none")
         assert determine_dr_strategy(nfr, {"industry": "none"}) == "none"
+
+
+class TestDetermineAccountStrategy:
+    """Phase 7: "multi-account" if explicit_signal alone, OR (team_signal AND is_high_scale)
+    together -- otherwise "single-account". Mirrors determine_dr_strategy's own "one strong
+    explicit signal on its own, or two moderate signals compounding" decision shape."""
+
+    def test_default_generic_project_stays_single_account(self):
+        nfr = make_nfr()
+        assert determine_account_strategy(nfr, NONE_INDUSTRY) == "single-account"
+
+    @pytest.mark.parametrize(
+        "phrase",
+        [
+            "we need separate accounts",
+            "separate AWS accounts per environment",
+            "multi-account setup required",
+            "must support multiple AWS accounts",
+            "multiple accounts for dev and prod",
+            "account isolation between environments",
+            "already using AWS Organizations",
+            "wants separate environments for dev/staging/prod",
+        ],
+    )
+    def test_explicit_phrase_alone_gets_multi_account_even_at_low_scale_small_team(self, phrase):
+        nfr = make_nfr(expectedScale="500 users", teamMaturity="solo developer", compliance=phrase)
+        assert determine_account_strategy(nfr, NONE_INDUSTRY) == "multi-account"
+
+    def test_explicit_phrase_can_appear_in_any_nfr_field_not_just_compliance(self):
+        nfr = make_nfr(expectedScale="500 users", dataNature="requires account isolation between tenants' environments")
+        assert determine_account_strategy(nfr, NONE_INDUSTRY) == "multi-account"
+
+    def test_team_and_scale_together_get_multi_account(self):
+        nfr = make_nfr(teamMaturity="enterprise platform team", expectedScale="high scale, 1 million users")
+        assert determine_account_strategy(nfr, NONE_INDUSTRY) == "multi-account"
+
+    @pytest.mark.parametrize(
+        "team_phrase",
+        ["large organization", "large org with many engineers", "a mature engineering org", "multiple teams own this"],
+    )
+    def test_various_team_maturity_phrases_compound_with_high_scale(self, team_phrase):
+        nfr = make_nfr(teamMaturity=team_phrase, expectedScale="100,000 daily active users")
+        assert determine_account_strategy(nfr, NONE_INDUSTRY) == "multi-account"
+
+    def test_team_maturity_alone_without_high_scale_stays_single_account(self):
+        nfr = make_nfr(teamMaturity="enterprise platform team", expectedScale="500 users")
+        assert determine_account_strategy(nfr, NONE_INDUSTRY) == "single-account"
+
+    def test_high_scale_alone_without_team_signal_stays_single_account(self):
+        nfr = make_nfr(teamMaturity="solo developer", expectedScale="high scale, 1 million users")
+        assert determine_account_strategy(nfr, NONE_INDUSTRY) == "single-account"
+
+    def test_industry_context_does_not_influence_the_decision(self):
+        # Deliberately unlike determine_dr_strategy: a regulated industry alone doesn't imply a
+        # team is staffed/ready to operate multiple cloud accounts.
+        nfr = make_nfr(teamMaturity="senior engineers", expectedScale="1,000 users")
+        assert determine_account_strategy(nfr, FINTECH_INDUSTRY) == "single-account"
+        assert determine_account_strategy(nfr, HEALTHTECH_INDUSTRY) == "single-account"
+
+    def test_industry_context_none_object_treated_same_as_missing(self):
+        nfr = make_nfr()
+        assert determine_account_strategy(nfr, None) == "single-account"

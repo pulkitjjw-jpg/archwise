@@ -178,3 +178,89 @@ def determine_dr_strategy(nfr: dict, industry_context: dict | None) -> str:
     if high_scale or is_regulated:
         return "pilot-light"
     return "none"
+
+
+# Free-text phrases that, if present anywhere in the NFR data, are treated as an explicit request
+# for per-environment cloud-account isolation -- the same lowercased-substring convention
+# _EXPLICIT_DR_PHRASES already uses. Deliberately excludes a bare "account" (far too common a word
+# in unrelated contexts, e.g. "user account", "admin account") -- every phrase here is specific
+# enough to actually mean "separate cloud accounts/subscriptions/projects per environment," not
+# just "this product has user accounts."
+_EXPLICIT_ACCOUNT_PHRASES = (
+    "separate accounts",
+    "separate aws accounts",
+    "multi-account",
+    "multiple aws accounts",
+    "multiple accounts",
+    "account isolation",
+    "aws organizations",
+    "separate environments",
+)
+
+# Free-text phrases in `teamMaturity` that indicate a team large/mature enough to actually operate
+# multiple cloud accounts/subscriptions/projects well -- running N accounts multiplies IAM,
+# billing, and CI/CD-identity surface area in a way a solo/small team has neither the headcount nor
+# the process maturity to manage. Word-based substring checks on free text, deliberately not the
+# kind of bare-digit-substring check nfr_signals.py's own module docstring already fixed elsewhere
+# (is_budget_tight) -- there's no numeric field here to misparse, so a substring check is fine as
+# long as the phrases themselves are specific words/phrases, not digits.
+_MULTI_ACCOUNT_TEAM_PHRASES = (
+    "enterprise",
+    "platform team",
+    "multiple teams",
+    "large organization",
+    "large org",
+    "mature",
+)
+
+
+def determine_account_strategy(nfr: dict, industry_context: dict | None) -> str:
+    """Real judgment call, not a hardcoded default: decides whether this architecture should be
+    modeled as deployed into a SINGLE shared cloud account, or deployed independently N times (once
+    per environment -- dev/staging/prod) into SEPARATE cloud accounts/subscriptions/projects
+    (Phase 7 -- deliberately the narrower "environment separation" pattern only, NOT a full AWS-
+    Organizations/Landing-Zone governance model with a management account, security/log-archive
+    account, and SCPs -- see this phase's own scope note for why that heavier pattern was
+    explicitly not chosen here).
+
+    The two inputs that matter:
+      - explicit_signal: the NFR data explicitly says so via _EXPLICIT_ACCOUNT_PHRASES -- a stated
+        requirement overrides the heuristic entirely, the same way determine_dr_strategy's own
+        _EXPLICIT_DR_PHRASES check does.
+      - team_signal AND is_high_scale (via the shared nfr_signals.is_high_scale signal), compounding
+        together: a team assessed as large/mature enough to operate multiple accounts (see
+        _MULTI_ACCOUNT_TEAM_PHRASES) is a necessary but not sufficient signal on its own -- a small
+        team loosely described as "mature" running a genuinely low-scale project doesn't need the
+        real operational overhead of managing N accounts, and a high-scale project with no team-
+        maturity signal at all doesn't have the demonstrated headcount/process to operate them
+        well either. Both signals compounding is what justifies paying that overhead, mirroring
+        determine_dr_strategy's own "two moderate signals compounding" shape.
+
+    Decision:
+      - "multi-account": explicit_signal alone, OR (team_signal AND is_high_scale) together.
+      - "single-account": otherwise -- a generic project's architecture is completely unaffected,
+        matching every prior phase's "additive, never changes generic-project behavior" precedent.
+
+    `nfr` is the `nonFunctional` sub-dict (same shape every other function in this module takes),
+    not the full requirements dict -- explicit-phrase matching scans every string value in `nfr`,
+    since a multi-account requirement could plausibly be phrased under any free-text field, not
+    just `teamMaturity`.
+
+    `industry_context` is accepted (and required by this function's signature) purely for
+    parameter symmetry with determine_dr_strategy and this module's other NFR-signal functions --
+    it is NOT used in the decision itself. Unlike DR posture, account separation is an
+    organizational/operational-maturity question, not a compliance one: a regulated industry alone
+    doesn't imply a team is staffed and ready to actually operate multiple cloud accounts, so
+    folding fintech/healthtech into this heuristic the way determine_dr_strategy folds it into
+    is_regulated would be a false signal here."""
+    nfr_text = " ".join(str(v) for v in nfr.values() if isinstance(v, str)).lower()
+    explicit_signal = any(phrase in nfr_text for phrase in _EXPLICIT_ACCOUNT_PHRASES)
+
+    team_lower = (nfr.get("teamMaturity") or "").lower()
+    team_signal = any(phrase in team_lower for phrase in _MULTI_ACCOUNT_TEAM_PHRASES)
+
+    high_scale = is_high_scale(nfr.get("expectedScale", ""))
+
+    if explicit_signal or (team_signal and high_scale):
+        return "multi-account"
+    return "single-account"

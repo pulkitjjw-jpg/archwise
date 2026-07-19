@@ -335,6 +335,76 @@ class TestDrStrategyLldConfig:
         assert "drStrategy" not in private_result["config"]
 
 
+class TestAccountStrategyLldConfig:
+    """Phase 7: "compute" LLD enrichment when multi-account environment separation is active,
+    computed internally via nfr_signals.determine_account_strategy from the same requirements/
+    industry_context already passed to run_lld_rules_engine -- no account_strategy parameter of
+    its own, mirroring TestDrStrategyLldConfig's identical pattern above for dr_strategy."""
+
+    def _multi_account_req(self):
+        # team_signal AND is_high_scale -> "multi-account" (see TestDetermineAccountStrategy in
+        # test_nfr_signals.py).
+        return make_requirements(expectedScale="high scale, 1 million users", teamMaturity="a mature enterprise platform team")
+
+    def test_generic_project_compute_gets_no_account_keys(self):
+        req = make_requirements()
+        result = run_lld_rules_engine("aws", "compute", "compute", req)
+        assert "accountSeparation" not in result["config"]
+        assert "accountStructure" not in result["config"]
+        assert "crossAccountAccessPattern" not in result["config"]
+
+    def test_multi_account_compute_gets_account_separation_keys_on_aws(self):
+        req = self._multi_account_req()
+        result = run_lld_rules_engine("aws", "compute", "compute", req)
+        assert result["config"]["accountSeparation"] == "true"
+        assert "Separate AWS accounts" in result["config"]["accountStructure"]
+        assert "AssumeRole" in result["config"]["crossAccountAccessPattern"]
+        assert result["reasoning"]["accountSeparation"]
+        assert result["reasoning"]["accountStructure"]
+        assert result["reasoning"]["crossAccountAccessPattern"]
+
+    def test_multi_account_compute_account_structure_is_provider_specific(self):
+        req = self._multi_account_req()
+        azure_result = run_lld_rules_engine("azure", "compute", "compute", req)
+        gcp_result = run_lld_rules_engine("gcp", "compute", "compute", req)
+        assert "Separate Azure subscriptions" in azure_result["config"]["accountStructure"]
+        assert "service principal" in azure_result["config"]["crossAccountAccessPattern"]
+        assert "Separate GCP projects" in gcp_result["config"]["accountStructure"]
+        assert "service account" in gcp_result["config"]["crossAccountAccessPattern"]
+
+    def test_single_account_never_sets_account_separation_to_false(self):
+        """Matches the DR enrichment convention: absent entirely for the non-active case, never
+        an explicit "false" value."""
+        req = make_requirements()
+        result = run_lld_rules_engine("aws", "compute", "compute", req)
+        assert result["config"].get("accountSeparation") is None
+
+    def test_kubernetes_and_private_are_unaffected_by_account_strategy(self):
+        """Multi-account enrichment is scoped to the aws/azure/gcp branch only -- kubernetes has a
+        different native concept (namespaces/clusters) and private cloud has no account concept at
+        all, matching the WAF/DR precedent of skipping both here."""
+        req = self._multi_account_req()
+        k8s_result = run_lld_rules_engine("kubernetes", "compute", "compute", req)
+        private_result = run_lld_rules_engine("private", "compute", "compute", req)
+        assert "accountSeparation" not in k8s_result["config"]
+        assert "accountSeparation" not in private_result["config"]
+
+    def test_team_maturity_alone_does_not_trigger_multi_account(self):
+        req = make_requirements(teamMaturity="a mature enterprise platform team", expectedScale="500 users")
+        result = run_lld_rules_engine("aws", "compute", "compute", req)
+        assert "accountSeparation" not in result["config"]
+
+    def test_high_scale_alone_does_not_trigger_multi_account(self):
+        req = make_requirements(expectedScale="high scale, 1 million users", teamMaturity="solo developer")
+        result = run_lld_rules_engine("aws", "compute", "compute", req)
+        assert "accountSeparation" not in result["config"]
+
+    def test_explicit_phrase_triggers_multi_account_even_at_low_scale_small_team(self):
+        req = make_requirements(expectedScale="500 users", teamMaturity="solo developer", compliance="needs separate AWS accounts per environment")
+        result = run_lld_rules_engine("aws", "compute", "compute", req)
+        assert result["config"]["accountSeparation"] == "true"
+
+
 class TestWafLldConfig:
     """WAF is LLD-only (no new component type) -- config keys land on the EXISTING "lb"/"cdn"
     branches for aws/azure/gcp, triggered by is_high_scale OR is_high_security OR a
