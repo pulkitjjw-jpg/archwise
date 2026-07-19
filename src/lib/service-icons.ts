@@ -40,6 +40,10 @@ const SERVICE_ICON_RULES: IconMatch[] = [
   { keywords: ["cloudwatch"], icon: "mdi:monitor-dashboard" },
   { keywords: ["sns", "pinpoint"], icon: "mdi:bell-ring-outline" },
   { keywords: ["waf", "web application firewall", "cloud armor"], icon: "mdi:shield-check-outline" },
+  { keywords: ["opensearch"], icon: "logos:elasticsearch" },
+  { keywords: ["redshift"], icon: "logos:aws-redshift" },
+  { keywords: ["sagemaker"], icon: "mdi:brain" },
+  { keywords: ["step functions"], icon: "mdi:sitemap-outline" },
 
   // --- Azure --- (package only ships the generic Azure mark, no per-service icons)
   { keywords: ["cosmos db"], icon: "logos:microsoft-azure" },
@@ -50,10 +54,21 @@ const SERVICE_ICON_RULES: IconMatch[] = [
   { keywords: ["cloud functions"], icon: "logos:google-cloud-functions" },
   { keywords: ["cloud run"], icon: "logos:google-cloud-run" },
   { keywords: ["gke", "kubernetes engine"], icon: "logos:google-cloud" },
+  { keywords: ["bigquery"], icon: "logos:google-cloud" },
+  { keywords: ["vertex ai"], icon: "mdi:brain" },
+  { keywords: ["cloud workflows"], icon: "mdi:sitemap-outline" },
   { keywords: ["firestore", "bigtable", "spanner", "cloud sql", "pub/sub", "memorystore", "cloud tasks", "cloud storage", "filestore", "dlp api", "healthcare api", "cloud logging", "google cloud"], icon: "logos:google-cloud" },
   { keywords: ["firebase"], icon: "logos:firebase" },
 
   // --- Cross-cloud / generic technology (used by AWS, Azure, GCP, and self-hosted alike) ---
+  { keywords: ["elasticsearch"], icon: "logos:elasticsearch" },
+  { keywords: ["clickhouse"], icon: "logos:clickhouse" },
+  { keywords: ["triton", "inference server"], icon: "mdi:brain" },
+  { keywords: ["kserve", "seldon"], icon: "mdi:brain" },
+  { keywords: ["airflow", "composer"], icon: "logos:airflow-icon" },
+  { keywords: ["temporal"], icon: "mdi:sitemap-outline" },
+  { keywords: ["argo workflows"], icon: "logos:argo-icon" },
+  { keywords: ["logic apps", "workflow orchestrat"], icon: "mdi:sitemap-outline" },
   { keywords: ["postgres"], icon: "logos:postgresql" },
   { keywords: ["mongodb", "documentdb (mongodb"], icon: "logos:mongodb" },
   { keywords: ["redis"], icon: "logos:redis" },
@@ -94,6 +109,10 @@ const TYPE_FALLBACK_ICON: Record<string, string> = {
   "audit-log": "mdi:clipboard-text-clock-outline",
   "phi-vault": "mdi:hospital-box-outline",
   deidentification: "mdi:eye-off-outline",
+  search: "mdi:magnify",
+  analytics: "mdi:chart-box-outline",
+  ml: "mdi:brain",
+  workflow: "mdi:sitemap-outline",
 };
 
 export function resolveServiceIcon(serviceName: string | undefined, componentType: string): string {

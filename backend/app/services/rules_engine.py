@@ -1,4 +1,5 @@
 from app.services.nfr_signals import is_budget_tight
+from app.services.nfr_signals import is_high_scale as _is_high_scale
 
 
 def _connection(from_: str, to: str, protocol: str | None = None) -> dict:
@@ -31,6 +32,10 @@ def run_rules_engine(requirements: dict) -> dict:
 
     nfr = requirements["nonFunctional"]
     func_str = " ".join(requirements["functional"]).lower()
+    # Phase 6: shared is_high_scale signal (same source of truth cloud_mapping.py/lld_rules.py use)
+    # -- only the "analytics" rule below needs it, since a data warehouse is only justified once
+    # scale genuinely calls for one, not just because the functional text mentions "reporting".
+    is_high_scale = _is_high_scale(nfr["expectedScale"])
 
     # 1. Content Delivery Network (CDN)
     needs_cdn = (
@@ -368,5 +373,137 @@ def run_rules_engine(requirements: dict) -> dict:
         )
         rules_trace.append("Rule-Notification-FanOut")
         connections.append(_connection("compute", "notification", "HTTPS"))
+
+    # 10. Search (Phase 6) -- full-text/faceted search, distinct from the "database" component
+    # (structured/transactional storage): this is an inverted-index search layer over a product
+    # catalog, log stream, or document set. Plain lowercased-substring matching on functional-
+    # requirement text, the same convention already used for needs_auth/needs_notification above --
+    # not the numeric NFR substring-matching bug Phase 1 fixed, since this is a word-based check on
+    # free-text requirements, not a budget/scale figure.
+    needs_search = (
+        "search" in func_str
+        or "full-text search" in func_str
+        or "filter and search" in func_str
+        or "search results" in func_str
+        or "faceted search" in func_str
+    )
+
+    if needs_search:
+        components.append(
+            {
+                "id": "search",
+                "name": "Search Service",
+                "type": "search",
+                "description": "Provides full-text/faceted search over the product's content -- an inverted-index lookup, not the transactional/structured store the \"database\" component already covers.",
+                "rulesFired": [
+                    "Rule-Search-FullText: Functional requirements mention search/full-text search/filter-and-search/search results/faceted search."
+                ],
+                "reasoning": "Suggested by the Search rule: full-text/faceted lookup over indexed content is a fundamentally different access pattern than the transactional queries the primary database serves, so it's modeled as its own component rather than assumed to run on the database directly.",
+            }
+        )
+        rules_trace.append("Rule-Search-FullText")
+        connections.append(_connection("compute", "search", "HTTPS"))
+
+    # 11. Analytics / Data Warehouse (Phase 6) -- the OLAP layer (Redshift/Synapse/BigQuery), NOT a
+    # BI/dashboard tool (no "dashboard" component type exists in this app, and this phase isn't
+    # adding one -- see the task's own scope note). Gated on is_high_scale in addition to the
+    # keyword match: a small project's "generate a report" need is just a query against the
+    # existing database, not a genuine reason to stand up a separate warehouse.
+    needs_analytics = is_high_scale and (
+        "analytics" in func_str
+        or "reporting" in func_str
+        or "business intelligence" in func_str
+        or "dashboard" in func_str
+        or "data warehouse" in func_str
+    )
+
+    if needs_analytics:
+        components.append(
+            {
+                "id": "analytics",
+                "name": "Analytics Data Warehouse",
+                "type": "analytics",
+                "description": "A separate OLAP store for analytical queries and reporting over data that originates in the primary transactional database, kept off the transactional path.",
+                "rulesFired": [
+                    "Rule-Analytics-HighScaleReporting: Functional requirements mention analytics/reporting/business intelligence/dashboard/data warehouse AND expected scale is high enough to justify a dedicated warehouse."
+                ],
+                "reasoning": (
+                    "Suggested by the Analytics rule: at this scale, running analytical/reporting queries directly "
+                    "against the transactional database risks contending with real user traffic, so data flows into a "
+                    "dedicated warehouse instead -- typically via a scheduled or streaming ETL process, which this "
+                    "component intentionally does not model as a separate box (out of scope for this phase, see the "
+                    "task's own scope discipline)."
+                ),
+            }
+        )
+        rules_trace.append("Rule-Analytics-HighScaleReporting")
+        connections.append(_connection("database", "analytics", "ETL"))
+
+    # 12. ML / AI Inference Endpoint (Phase 6) -- a single deployed inference endpoint the app calls
+    # for a prediction/classification/recommendation, NOT training infrastructure, a feature store,
+    # or a full MLOps pipeline (all explicitly out of scope for this phase).
+    needs_ml = (
+        "recommendation" in func_str
+        or "prediction" in func_str
+        or "classification" in func_str
+        or "machine learning" in func_str
+        or "ai-powered" in func_str
+        or "personalization" in func_str
+    )
+
+    if needs_ml:
+        components.append(
+            {
+                "id": "ml",
+                "name": "ML Inference Endpoint",
+                "type": "ml",
+                "description": "A deployed model endpoint the application calls at request time for a prediction/classification/recommendation -- not training infrastructure or an MLOps pipeline.",
+                "rulesFired": [
+                    "Rule-Ml-InferenceEndpoint: Functional requirements mention recommendation/prediction/classification/machine learning/AI-powered/personalization."
+                ],
+                "reasoning": "Suggested by the ML rule: the application needs a real-time inference call to get a prediction/classification/recommendation back. Scoped strictly to the inference endpoint -- model training, feature stores, and the rest of an MLOps pipeline are a genuinely separate, disproportionate domain this component does not attempt to model.",
+            }
+        )
+        rules_trace.append("Rule-Ml-InferenceEndpoint")
+        connections.append(_connection("compute", "ml", "HTTPS"))
+
+    # 13. Workflow Orchestration (Phase 6) -- for genuine multi-step async processes (Step Functions/
+    # Logic Apps/Cloud Workflows), NOT a replacement for the "queue"/worker pattern already modeled
+    # above. Triggered either by an explicit keyword, or by a secondary heuristic: a queue already
+    # exists (background processing is happening) AND a notification component also exists (the
+    # background work ends in a distinct fan-out delivery step) -- two independent async stages
+    # chained together is a real signal of a genuine multi-step process worth orchestrating
+    # explicitly, not just a single queue -> worker hop. Deliberately narrow (not "queue alone",
+    # which would fire on nearly every architecture this engine produces) to avoid overfitting a
+    # common pattern into a workflow orchestrator it doesn't actually need.
+    needs_workflow = (
+        "workflow" in func_str
+        or "multi-step process" in func_str
+        or "approval process" in func_str
+        or "orchestration" in func_str
+        or "pipeline" in func_str
+        or (needs_queue and needs_notification)
+    )
+
+    if needs_workflow:
+        components.append(
+            {
+                "id": "workflow",
+                "name": "Workflow Orchestrator",
+                "type": "workflow",
+                "description": "Coordinates a genuine multi-step async process (ordered steps, retries, error handling) -- distinct from the simple point-to-point queue/worker pattern already modeled above.",
+                "rulesFired": [
+                    "Rule-Workflow-Orchestration: Functional requirements mention workflow/multi-step process/approval process/orchestration/pipeline, or the architecture already chains a queue into a distinct notification fan-out step."
+                ],
+                "reasoning": (
+                    "Suggested by the Workflow rule: a single queue/worker hop is enough for one background task, but "
+                    "an ordered multi-step process with its own retry and error-handling semantics per step is a "
+                    "different, genuinely more complex pattern worth its own explicit orchestrator rather than "
+                    "hand-rolled state tracking inside application code."
+                ),
+            }
+        )
+        rules_trace.append("Rule-Workflow-Orchestration")
+        connections.append(_connection("compute", "workflow", "HTTPS"))
 
     return {"components": components, "connections": connections, "rulesTrace": rules_trace}

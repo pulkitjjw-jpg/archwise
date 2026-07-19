@@ -18,6 +18,10 @@ const TYPE_DESCRIPTIONS: Record<string, string> = {
   "audit-log": "Keeps a tamper-proof record of who did what and when — required for compliance reviews.",
   "phi-vault": "A specially secured, separate store for protected health information, locked down beyond your normal data.",
   deidentification: "Automatically strips or masks personal details from records before they're used for anything else, like analytics.",
+  search: "Powers fast full-text and filtered search across your content — like an inverted index over your catalog, docs, or logs, separate from your main database.",
+  analytics: "A separate warehouse for running big reporting/analytics queries without slowing down your live production database.",
+  ml: "A deployed model your app calls to get a prediction, recommendation, or classification back in real time.",
+  workflow: "Coordinates a multi-step process (with retries and error handling per step) — for when a task is more than one queue hop.",
 };
 
 export function getPlainDescription(componentType: string, componentId: string): string {
@@ -117,6 +121,26 @@ const LEARN_CONTENT: Record<string, LearnContent> = {
     analogy: "A researcher redacting names and addresses from documents before handing them to a study.",
     deeper:
       "The useful patterns (trends, aggregates) remain usable, but nobody can trace a specific result back to a specific person — which is what lets that data be used for analytics without the same strict handling rules as the original.",
+  },
+  search: {
+    analogy: "A book's index at the back, versus flipping through every page to find a word.",
+    deeper:
+      "A regular database is great at looking up a record by its exact ID, but bad at \"find anything that mentions this word, ranked by how relevant it is.\" A search index is built specifically for that second job — fast full-text lookup and filtering, kept separate from the main transactional store.",
+  },
+  analytics: {
+    analogy: "A librarian's private research room, separate from the front desk that's checking books in and out all day.",
+    deeper:
+      "Big, sprawling reporting queries (\"total sales by region, by month, for the last 3 years\") are slow and resource-hungry. Running them against the same database handling live user traffic risks slowing everyone else down — so the data gets copied into a separate warehouse built for exactly this kind of heavy analytical query.",
+  },
+  ml: {
+    analogy: "A specialist you call in for one specific judgment call, instead of training every staff member to make it themselves.",
+    deeper:
+      "Your app sends the specialist the relevant details and gets back an answer — a prediction, a recommendation, a classification — without needing to know how the specialist actually reached that conclusion. This is just the specialist's office (the deployed model you call); training that specialist in the first place is a separate, much bigger undertaking this component doesn't cover.",
+  },
+  workflow: {
+    analogy: "A wedding planner coordinating a multi-step event, versus one person just handling a single to-do item.",
+    deeper:
+      "A single background task (the \"queue\" component) is like handing someone one job to do. A real multi-step process — several ordered steps, each with its own retry logic, needing to know what to do if step 3 fails after steps 1 and 2 already succeeded — is a fundamentally more complex coordination problem, and gets its own dedicated orchestrator rather than being bolted onto a plain queue.",
   },
 };
 

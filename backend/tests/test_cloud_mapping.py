@@ -464,3 +464,164 @@ class TestDrCostFolding:
         baseline = get_cloud_mapping("kubernetes", "database", "database", req)
         with_dr = get_cloud_mapping("kubernetes", "database", "database", req, "warm-standby")
         assert baseline == with_dr
+
+
+class TestSearchMapping:
+    def test_aws_maps_to_opensearch(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("aws", "search", "search", req)
+        assert mapping["serviceName"] == "Amazon OpenSearch Service"
+        assert mapping["costEstimate"]["min"] > 0
+
+    def test_azure_maps_to_cognitive_search(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("azure", "search", "search", req)
+        assert mapping["serviceName"] == "Azure Cognitive Search"
+
+    def test_gcp_is_honest_about_no_managed_equivalent(self):
+        """GCP has no first-party managed full-text search product comparable to OpenSearch/
+        Cognitive Search -- this must be stated honestly, not papered over with an invented
+        service name."""
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("gcp", "search", "search", req)
+        assert "no first-party managed equivalent" in mapping["serviceName"].lower()
+
+    def test_kubernetes_maps_to_self_hosted_helm_chart(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("kubernetes", "search", "search", req)
+        assert "Elasticsearch" in mapping["serviceName"] or "OpenSearch" in mapping["serviceName"]
+
+    def test_private_maps_to_self_hosted_dedicated_vm(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("private", "search", "search", req)
+        assert "Self-Hosted" in mapping["serviceName"]
+
+    def test_high_scale_increases_cost(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        low = get_cloud_mapping("aws", "search", "search", make_requirements(expectedScale="1,000 users"))
+        high = get_cloud_mapping("aws", "search", "search", make_requirements(expectedScale="high scale, 5 million users"))
+        assert high["costEstimate"]["max"] > low["costEstimate"]["max"]
+
+
+class TestAnalyticsMapping:
+    def test_aws_maps_to_redshift_serverless(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("aws", "analytics", "analytics", req)
+        assert mapping["serviceName"] == "Amazon Redshift Serverless"
+
+    def test_azure_maps_to_synapse(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("azure", "analytics", "analytics", req)
+        assert mapping["serviceName"] == "Azure Synapse Analytics"
+
+    def test_gcp_maps_to_bigquery(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("gcp", "analytics", "analytics", req)
+        assert mapping["serviceName"] == "Google BigQuery"
+
+    def test_kubernetes_is_honest_no_managed_equivalent(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("kubernetes", "analytics", "analytics", req)
+        assert "no managed equivalent" in mapping["serviceName"].lower()
+        assert "network destination" in mapping["serviceName"].lower()
+
+    def test_private_is_honest_no_managed_equivalent(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("private", "analytics", "analytics", req)
+        assert "no managed equivalent" in mapping["serviceName"].lower()
+
+
+class TestMlMapping:
+    def test_aws_maps_to_sagemaker_real_time_endpoint(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("aws", "ml", "ml", req)
+        assert mapping["serviceName"] == "Amazon SageMaker (Real-Time Inference Endpoint)"
+
+    def test_azure_maps_to_aml_managed_online_endpoint(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("azure", "ml", "ml", req)
+        assert mapping["serviceName"] == "Azure Machine Learning (Managed Online Endpoint)"
+
+    def test_gcp_maps_to_vertex_ai_online_prediction(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("gcp", "ml", "ml", req)
+        assert mapping["serviceName"] == "Vertex AI (Online Prediction)"
+
+    def test_kubernetes_maps_to_kserve(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("kubernetes", "ml", "ml", req)
+        assert "KServe" in mapping["serviceName"] or "Seldon" in mapping["serviceName"]
+
+    def test_private_is_honest_self_hosted_no_managed_equivalent(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("private", "ml", "ml", req)
+        assert "no managed equivalent" in mapping["serviceName"].lower()
+        assert "triton" in mapping["serviceName"].lower() or "self-hosted" in mapping["serviceName"].lower()
+
+
+class TestWorkflowMapping:
+    def test_aws_maps_to_step_functions_standard(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("aws", "workflow", "workflow", req)
+        assert mapping["serviceName"] == "AWS Step Functions (Standard Workflow)"
+
+    def test_azure_maps_to_logic_apps(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("azure", "workflow", "workflow", req)
+        assert mapping["serviceName"] == "Azure Logic Apps"
+
+    def test_gcp_maps_to_cloud_workflows(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("gcp", "workflow", "workflow", req)
+        assert mapping["serviceName"] == "Google Cloud Workflows"
+
+    def test_kubernetes_maps_to_argo_workflows(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("kubernetes", "workflow", "workflow", req)
+        assert mapping["serviceName"] == "Argo Workflows"
+
+    def test_private_maps_to_self_hosted_orchestrator(self):
+        from app.services.cloud_mapping import get_cloud_mapping
+
+        req = make_requirements()
+        mapping = get_cloud_mapping("private", "workflow", "workflow", req)
+        assert "Airflow" in mapping["serviceName"] or "Temporal" in mapping["serviceName"]

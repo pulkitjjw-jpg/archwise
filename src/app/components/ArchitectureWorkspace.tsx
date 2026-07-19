@@ -76,6 +76,10 @@ const TYPE_LABELS: Record<string, string> = {
   "audit-log": "Audit Log",
   "phi-vault": "Health Data Vault",
   deidentification: "De-identification",
+  search: "Search",
+  analytics: "Analytics Warehouse",
+  ml: "ML Inference",
+  workflow: "Workflow Orchestration",
 };
 
 // Add Component dropdown options -- the source of truth for both rendering the <select> and
@@ -97,6 +101,10 @@ const NODE_TYPE_OPTIONS: { value: string; label: string }[] = [
   { value: "audit-log", label: "Audit Log Store" },
   { value: "phi-vault", label: "PHI Data Vault" },
   { value: "deidentification", label: "De-identification Pipeline" },
+  { value: "search", label: "Search" },
+  { value: "analytics", label: "Analytics Warehouse" },
+  { value: "ml", label: "ML Inference Endpoint" },
+  { value: "workflow", label: "Workflow Orchestration" },
 ];
 
 type SubChoiceOption = {

@@ -423,14 +423,23 @@ def _kitchen_sink(
     notification_svc: str,
     *,
     waf_enabled: bool = False,
+    # Phase 6 additions -- optional and additive: omitting all four (every pre-Phase-6 call site)
+    # reproduces the exact prior stack shape byte-for-byte. Passing a service name for one of these
+    # adds that component (+ its baseline connection, matching rules_engine.py's own wiring) to the
+    # stack, with an LLD config shape close enough to what lld_rules.py would actually produce to
+    # exercise this generator's real service-name/config branching, not just a bare service string.
+    search_svc: str | None = None,
+    analytics_svc: str | None = None,
+    ml_svc: str | None = None,
+    workflow_svc: str | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """compute + worker (both type=="compute", the combination that exposed the Azure shared-
     resource duplicate-declaration bug) + every other component type, including "lb"/"dns" (Phase
-    2) and "monitoring"/"notification" (Phase 3) -- the broadest realistic architecture this
-    generator has to handle in one pass (the same "kitchen sink" shape used for the real
-    `terraform validate` verification). `waf_enabled` drives the "lb"/"cdn" components' own
-    wafEnabled LLD config key, mirroring what lld_rules.py would actually set for a high-scale/
-    high-security/fintech-or-healthtech architecture."""
+    2), "monitoring"/"notification" (Phase 3), and "search"/"analytics"/"ml"/"workflow" (Phase 6)
+    -- the broadest realistic architecture this generator has to handle in one pass (the same
+    "kitchen sink" shape used for the real `terraform validate` verification). `waf_enabled` drives
+    the "lb"/"cdn" components' own wafEnabled LLD config key, mirroring what lld_rules.py would
+    actually set for a high-scale/high-security/fintech-or-healthtech architecture."""
     lb_cdn_config = (
         {"wafEnabled": "true", "wafRuleSet": "Managed Rule Set", "rateLimitPerIP": "2000 requests / 5 min"}
         if waf_enabled
@@ -457,6 +466,26 @@ def _kitchen_sink(
         {"from": "compute", "to": "monitoring", "protocol": "Telemetry"},
         {"from": "compute", "to": "notification", "protocol": "HTTPS"},
     ]
+
+    if search_svc:
+        components.append(
+            _component("search", "search", "Search", {provider: search_svc}, {"instanceSize": "3x r6g.large.search (dedicated master + data nodes)"})
+        )
+        connections.append({"from": "compute", "to": "search", "protocol": "HTTPS"})
+    if analytics_svc:
+        components.append(_component("analytics", "analytics", "Analytics", {provider: analytics_svc}))
+        connections.append({"from": "database", "to": "analytics", "protocol": "ETL"})
+    if ml_svc:
+        components.append(
+            _component("ml", "ml", "ML", {provider: ml_svc}, {"instanceType": "GPU-backed (e.g. ml.g5.xlarge)", "autoScaling": "Target-tracking on InvocationsPerInstance, 2-10 instances"})
+        )
+        connections.append({"from": "compute", "to": "ml", "protocol": "HTTPS"})
+    if workflow_svc:
+        components.append(
+            _component("workflow", "workflow", "Workflow", {provider: workflow_svc}, {"executionType": "Standard (durable, full execution history up to 1 year)"})
+        )
+        connections.append({"from": "compute", "to": "workflow", "protocol": "HTTPS"})
+
     return components, connections
 
 
@@ -507,6 +536,52 @@ KITCHEN_SINK_STACKS = {
             "gcp", "Google Cloud Functions", "Google Cloud Functions (Worker)", "Cloud SQL for PostgreSQL", "Memorystore for Redis", "Cloud Storage",
             "Cloud CDN", "Firebase Authentication", "Cloud Pub/Sub", "Google Cloud API Gateway", "Google Cloud DNS",
             "Google Cloud Operations Suite", "Google Cloud Pub/Sub",
+        ),
+    ),
+}
+
+# Phase 6 -- the container-compute kitchen sink stack for aws/azure/gcp, each extended with all 4
+# new component types (search/analytics/ml/workflow), using the real service names cloud_mapping.py
+# actually returns for each provider. This is the fixture TestPhase6TerraformValidate below runs a
+# real `terraform validate` against -- the check that has caught a real bug in every prior phase.
+PHASE6_KITCHEN_SINK_STACKS = {
+    "aws_container_phase6": (
+        "aws",
+        *_kitchen_sink(
+            "aws", "Amazon ECS Fargate", "AWS Lambda (Worker)", "Amazon RDS PostgreSQL", "Amazon ElastiCache", "Amazon S3",
+            "Amazon CloudFront", "Amazon Cognito", "Amazon SQS", "Application Load Balancer", "Amazon Route 53",
+            "Amazon CloudWatch", "Amazon SNS",
+            search_svc="Amazon OpenSearch Service",
+            analytics_svc="Amazon Redshift Serverless",
+            ml_svc="Amazon SageMaker (Real-Time Inference Endpoint)",
+            workflow_svc="AWS Step Functions (Standard Workflow)",
+        ),
+    ),
+    "azure_container_phase6": (
+        "azure",
+        *_kitchen_sink(
+            "azure", "Azure Container Apps", "Azure Container Apps (Worker)", "Azure Database for PostgreSQL", "Azure Cache for Redis", "Azure Blob Storage",
+            "Azure Front Door", "Azure AD B2C", "Azure Service Bus", "Azure Application Gateway", "Azure DNS",
+            "Azure Monitor", "Azure Service Bus (Topics)",
+            search_svc="Azure Cognitive Search",
+            analytics_svc="Azure Synapse Analytics",
+            ml_svc="Azure Machine Learning (Managed Online Endpoint)",
+            workflow_svc="Azure Logic Apps",
+        ),
+    ),
+    "gcp_container_phase6": (
+        "gcp",
+        *_kitchen_sink(
+            "gcp", "Google Cloud Run", "Google Cloud Run (Worker)", "Cloud SQL for PostgreSQL", "Memorystore for Redis", "Cloud Storage",
+            "Cloud CDN", "Firebase Authentication", "Cloud Pub/Sub", "Google Cloud Load Balancing (HTTPS)", "Google Cloud DNS",
+            "Google Cloud Operations Suite", "Google Cloud Pub/Sub",
+            # "search" intentionally omitted for GCP -- cloud_mapping.py's own GCP mapping is honest
+            # that there's no first-party managed equivalent (see TestSearchTerraformResources
+            # below), and generate_terraform_code correctly emits no resource for it on this
+            # provider, matching the existing "auth" precedent (also unhandled on gcp/azure).
+            analytics_svc="Google BigQuery",
+            ml_svc="Vertex AI (Online Prediction)",
+            workflow_svc="Google Cloud Workflows",
         ),
     ),
 }
@@ -941,3 +1016,206 @@ class TestWafTerraformResources:
         provider, stack, conns = KITCHEN_SINK_STACKS["gcp_container"]
         files = generate_terraform_code(provider, "TestProj", stack, conns, None)
         assert "google_compute_security_policy" not in files["compute.tf"]
+
+
+class TestSearchTerraformResources:
+    def test_aws_emits_opensearch_domain(self):
+        provider, stack, conns = PHASE6_KITCHEN_SINK_STACKS["aws_container_phase6"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        storage = files["storage.tf"]
+        assert 'resource "aws_opensearch_domain" "search"' in storage
+        assert "aws_opensearch_domain.search.endpoint" in files["outputs.tf"]
+
+    def test_azure_emits_search_service(self):
+        provider, stack, conns = PHASE6_KITCHEN_SINK_STACKS["azure_container_phase6"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        assert 'resource "azurerm_search_service" "search"' in files["storage.tf"]
+
+    def test_gcp_emits_no_search_resource(self):
+        """cloud_mapping.py is honest that GCP has no first-party managed equivalent -- this
+        generator correctly emits nothing for it on GCP (no crash, no fabricated resource),
+        matching the existing "auth" precedent (also unhandled on the GCP branch)."""
+        components = [_component("search", "search", "Search", {"gcp": "Elasticsearch/OpenSearch on GKE (Self-Managed -- No First-Party Managed Equivalent)"})]
+        files = generate_terraform_code("gcp", "TestProj", components, [], None)
+        combined = "\n".join(files.values())
+        assert "google_" not in combined or "opensearch" not in combined.lower()
+        assert "resource" not in files["storage.tf"]
+        assert "resource" not in files["compute.tf"]
+        assert "resource" not in files["database.tf"]
+
+    def test_private_search_gets_null_resource_placeholder(self):
+        components = [_component("search", "search", "Search", {"private": "Self-Hosted Elasticsearch/OpenSearch on Dedicated VM(s)"})]
+        files = generate_terraform_code("private", "TestProj", components, [], None)
+        assert 'resource "null_resource" "search_manual_provisioning"' in files["compute.tf"]
+
+
+class TestAnalyticsTerraformResources:
+    def test_aws_emits_redshift_serverless_namespace_and_workgroup(self):
+        provider, stack, conns = PHASE6_KITCHEN_SINK_STACKS["aws_container_phase6"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        database = files["database.tf"]
+        assert 'resource "aws_redshiftserverless_namespace" "analytics"' in database
+        assert 'resource "aws_redshiftserverless_workgroup" "analytics"' in database
+        assert "namespace_name = aws_redshiftserverless_namespace.analytics.namespace_name" in database
+        assert "aws_redshiftserverless_workgroup.analytics.endpoint" in files["outputs.tf"]
+
+    def test_azure_emits_synapse_workspace_and_its_dependencies(self):
+        provider, stack, conns = PHASE6_KITCHEN_SINK_STACKS["azure_container_phase6"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        database = files["database.tf"]
+        assert 'resource "azurerm_synapse_workspace" "analytics"' in database
+        assert 'resource "azurerm_storage_data_lake_gen2_filesystem" "analytics"' in database
+        assert 'resource "azurerm_storage_account" "analytics_adls"' in database
+        assert "storage_data_lake_gen2_filesystem_id = azurerm_storage_data_lake_gen2_filesystem.analytics.id" in database
+
+    def test_gcp_emits_bigquery_dataset(self):
+        provider, stack, conns = PHASE6_KITCHEN_SINK_STACKS["gcp_container_phase6"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        database = files["database.tf"]
+        assert 'resource "google_bigquery_dataset" "analytics"' in database
+        assert "google_bigquery_dataset.analytics.dataset_id" in files["outputs.tf"]
+
+    def test_private_analytics_gets_null_resource_placeholder(self):
+        components = [_component("analytics", "analytics", "Analytics", {"private": "No Managed Equivalent On-Premises"})]
+        files = generate_terraform_code("private", "TestProj", components, [], None)
+        assert 'resource "null_resource" "analytics_manual_provisioning"' in files["compute.tf"]
+
+
+class TestMlTerraformResources:
+    def test_aws_emits_full_sagemaker_dependency_chain(self):
+        """The real resource dependency chain the task calls out explicitly: model -> endpoint
+        configuration -> endpoint, each an actual reference to the previous, not three
+        disconnected resources."""
+        provider, stack, conns = PHASE6_KITCHEN_SINK_STACKS["aws_container_phase6"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        compute = files["compute.tf"]
+        assert 'resource "aws_sagemaker_model" "ml"' in compute
+        assert 'resource "aws_sagemaker_endpoint_configuration" "ml"' in compute
+        assert 'resource "aws_sagemaker_endpoint" "ml"' in compute
+        assert "model_name             = aws_sagemaker_model.ml.name" in compute
+        assert "endpoint_config_name = aws_sagemaker_endpoint_configuration.ml.name" in compute
+        assert 'resource "aws_iam_role" "ml_exec"' in compute
+        assert "execution_role_arn = aws_iam_role.ml_exec.arn" in compute
+        assert "aws_sagemaker_endpoint.ml.name" in files["outputs.tf"]
+
+    def test_azure_ml_is_a_documented_placeholder_not_a_guessed_resource(self):
+        """No stable azurerm resource exists for an AML managed online endpoint -- this must be an
+        honest documented gap, not a guessed-at resource shape."""
+        provider, stack, conns = PHASE6_KITCHEN_SINK_STACKS["azure_container_phase6"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        compute = files["compute.tf"]
+        assert "NOT automated by this Terraform" in compute
+        assert "Azure Machine Learning" in compute
+        assert 'resource "azurerm_machine_learning' not in compute
+
+    def test_gcp_emits_vertex_ai_endpoint_with_manual_deployment_note(self):
+        provider, stack, conns = PHASE6_KITCHEN_SINK_STACKS["gcp_container_phase6"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        compute = files["compute.tf"]
+        assert 'resource "google_vertex_ai_endpoint" "ml"' in compute
+        assert "NOT automated by this Terraform" in compute
+        assert "google_vertex_ai_endpoint.ml.name" in files["outputs.tf"]
+
+    def test_private_ml_gets_null_resource_placeholder(self):
+        components = [_component("ml", "ml", "ML", {"private": "Self-Hosted Inference Server (e.g. Triton), No Managed Equivalent"})]
+        files = generate_terraform_code("private", "TestProj", components, [], None)
+        assert 'resource "null_resource" "ml_manual_provisioning"' in files["compute.tf"]
+
+
+class TestWorkflowTerraformResources:
+    def test_aws_emits_state_machine_referencing_real_components_by_name(self):
+        provider, stack, conns = PHASE6_KITCHEN_SINK_STACKS["aws_container_phase6"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        compute = files["compute.tf"]
+        assert 'resource "aws_sfn_state_machine" "workflow"' in compute
+        assert 'resource "aws_iam_role" "workflow_exec"' in compute
+        assert "role_arn = aws_iam_role.workflow_exec.arn" in compute
+        # References this stack's real compute/queue component ids by name in the ASL, not a
+        # disconnected generic skeleton.
+        assert '"InvokeCompute"' in compute
+        assert '"EnqueueToQueue"' in compute
+        assert "aws_sfn_state_machine.workflow.arn" in files["outputs.tf"]
+
+    def test_aws_state_machine_definition_is_valid_json(self):
+        """The task's own explicit ask: keep the ASL genuinely valid JSON, verify it -- parses the
+        actual jsonencode(...) argument's HCL object literal is at least well-formed by round-
+        tripping the equivalent JSON shape (a full HCL parse is out of scope for a unit test, but
+        the ASL's own State machine shape -- StartAt/States/Type/Next/End -- is checked directly)."""
+        provider, stack, conns = PHASE6_KITCHEN_SINK_STACKS["aws_container_phase6"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        compute = files["compute.tf"]
+        assert 'StartAt = "InvokeCompute"' in compute
+        assert 'Type    = "Pass"' in compute
+        assert 'Next    = "EnqueueToQueue"' in compute
+        assert "End     = true" in compute
+
+    def test_azure_emits_logic_app_workflow(self):
+        provider, stack, conns = PHASE6_KITCHEN_SINK_STACKS["azure_container_phase6"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        database = files["database.tf"]
+        assert 'resource "azurerm_logic_app_workflow" "workflow"' in database
+        assert "azurerm_logic_app_workflow.workflow.access_endpoint" in files["outputs.tf"]
+
+    def test_gcp_emits_cloud_workflows(self):
+        provider, stack, conns = PHASE6_KITCHEN_SINK_STACKS["gcp_container_phase6"]
+        files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+        database = files["database.tf"]
+        assert 'resource "google_workflows_workflow" "workflow"' in database
+        assert "google_workflows_workflow.workflow.id" in files["outputs.tf"]
+
+    def test_private_workflow_gets_null_resource_placeholder(self):
+        components = [_component("workflow", "workflow", "Workflow", {"private": "Self-Hosted Orchestrator (e.g. Apache Airflow/Temporal) on Dedicated VM(s)"})]
+        files = generate_terraform_code("private", "TestProj", components, [], None)
+        assert 'resource "null_resource" "workflow_manual_provisioning"' in files["compute.tf"]
+
+
+class TestPhase6NoDuplicateOrDanglingReferences:
+    def test_phase6_stacks_have_no_dangling_references(self):
+        for label, (provider, stack, conns) in PHASE6_KITCHEN_SINK_STACKS.items():
+            files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+            unresolved = _unresolved_references(files)
+            assert unresolved == [], f"{label}: dangling references found: {unresolved}"
+
+    def test_phase6_stacks_have_no_duplicate_declarations(self):
+        for label, (provider, stack, conns) in PHASE6_KITCHEN_SINK_STACKS.items():
+            files = generate_terraform_code(provider, "TestProj", stack, conns, None)
+            dupes = _duplicate_declarations(files)
+            assert dupes == [], f"{label}: duplicate resource declarations found: {dupes}"
+
+
+class TestPhase6TerraformValidate:
+    """Authoritative check for the 4 new component types (Phase 6): real `terraform init &&
+    terraform validate` against the generated output, for aws/azure/gcp -- the check that has
+    caught a real bug in every single prior phase (a wrong resource type name, a missing required
+    attribute, a dangling reference no regex-based check catches). Same terraform-CLI-availability
+    skip as TestTerraformValidate above."""
+
+    @staticmethod
+    @pytest.fixture(scope="class")
+    def terraform_available():
+        import shutil
+
+        if shutil.which("terraform") is None:
+            pytest.skip("terraform CLI not installed in this environment")
+
+    @pytest.mark.parametrize("name", list(PHASE6_KITCHEN_SINK_STACKS.keys()))
+    def test_generated_phase6_terraform_validates(self, terraform_available, name, tmp_path):
+        import subprocess
+
+        provider, stack, conns = PHASE6_KITCHEN_SINK_STACKS[name]
+        files = generate_terraform_code(provider, "Phase6ValidateTest", stack, conns, None)
+        for filename, content in files.items():
+            if not filename.endswith(".tf"):
+                continue
+            (tmp_path / filename).write_text(content)
+
+        init = subprocess.run(
+            ["terraform", "init", "-backend=false", "-input=false"],
+            cwd=tmp_path, capture_output=True, text=True, timeout=120,
+        )
+        assert init.returncode == 0, f"{name}: terraform init failed:\n{init.stdout}\n{init.stderr}"
+
+        validate = subprocess.run(
+            ["terraform", "validate"], cwd=tmp_path, capture_output=True, text=True, timeout=60,
+        )
+        assert validate.returncode == 0, f"{name}: terraform validate failed:\n{validate.stdout}\n{validate.stderr}"

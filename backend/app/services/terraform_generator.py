@@ -1085,6 +1085,212 @@ variable "{c_id}_notification_email" {{
 }}
 """
 
+            elif c.get("type") == "search":
+                storage_tf += _build_comments(lld, ["indexCount", "shardCount", "instanceSize"])
+                instance_size_cfg = config.get("instanceSize") or ""
+                is_multi_node = "r6g" in instance_size_cfg
+                search_instance_type = "r6g.large.search" if is_multi_node else "t3.small.search"
+                search_instance_count = 3 if is_multi_node else 1
+                search_dedicated_master = "true" if is_multi_node else "false"
+                storage_tf += f"""resource "aws_opensearch_domain" "{c_id}" {{
+  domain_name    = "${{var.project_name}}-{c_id}"
+  engine_version = "OpenSearch_2.11"
+
+  cluster_config {{
+    instance_type             = "{search_instance_type}"
+    instance_count             = {search_instance_count}
+    dedicated_master_enabled   = {search_dedicated_master}
+  }}
+
+  ebs_options {{
+    ebs_enabled = true
+    volume_size = 50
+  }}
+
+  tags = {{
+    Name        = "${{var.project_name}}-{c_id}"
+    Environment = var.environment
+  }}
+}}
+
+"""
+                outputs_tf += f"""output "{c_id}_endpoint" {{
+  value       = aws_opensearch_domain.{c_id}.endpoint
+  description = "OpenSearch domain endpoint for {c_id}."
+}}
+
+"""
+
+            elif c.get("type") == "analytics":
+                database_tf += _build_comments(lld, ["scalingMode", "retentionPolicy", "partitionStrategy", "etlSyncFrequency"])
+                database_tf += f"""resource "aws_redshiftserverless_namespace" "{c_id}" {{
+  namespace_name = "${{var.project_name}}-{c_id}-ns"
+}}
+
+resource "aws_redshiftserverless_workgroup" "{c_id}" {{
+  namespace_name = aws_redshiftserverless_namespace.{c_id}.namespace_name
+  workgroup_name  = "${{var.project_name}}-{c_id}-wg"
+  base_capacity   = 8
+}}
+
+"""
+                outputs_tf += f"""output "{c_id}_workgroup_endpoint" {{
+  value       = aws_redshiftserverless_workgroup.{c_id}.endpoint
+  description = "Redshift Serverless workgroup endpoint for {c_id}."
+}}
+
+"""
+
+            elif c.get("type") == "ml":
+                # Rationale: gets the real SageMaker resource dependency chain right -- model ->
+                # endpoint configuration -> endpoint, each an actual required reference, not a
+                # single flattened resource. The model artifact/image is a placeholder (this
+                # component provisions the inference ENDPOINT only -- training/producing a real
+                # model artifact is explicitly out of scope, see the task's own scope note).
+                compute_tf += _build_comments(lld, ["instanceType", "autoScaling", "dataComplianceBoundary"])
+                ml_instance_type = config.get("instanceType") or "ml.m5.large"
+                ml_initial_count = 2 if "2-10" in (config.get("autoScaling") or "") else 1
+                compute_tf += f"""resource "aws_iam_role" "{c_id}_exec" {{
+  name = "${{var.project_name}}-{c_id}-exec-role"
+
+  assume_role_policy = jsonencode({{
+    Version = "2012-10-17"
+    Statement = [{{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {{
+        Service = "sagemaker.amazonaws.com"
+      }}
+    }}]
+  }})
+}}
+
+resource "aws_sagemaker_model" "{c_id}" {{
+  name               = "${{var.project_name}}-{c_id}-model"
+  execution_role_arn = aws_iam_role.{c_id}_exec.arn
+
+  primary_container {{
+    image = "REPLACE_WITH_YOUR_ECR_MODEL_IMAGE_URI" # placeholder -- this provisions the inference endpoint only, not a trained model artifact (training is out of scope, see README)
+  }}
+}}
+
+resource "aws_sagemaker_endpoint_configuration" "{c_id}" {{
+  name = "${{var.project_name}}-{c_id}-endpoint-config"
+
+  production_variants {{
+    variant_name           = "primary"
+    model_name             = aws_sagemaker_model.{c_id}.name
+    instance_type          = "{ml_instance_type}"
+    initial_instance_count = {ml_initial_count}
+  }}
+}}
+
+resource "aws_sagemaker_endpoint" "{c_id}" {{
+  name                 = "${{var.project_name}}-{c_id}-endpoint"
+  endpoint_config_name = aws_sagemaker_endpoint_configuration.{c_id}.name
+}}
+
+"""
+                outputs_tf += f"""output "{c_id}_endpoint_name" {{
+  value       = aws_sagemaker_endpoint.{c_id}.name
+  description = "SageMaker real-time inference endpoint name for {c_id} -- invoke via the SageMaker Runtime API."
+}}
+
+"""
+
+            elif c.get("type") == "workflow":
+                compute_tf += _build_comments(lld, ["executionType", "retryPolicy", "executionHistoryRetention"])
+                sfn_type = "EXPRESS" if "Express" in (config.get("executionType") or "") else "STANDARD"
+
+                # Reference the architecture's own compute/queue components by name in the ASL
+                # state names, found via the same connections-scanning pattern the "lb"/
+                # "monitoring" branches above already use -- so this isn't a disconnected generic
+                # skeleton, even though the individual states are Pass placeholders (a real Task
+                # state needs a specific Lambda/ECS ARN this generator can't invent).
+                wf_target_compute_id = "compute"
+                for conn in connections:
+                    if conn.get("to") == c_id:
+                        candidate = by_id.get(conn.get("from"))
+                        if candidate and candidate.get("type") == "compute":
+                            wf_target_compute_id = conn.get("from")
+                            break
+                wf_queue_comp = next((comp for comp in components if comp.get("type") == "queue"), None)
+                wf_start_state = f"Invoke{wf_target_compute_id.capitalize()}"
+
+                compute_tf += f"""resource "aws_iam_role" "{c_id}_exec" {{
+  name = "${{var.project_name}}-{c_id}-exec-role"
+
+  assume_role_policy = jsonencode({{
+    Version = "2012-10-17"
+    Statement = [{{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {{
+        Service = "states.amazonaws.com"
+      }}
+    }}]
+  }})
+}}
+
+"""
+                if wf_queue_comp:
+                    wf_queue_id = wf_queue_comp.get("id")
+                    wf_next_state = f"EnqueueTo{wf_queue_id.capitalize()}"
+                    compute_tf += f"""resource "aws_sfn_state_machine" "{c_id}" {{
+  name     = "${{var.project_name}}-{c_id}"
+  role_arn = aws_iam_role.{c_id}_exec.arn
+  type     = "{sfn_type}"
+
+  # Minimal sequential workflow -- replace the Pass placeholders with real Task states invoking
+  # this architecture's own "{wf_target_compute_id}" and "{wf_queue_id}" components.
+  definition = jsonencode({{
+    Comment = "Minimal sequential workflow -- wire real Task states in place of the Pass placeholders below."
+    StartAt = "{wf_start_state}"
+    States = {{
+      "{wf_start_state}" = {{
+        Type    = "Pass"
+        Comment = "Represents invoking this architecture's \\"{wf_target_compute_id}\\" compute component."
+        Next    = "{wf_next_state}"
+      }}
+      "{wf_next_state}" = {{
+        Type    = "Pass"
+        Comment = "Represents handing off to this architecture's \\"{wf_queue_id}\\" component for async follow-up processing."
+        End     = true
+      }}
+    }}
+  }})
+}}
+
+"""
+                else:
+                    compute_tf += f"""resource "aws_sfn_state_machine" "{c_id}" {{
+  name     = "${{var.project_name}}-{c_id}"
+  role_arn = aws_iam_role.{c_id}_exec.arn
+  type     = "{sfn_type}"
+
+  # Minimal single-step workflow -- replace the Pass placeholder with a real Task state invoking
+  # this architecture's own "{wf_target_compute_id}" component.
+  definition = jsonencode({{
+    Comment = "Minimal workflow -- wire a real Task state in place of the Pass placeholder below."
+    StartAt = "{wf_start_state}"
+    States = {{
+      "{wf_start_state}" = {{
+        Type    = "Pass"
+        Comment = "Represents invoking this architecture's \\"{wf_target_compute_id}\\" compute component."
+        End     = true
+      }}
+    }}
+  }})
+}}
+
+"""
+                outputs_tf += f"""output "{c_id}_state_machine_arn" {{
+  value       = aws_sfn_state_machine.{c_id}.arn
+  description = "Step Functions state machine ARN for {c_id}."
+}}
+
+"""
+
         # Add Security groups and IAM placeholders in compute.tf
         # Rationale: once an ALB fronts the compute layer, app_sg should only trust traffic that has
         # already passed through the ALB's security group -- not the raw internet directly.
@@ -1995,6 +2201,117 @@ resource "azurerm_servicebus_topic" "{c_id}" {{
 
 """
 
+            elif c.get("type") == "search":
+                storage_tf += _build_comments(lld, ["indexCount", "shardCount", "instanceSize"])
+                # Rationale: this "instanceSize" free text comes from the same shared (aws/azure/gcp)
+                # "search" LLD branch AWS's OpenSearch config also reads -- its high-scale default
+                # mentions dedicated master nodes ("r6g..."), its low-scale default a single node.
+                azure_search_instance_size_cfg = config.get("instanceSize") or ""
+                azure_search_is_high_scale = "r6g" in azure_search_instance_size_cfg
+                search_sku = "standard" if azure_search_is_high_scale else "basic"
+                storage_tf += f"""resource "azurerm_search_service" "{c_id}" {{
+  name                = "${{var.project_name}}-{c_id}"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
+  sku                 = "{search_sku}"
+}}
+
+"""
+                outputs_tf += f"""output "{c_id}_endpoint" {{
+  value       = "https://${{azurerm_search_service.{c_id}.name}}.search.windows.net"
+  description = "Azure Cognitive Search service endpoint for {c_id}."
+}}
+
+"""
+
+            elif c.get("type") == "analytics":
+                database_tf += _build_comments(lld, ["scalingMode", "retentionPolicy", "partitionStrategy", "etlSyncFrequency"])
+                # Rationale: azurerm_synapse_workspace requires an ADLS Gen2 filesystem to exist
+                # first (storage_data_lake_gen2_filesystem_id) -- a dedicated hierarchical-namespace
+                # storage account + filesystem provisioned here specifically for the workspace,
+                # kept separate from the architecture's own general-purpose "storage" component
+                # (which may not exist in this architecture at all, and is a conceptually different
+                # thing -- the warehouse's own data lake vs. the product's object storage).
+                database_tf += f"""resource "random_password" "{c_id}_sql_admin_password" {{
+  length           = 24
+  special          = true
+  override_special = "!#$%&*()-_=+[]{{}}<>:?"
+}}
+
+resource "azurerm_storage_account" "{c_id}_adls" {{
+  name                     = "${{var.project_name}}{c_id}adls"
+  resource_group_name     = azurerm_resource_group.rg.name
+  location                = azurerm_resource_group.rg.location
+  account_tier             = "Standard"
+  account_replication_type = "LRS"
+  account_kind             = "StorageV2"
+  is_hns_enabled            = true
+}}
+
+resource "azurerm_storage_data_lake_gen2_filesystem" "{c_id}" {{
+  name               = "{c_id}"
+  storage_account_id = azurerm_storage_account.{c_id}_adls.id
+}}
+
+resource "azurerm_synapse_workspace" "{c_id}" {{
+  name                                 = "${{var.project_name}}-{c_id}-synapse"
+  resource_group_name                 = azurerm_resource_group.rg.name
+  location                             = azurerm_resource_group.rg.location
+  storage_data_lake_gen2_filesystem_id = azurerm_storage_data_lake_gen2_filesystem.{c_id}.id
+  sql_administrator_login              = "sqladmin"
+  sql_administrator_login_password     = random_password.{c_id}_sql_admin_password.result
+
+  identity {{
+    type = "SystemAssigned"
+  }}
+}}
+
+"""
+                outputs_tf += f"""output "{c_id}_synapse_endpoint" {{
+  value       = azurerm_synapse_workspace.{c_id}.connectivity_endpoints
+  description = "Azure Synapse Analytics workspace connectivity endpoints for {c_id}."
+}}
+
+"""
+
+            elif c.get("type") == "ml":
+                # Rationale: a real "managed online endpoint" resource (what this component
+                # conceptually represents) does not exist in the stable azurerm provider as of this
+                # writing -- only azapi (preview) or the Azure CLI/SDK support it. Provisioning just
+                # the surrounding azurerm_machine_learning_workspace shell (which itself requires a
+                # dedicated storage account, Key Vault, and Application Insights) without any way to
+                # actually reach an inference endpoint through Terraform would be a half-finished
+                # resource, not a real capability -- so this follows the same honesty precedent the
+                # "private" cloud branch already established: a documented gap, not a guessed-at
+                # resource shape that might not validate or might silently do less than it implies.
+                compute_tf += _build_comments(lld, ["instanceType", "autoScaling", "dataComplianceBoundary"])
+                compute_tf += f"""# ---- {c.get("name")} -> Azure Machine Learning (Managed Online Endpoint) ----
+# NOT automated by this Terraform: the azurerm provider has no stable resource for an AML managed
+# online endpoint (only the preview azapi provider, or the Azure CLI/SDK, support it as of this
+# writing). Provisioning is a manual step:
+#   1. az ml workspace create (or a hand-rolled azurerm_machine_learning_workspace + its own
+#      dedicated storage account / Key Vault / Application Insights dependencies).
+#   2. az ml online-endpoint create / az ml online-deployment create, pointing at your trained
+#      model artifact (training that artifact is out of scope for this component -- see README).
+
+"""
+
+            elif c.get("type") == "workflow":
+                database_tf += _build_comments(lld, ["executionType", "retryPolicy", "executionHistoryRetention"])
+                database_tf += f"""resource "azurerm_logic_app_workflow" "{c_id}" {{
+  name                = "${{var.project_name}}-{c_id}"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
+}}
+
+"""
+                outputs_tf += f"""output "{c_id}_access_endpoint" {{
+  value       = azurerm_logic_app_workflow.{c_id}.access_endpoint
+  description = "Azure Logic Apps workflow access endpoint for {c_id} -- configure its trigger/actions in the Logic App Designer or via a workflow_parameters JSON definition."
+}}
+
+"""
+
         # Phase 5 (multi-region DR): real secondary-region resources. AWS gets the most detailed
         # implementation (see that branch); Azure/GCP get the equivalent for the two resource types
         # with an unambiguous, well-documented provider-native pattern (database replica + storage
@@ -2582,6 +2899,91 @@ resource "google_pubsub_subscription" "jobs_sub" {
                 database_tf += _build_comments(lld, ["deliveryChannels", "retryPolicy", "deadLetterHandling"])
                 database_tf += f"""resource "google_pubsub_topic" "{c_id}" {{
   name = "${{var.gcp_project}}-{c_id}-topic"
+}}
+
+"""
+
+            # Note: "search" intentionally has no GCP branch here -- cloud_mapping.py's own GCP
+            # mapping for "search" is honest that GCP has no first-party managed equivalent to AWS
+            # OpenSearch/Azure Cognitive Search (it resolves to self-hosted Elasticsearch/OpenSearch
+            # on GKE), and this generator's GCP branch doesn't provision a GKE cluster anywhere else
+            # to attach a Helm-deployed workload to -- matching the existing precedent of other
+            # component types (e.g. "auth") that also have no GCP branch in this file at all.
+
+            elif c.get("type") == "analytics":
+                database_tf += _build_comments(lld, ["scalingMode", "retentionPolicy", "partitionStrategy", "etlSyncFrequency"])
+                database_tf += f"""resource "google_bigquery_dataset" "{c_id}" {{
+  dataset_id  = "${{replace(var.gcp_project, "-", "_")}}_{c_id}"
+  location    = var.gcp_region
+  description = "Analytics data warehouse dataset for {c_id}, fed via ETL/CDC from the primary database."
+}}
+
+"""
+                outputs_tf += f"""output "{c_id}_dataset_id" {{
+  value       = google_bigquery_dataset.{c_id}.dataset_id
+  description = "BigQuery dataset ID for {c_id}."
+}}
+
+"""
+
+            elif c.get("type") == "ml":
+                # Rationale: google_vertex_ai_endpoint is a real, confirmed resource, but actually
+                # attaching a trained model to it (deploying it onto the endpoint) has no stable
+                # Terraform resource -- that step requires `gcloud ai endpoints deploy-model` or the
+                # Vertex AI SDK, and needs a real trained model artifact this component's own scope
+                # (inference endpoint only, not training) doesn't produce anyway. Provisioning the
+                # endpoint itself is still real, useful Terraform, so this isn't a full placeholder
+                # like the Azure ML branch -- just an honest note on the one manual step remaining.
+                compute_tf += _build_comments(lld, ["instanceType", "autoScaling", "dataComplianceBoundary"])
+                compute_tf += f"""resource "google_vertex_ai_endpoint" "{c_id}" {{
+  name         = "{c_id}"
+  display_name = "${{var.gcp_project}}-{c_id}-endpoint"
+  location     = var.gcp_region
+}}
+
+# NOT automated by this Terraform: deploying a trained model onto the endpoint above has no stable
+# Terraform resource -- run `gcloud ai endpoints deploy-model` (or the Vertex AI SDK) once a real
+# trained model artifact exists (training is out of scope for this component -- see README).
+
+"""
+                outputs_tf += f"""output "{c_id}_endpoint_name" {{
+  value       = google_vertex_ai_endpoint.{c_id}.name
+  description = "Vertex AI endpoint resource name for {c_id} -- deploy a model onto it before it can serve predictions."
+}}
+
+"""
+
+            elif c.get("type") == "workflow":
+                database_tf += _build_comments(lld, ["executionType", "retryPolicy", "executionHistoryRetention"])
+                wf_target_compute_id = "compute"
+                for conn in connections:
+                    if conn.get("to") == c_id:
+                        candidate = by_id.get(conn.get("from"))
+                        if candidate and candidate.get("type") == "compute":
+                            wf_target_compute_id = conn.get("from")
+                            break
+                database_tf += f"""resource "google_workflows_workflow" "{c_id}" {{
+  name            = "${{var.gcp_project}}-{c_id}"
+  region          = var.gcp_region
+  description     = "Minimal sequential workflow -- replace the placeholder step below with a real call to this architecture's own \\"{wf_target_compute_id}\\" component."
+  source_contents = <<-EOT
+  # Minimal workflow definition -- wire a real http.get/http.post call to this architecture's own
+  # "{wf_target_compute_id}" component in place of the placeholder step below.
+  main:
+    steps:
+      - invoke{wf_target_compute_id.capitalize()}:
+          call: sys.log
+          args:
+            text: "placeholder step -- replace with a real call to this architecture's compute component"
+      - returnResult:
+          return: "done"
+  EOT
+}}
+
+"""
+                outputs_tf += f"""output "{c_id}_workflow_id" {{
+  value       = google_workflows_workflow.{c_id}.id
+  description = "Cloud Workflows resource ID for {c_id}."
 }}
 
 """

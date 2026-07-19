@@ -1124,6 +1124,10 @@ KNOWN_COMPONENT_TYPES = (
     "audit-log",
     "phi-vault",
     "deidentification",
+    "search",
+    "analytics",
+    "ml",
+    "workflow",
 )
 
 

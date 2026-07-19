@@ -621,6 +621,107 @@ def run_lld_rules_engine(
             "A notification that fails every retry needs to land somewhere reviewable -- a silent failure here is exactly the kind of gap a user only discovers when someone complains they never got the email."
         )
 
+    elif component_type == "search":
+        config["indexCount"] = "Multiple indices, sharded by entity type (products, orders, etc.)" if is_high_scale else "Single index, default sharding"
+        config["shardCount"] = "5 primary shards + 1 replica each" if is_high_scale else "1 primary shard + 1 replica"
+        config["instanceSize"] = "3x r6g.large.search (dedicated master + data nodes)" if is_high_scale else "1x t3.small.search (single node)"
+
+        industry = (industry_context or {}).get("industry", "none")
+        needs_pii_redaction = is_high_security or industry in ("fintech", "healthtech")
+        config["piiRedactionRequired"] = "true" if needs_pii_redaction else "false"
+
+        reasoning["shardCount"] = (
+            "More shards spread indexing/query load across nodes at high volume, at the cost of more per-shard overhead."
+            if is_high_scale
+            else "A single shard is enough at this volume and avoids the per-shard overhead of an over-sharded small index."
+        )
+        reasoning["instanceSize"] = (
+            "A dedicated master node keeps cluster-state management off the data nodes once query/index volume is high enough to matter."
+            if is_high_scale
+            else "A single node is sufficient at this volume; add dedicated master nodes if the index grows."
+        )
+        reasoning["piiRedactionRequired"] = (
+            "Search results surface indexed field values verbatim, so if any indexed content includes PII/PHI (e.g. "
+            "user-generated reviews, support tickets), the ingestion pipeline feeding this index must redact it before "
+            "indexing -- a genuinely different compliance boundary than the primary database, which has its own "
+            "access controls this index doesn't inherit."
+            if needs_pii_redaction
+            else "No regulated/sensitive-data signal detected for this project -- revisit if indexed content later includes PII (e.g. user-generated content)."
+        )
+
+    elif component_type == "analytics":
+        config["scalingMode"] = (
+            "On-demand serverless (compute scales to zero between queries)" if is_low_budget else "Provisioned (reserved capacity for sustained, predictable query load)"
+        )
+        config["partitionStrategy"] = "Partitioned by ingestion date (daily), enabling partition pruning on time-range queries"
+        config["retentionPolicy"] = "Indefinite (regulatory/analytical history retained)" if is_high_security else "2 years, then archived to cold storage"
+        config["etlSyncFrequency"] = "Near-real-time change data capture (CDC) from the primary database" if is_high_scale else "Nightly batch ETL from the primary database"
+
+        reasoning["scalingMode"] = (
+            "On-demand serverless avoids paying for standing compute capacity on a tight budget, at the cost of less predictable per-query latency than a provisioned warehouse."
+            if is_low_budget
+            else "Provisioned capacity gives predictable query latency for a sustained reporting workload, at the cost of paying for it whether or not queries are actually running."
+        )
+        reasoning["etlSyncFrequency"] = (
+            "At this scale, a nightly batch lag is too stale for the reporting/analytics use case -- CDC keeps the warehouse close to real-time."
+            if is_high_scale
+            else "A nightly batch sync is simple to operate and matches most reporting use cases' actual freshness requirements at this scale."
+        )
+        reasoning["retentionPolicy"] = (
+            "Extended retention aligns with regulatory record-keeping expectations for compliance-sensitive workloads."
+            if is_high_security
+            else "A multi-year window balances useful trend analysis against unbounded storage growth."
+        )
+
+    elif component_type == "ml":
+        config["instanceType"] = "GPU-backed (e.g. ml.g5.xlarge)" if is_high_scale else "CPU-backed (e.g. ml.m5.large)"
+        config["autoScaling"] = "Target-tracking on InvocationsPerInstance, 2-10 instances" if is_high_scale else "Fixed 1 instance (no autoscaling)"
+
+        industry = (industry_context or {}).get("industry", "none")
+        model_sees_regulated_data = is_high_security or industry in ("fintech", "healthtech")
+        config["dataComplianceBoundary"] = (
+            "true -- PHI/PII may reach this model, extending the compliance boundary to include the inference endpoint"
+            if model_sees_regulated_data
+            else "false -- no regulated-data signal detected for this project"
+        )
+
+        reasoning["instanceType"] = (
+            "GPU inference cuts per-request latency materially for real-time recommendation/classification traffic at this volume, at a real cost premium over CPU."
+            if is_high_scale
+            else "CPU inference is cheaper and sufficient for lighter models at this request volume; revisit if latency becomes a problem."
+        )
+        reasoning["autoScaling"] = (
+            "Autoscaling absorbs request-volume spikes without over-provisioning for peak load at all times."
+            if is_high_scale
+            else "A single fixed instance is simplest and cheapest at this request volume; add autoscaling once traffic grows."
+        )
+        reasoning["dataComplianceBoundary"] = (
+            "If the features sent to this model include any PHI/PII (not just an opaque user ID), the inference endpoint "
+            "itself falls inside the same compliance boundary as the database it draws from -- encryption in transit, "
+            "access logging, and data-residency requirements apply here too, not just at the primary data store."
+            if model_sees_regulated_data
+            else "No regulated-data signal detected for this project -- revisit this if the model's input features start including PHI/PII rather than anonymized/derived signals."
+        )
+
+    elif component_type == "workflow":
+        config["executionType"] = (
+            "Express (high-volume, short-duration, at-least-once)" if is_high_scale else "Standard (durable, full execution history up to 1 year)"
+        )
+        config["retryPolicy"] = "3 retries per state with exponential backoff; unhandled errors route to a catch-all error handler"
+        config["executionHistoryRetention"] = "90 days" if is_high_security else "30 days"
+
+        reasoning["executionType"] = (
+            "Express trades Standard's exactly-once execution history for materially lower per-execution cost, which matters once invocation volume is genuinely high."
+            if is_high_scale
+            else "Standard's full execution history is worth the extra cost at this volume -- useful for auditing exactly what happened in a given approval/business-process run."
+        )
+        reasoning["retryPolicy"] = "A few retries with backoff absorb a transient failure in one step without requiring the whole process to restart from the beginning."
+        reasoning["executionHistoryRetention"] = (
+            "Extended retention aligns with regulatory record-keeping expectations for a compliance-sensitive process."
+            if is_high_security
+            else "30 days is enough to debug a recent failed execution while keeping storage costs down."
+        )
+
     else:
         config["genericType"] = "Generic Config"
         reasoning["genericType"] = "Standard deployment config."
@@ -631,10 +732,13 @@ def run_lld_rules_engine(
     if industry_context and industry_context["industry"] != "none":
         standard = "PCI-DSS" if industry_context["industry"] == "fintech" else "HIPAA"
 
-        if component_type in ("database", "storage", "cache"):
+        if component_type in ("database", "storage", "cache", "analytics"):
             config["encryptionInTransit"] = "TLS 1.2+ (Enforced)"
             reasoning["encryptionInTransit"] = (
-                f"Mandatory for {standard} compliance — encryption in transit is not optional for regulated data, regardless of scale."
+                f"Mandatory for {standard} compliance — encryption in transit is not optional for regulated data, regardless of scale. "
+                "This applies to the analytics warehouse too, since it holds a real (if delayed) copy of the same regulated data."
+                if component_type == "analytics"
+                else f"Mandatory for {standard} compliance — encryption in transit is not optional for regulated data, regardless of scale."
             )
 
         if component_type == "database" and industry_context["industry"] == "fintech":
@@ -840,6 +944,38 @@ def _run_kubernetes_lld(
         config["retryPolicy"] = "3 attempts, exponential backoff"
         reasoning["deploymentMode"] = "JetStream durably queues the fan-out event; the dispatch Deployment is what actually calls the configured external email/SMS/push provider, since nothing in-cluster can deliver to an end-user inbox or phone directly."
 
+    elif component_type == "search":
+        config["replicas"] = "3 (multi-node cluster, quorum-based)" if is_high_scale else "1 (single node)"
+        config["storageSize"] = "200Gi" if is_high_scale else "50Gi"
+        config["namespace"] = "data"
+        reasoning["replicas"] = (
+            "A 3-node cluster tolerates a single node failure without losing quorum for index writes."
+            if is_high_scale
+            else "A single node is sufficient at this volume; a node failure means reindexing from the source of truth, not permanent data loss, since this is a derived index."
+        )
+
+    elif component_type == "analytics":
+        config["deploymentMode"] = "External (ExternalName Service + Secret) -- no in-cluster analytics/data-warehouse equivalent"
+        config["namespace"] = "data"
+        reasoning["deploymentMode"] = (
+            "A real OLAP data warehouse is a genuinely different, heavier stateful workload than anything else this "
+            "cluster self-hosts -- this is modeled as a network destination outside the cluster (a managed warehouse "
+            "or an existing enterprise one), reached via a Kubernetes Secret holding its connection credentials."
+        )
+
+    elif component_type == "ml":
+        config["deploymentMode"] = "KServe InferenceService (or Seldon Core)"
+        config["replicas"] = "2" if is_high_scale else "1"
+        config["namespace"] = "ml"
+        reasoning["deploymentMode"] = "KServe wraps model serving in a Kubernetes-native CRD with built-in autoscaling (including scale-to-zero), so the endpoint doesn't need a hand-rolled Deployment + HPA."
+        reasoning["namespace"] = "A dedicated 'ml' namespace keeps GPU-scheduling and model-serving RBAC scoped separately from the general 'app' namespace."
+
+    elif component_type == "workflow":
+        config["deploymentMode"] = "Argo Workflows (Helm chart)"
+        config["namespace"] = "workflows"
+        reasoning["deploymentMode"] = "Argo Workflows defines each step as a Kubernetes-native CRD (a real pod per step), so retries/error-handling/execution history live in cluster-native resources rather than an external managed service."
+        reasoning["namespace"] = "A dedicated 'workflows' namespace keeps the orchestrator's own controller/RBAC scoped separately from the workloads it triggers."
+
     else:
         config["genericType"] = "Generic in-cluster workload"
         config["namespace"] = "app"
@@ -956,6 +1092,25 @@ def _run_private_cloud_lld(
         config["retryPolicy"] = "3 attempts, exponential backoff"
         config["externalDependencyFlag"] = "An external delivery provider (email/SMS/push gateway) is required -- nothing on-premises can deliver directly to end users"
         reasoning["externalDependencyFlag"] = "Flagging explicitly: the message bus only handles internal fan-out; actual delivery to a real inbox/phone always exits through an external provider."
+
+    elif component_type == "search":
+        config["vmSize"] = "8 vCPU / 32GB RAM" if is_high_scale else "4 vCPU / 16GB RAM"
+        config["vmCount"] = "3 (clustered)" if is_high_scale else "1"
+        reasoning["vmCount"] = "A 3-node cluster tolerates a single node failure; a single node at lower scale means reindexing from the source of truth on failure, not permanent data loss."
+
+    elif component_type == "analytics":
+        config["deploymentMode"] = "No managed equivalent on-premises -- typically a network destination reached over the corporate network/VPN (e.g. an existing enterprise data warehouse appliance)"
+        reasoning["deploymentMode"] = "Flagging explicitly: this design does not provision analytics/data-warehouse hardware -- it assumes one already exists on the corporate network, or that provisioning it is a separate, larger undertaking outside this architecture's scope."
+
+    elif component_type == "ml":
+        config["vmSize"] = "GPU-equipped VM (e.g. NVIDIA T4/A10) recommended" if is_high_scale else "CPU-only VM acceptable at this request volume"
+        config["deploymentMode"] = "Self-hosted inference server (e.g. NVIDIA Triton), no managed equivalent"
+        reasoning["deploymentMode"] = "On-premises has no managed autoscaling or model-versioning tooling -- capacity must be pre-provisioned for peak inference load, and deployment/rollback is a manual operational process."
+
+    elif component_type == "workflow":
+        config["deploymentMode"] = "Self-hosted orchestrator (e.g. Apache Airflow / Temporal) on dedicated VM(s)"
+        config["vmCount"] = "2 (HA pair)" if is_high_scale else "1"
+        reasoning["vmCount"] = "An HA pair avoids the orchestrator itself becoming a single point of failure for every process it coordinates once scale is high enough to matter."
 
     else:
         config["genericType"] = "Generic on-premises component"

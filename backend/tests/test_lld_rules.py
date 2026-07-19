@@ -453,3 +453,151 @@ class TestNotificationLldConfig:
         req = make_requirements()
         result = run_lld_rules_engine("private", "notification", "notification", req)
         assert "external delivery provider" in result["config"]["externalDependencyFlag"].lower()
+
+
+class TestSearchLldConfig:
+    def test_high_scale_gets_more_shards_and_dedicated_master(self):
+        req = make_requirements(expectedScale="high scale, 5 million users")
+        result = run_lld_rules_engine("aws", "search", "search", req)
+        assert "r6g.large.search" in result["config"]["instanceSize"]
+        assert "5 primary shards" in result["config"]["shardCount"]
+
+    def test_low_scale_gets_single_node(self):
+        req = make_requirements(expectedScale="1,000 users")
+        result = run_lld_rules_engine("aws", "search", "search", req)
+        assert "t3.small.search" in result["config"]["instanceSize"]
+
+    def test_pii_redaction_required_for_high_security_compliance(self):
+        req = make_requirements(compliance="GDPR required, must encrypt PII")
+        result = run_lld_rules_engine("aws", "search", "search", req)
+        assert result["config"]["piiRedactionRequired"] == "true"
+
+    def test_pii_redaction_required_for_regulated_industry(self):
+        req = make_requirements()
+        result = run_lld_rules_engine(
+            "aws", "search", "search", req, industry_context={"industry": "healthtech", "flags": {}}
+        )
+        assert result["config"]["piiRedactionRequired"] == "true"
+
+    def test_pii_redaction_not_required_for_generic_project(self):
+        req = make_requirements()
+        result = run_lld_rules_engine("aws", "search", "search", req)
+        assert result["config"]["piiRedactionRequired"] == "false"
+
+    def test_kubernetes_replicas_scale_with_high_scale(self):
+        req = make_requirements(expectedScale="high scale, 5 million users")
+        result = run_lld_rules_engine("kubernetes", "search", "search", req)
+        assert "3" in result["config"]["replicas"]
+
+    def test_private_search_vm_count_scales_with_high_scale(self):
+        req = make_requirements(expectedScale="high scale, 5 million users")
+        result = run_lld_rules_engine("private", "search", "search", req)
+        assert "3" in result["config"]["vmCount"]
+
+
+class TestAnalyticsLldConfig:
+    def test_tight_budget_gets_serverless_scaling_mode(self):
+        req = make_requirements(budget="$50/month")
+        result = run_lld_rules_engine("aws", "analytics", "analytics", req)
+        assert "On-demand serverless" in result["config"]["scalingMode"]
+
+    def test_adequate_budget_gets_provisioned_scaling_mode(self):
+        req = make_requirements(budget="$50,000/month")
+        result = run_lld_rules_engine("aws", "analytics", "analytics", req)
+        assert "Provisioned" in result["config"]["scalingMode"]
+
+    def test_high_scale_gets_cdc_sync(self):
+        req = make_requirements(expectedScale="high scale, 5 million users")
+        result = run_lld_rules_engine("aws", "analytics", "analytics", req)
+        assert "change data capture" in result["config"]["etlSyncFrequency"].lower()
+
+    def test_low_scale_gets_nightly_batch_sync(self):
+        req = make_requirements(expectedScale="1,000 users")
+        result = run_lld_rules_engine("aws", "analytics", "analytics", req)
+        assert "Nightly batch" in result["config"]["etlSyncFrequency"]
+
+    def test_kubernetes_flags_external_deployment_no_in_cluster_equivalent(self):
+        req = make_requirements()
+        result = run_lld_rules_engine("kubernetes", "analytics", "analytics", req)
+        assert "External" in result["config"]["deploymentMode"]
+
+    def test_industry_context_mandates_encryption_in_transit(self):
+        req = make_requirements()
+        result = run_lld_rules_engine(
+            "aws", "analytics", "analytics", req, industry_context={"industry": "fintech", "flags": {}}
+        )
+        assert result["config"]["encryptionInTransit"] == "TLS 1.2+ (Enforced)"
+
+    def test_no_industry_context_no_encryption_in_transit_key(self):
+        req = make_requirements()
+        result = run_lld_rules_engine("aws", "analytics", "analytics", req)
+        assert "encryptionInTransit" not in result["config"]
+
+
+class TestMlLldConfig:
+    def test_high_scale_gets_gpu_instance_and_autoscaling(self):
+        req = make_requirements(expectedScale="high scale, 5 million users")
+        result = run_lld_rules_engine("aws", "ml", "ml", req)
+        assert "GPU" in result["config"]["instanceType"]
+        assert "2-10 instances" in result["config"]["autoScaling"]
+
+    def test_low_scale_gets_cpu_instance_fixed_capacity(self):
+        req = make_requirements(expectedScale="1,000 users")
+        result = run_lld_rules_engine("aws", "ml", "ml", req)
+        assert "CPU" in result["config"]["instanceType"]
+        assert "Fixed 1 instance" in result["config"]["autoScaling"]
+
+    def test_compliance_boundary_flagged_for_regulated_industry(self):
+        req = make_requirements()
+        result = run_lld_rules_engine(
+            "aws", "ml", "ml", req, industry_context={"industry": "fintech", "flags": {}}
+        )
+        assert result["config"]["dataComplianceBoundary"].startswith("true")
+
+    def test_compliance_boundary_not_flagged_for_generic_project(self):
+        req = make_requirements()
+        result = run_lld_rules_engine("aws", "ml", "ml", req)
+        assert result["config"]["dataComplianceBoundary"].startswith("false")
+
+    def test_kubernetes_maps_to_kserve_deployment_mode(self):
+        req = make_requirements()
+        result = run_lld_rules_engine("kubernetes", "ml", "ml", req)
+        assert "KServe" in result["config"]["deploymentMode"]
+
+    def test_private_recommends_gpu_at_high_scale(self):
+        req = make_requirements(expectedScale="high scale, 5 million users")
+        result = run_lld_rules_engine("private", "ml", "ml", req)
+        assert "GPU" in result["config"]["vmSize"]
+
+
+class TestWorkflowLldConfig:
+    def test_high_scale_gets_express_execution_type(self):
+        req = make_requirements(expectedScale="high scale, 5 million users")
+        result = run_lld_rules_engine("aws", "workflow", "workflow", req)
+        assert "Express" in result["config"]["executionType"]
+
+    def test_low_scale_gets_standard_execution_type(self):
+        req = make_requirements(expectedScale="1,000 users")
+        result = run_lld_rules_engine("aws", "workflow", "workflow", req)
+        assert "Standard" in result["config"]["executionType"]
+
+    def test_retry_policy_always_present(self):
+        req = make_requirements()
+        result = run_lld_rules_engine("aws", "workflow", "workflow", req)
+        assert result["config"]["retryPolicy"]
+
+    def test_high_security_gets_extended_history_retention(self):
+        req = make_requirements(compliance="HIPAA required")
+        result = run_lld_rules_engine("aws", "workflow", "workflow", req)
+        assert result["config"]["executionHistoryRetention"] == "90 days"
+
+    def test_kubernetes_maps_to_argo_workflows_namespace(self):
+        req = make_requirements()
+        result = run_lld_rules_engine("kubernetes", "workflow", "workflow", req)
+        assert "Argo Workflows" in result["config"]["deploymentMode"]
+        assert result["config"]["namespace"] == "workflows"
+
+    def test_private_ha_pair_at_high_scale(self):
+        req = make_requirements(expectedScale="high scale, 5 million users")
+        result = run_lld_rules_engine("private", "workflow", "workflow", req)
+        assert "2" in result["config"]["vmCount"]

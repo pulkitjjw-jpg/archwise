@@ -623,6 +623,98 @@ def _aws_mapping(
             },
         )
 
+    if component_type == "search":
+        return _mapping(
+            "Amazon OpenSearch Service",
+            [
+                {
+                    "serviceName": "Self-Hosted Elasticsearch/OpenSearch on EC2",
+                    "reason": "Chose the managed OpenSearch Service to avoid operating cluster upgrades, shard rebalancing, and node failover by hand. Self-hosting on EC2 is cheaper at steady scale but shifts that operational burden onto the team.",
+                    "costEstimate": {
+                        "min": 60,
+                        "max": 400 if is_high_scale else 150,
+                        "assumptions": "2-3 r6g.large EC2 instances running self-managed OpenSearch, plus EBS storage -- cheaper than the managed service but with no managed failover/patching.",
+                    },
+                }
+            ],
+            {
+                "min": 90 if is_high_scale else 30,
+                "max": 700 if is_high_scale else 180,
+                "assumptions": (
+                    "Multi-node OpenSearch domain (dedicated master + data nodes) sized for high query/index volume."
+                    if is_high_scale
+                    else "Single-node OpenSearch domain (t3.small.search) for light indexing/query volume."
+                ),
+            },
+        )
+
+    if component_type == "analytics":
+        return _mapping(
+            "Amazon Redshift Serverless",
+            [
+                {
+                    "serviceName": "Amazon Redshift (Provisioned Cluster)",
+                    "reason": "Chose Redshift Serverless so compute capacity scales with actual query load instead of paying for an always-on cluster. A provisioned cluster is cheaper at genuinely constant, high, predictable query volume.",
+                    "costEstimate": {
+                        "min": 180,
+                        "max": 900 if is_high_scale else 400,
+                        "assumptions": "A small provisioned Redshift cluster (2x ra3.xlplus nodes) running continuously, billed regardless of query volume.",
+                    },
+                }
+            ],
+            {
+                "min": 90,
+                "max": 500 if is_high_scale else 200,
+                "assumptions": "Redshift Serverless billed per RPU-second of actual query compute, plus managed storage -- scales to near-zero between queries.",
+            },
+        )
+
+    if component_type == "ml":
+        return _mapping(
+            "Amazon SageMaker (Real-Time Inference Endpoint)",
+            [
+                {
+                    "serviceName": "Self-Hosted Inference Server (Triton on ECS/EC2)",
+                    "reason": "Chose a managed SageMaker endpoint for built-in autoscaling, model versioning, and A/B traffic splitting without operating the serving stack directly. A self-hosted Triton server is cheaper at high, steady request volume but requires operating GPU fleet capacity and model deployment tooling yourselves.",
+                    "costEstimate": {
+                        "min": 150,
+                        "max": 1200 if is_high_scale else 400,
+                        "assumptions": "Dedicated GPU/CPU EC2 instance(s) running a self-managed Triton Inference Server, plus the ECS/EC2 orchestration around it.",
+                    },
+                }
+            ],
+            {
+                "min": 60,
+                "max": 900 if is_high_scale else 200,
+                "assumptions": (
+                    "GPU-backed instance (e.g. ml.g5.xlarge) for lower-latency inference under real request volume."
+                    if is_high_scale
+                    else "CPU-backed instance (e.g. ml.m5.large) -- sufficient for lightweight models at low request volume, and materially cheaper than a GPU instance."
+                ),
+            },
+        )
+
+    if component_type == "workflow":
+        return _mapping(
+            "AWS Step Functions (Standard Workflow)",
+            [
+                {
+                    "serviceName": "AWS Step Functions (Express Workflow)",
+                    "reason": "Chose a Standard workflow for its full execution history (up to 1 year, useful for auditing a multi-step approval/business process) and exactly-once execution semantics. An Express workflow is materially cheaper at very high invocation volume, but only keeps CloudWatch Logs history and is at-least-once, not exactly-once.",
+                    "costEstimate": {
+                        "min": 5,
+                        "max": 100 if is_high_scale else 25,
+                        "assumptions": "Express workflow pricing ($1 per million requests + duration-based compute charge) -- much cheaper than Standard at high invocation volume.",
+                    },
+                }
+            ],
+            {
+                "min": 0,
+                "max": 60 if is_high_scale else 10,
+                "assumptions": "Standard workflow pricing ($25 per million state transitions) -- no fixed baseline cost, scales with actual executions.",
+            },
+        )
+
     return _mapping(f"AWS Mapped Service ({component_type})", [], {"min": 0, "max": 0, "assumptions": "Generic AWS component."})
 
 
@@ -1116,6 +1208,98 @@ def _azure_mapping(
                 "min": 10,
                 "max": 45 if is_high_scale else 18,
                 "assumptions": "Service Bus Standard tier base price (~$10/mo, includes 10M operations), shared across topics and queues in the same namespace.",
+            },
+        )
+
+    if component_type == "search":
+        return _mapping(
+            "Azure Cognitive Search",
+            [
+                {
+                    "serviceName": "Self-Hosted Elasticsearch/OpenSearch on Azure VMs",
+                    "reason": "Chose the managed Cognitive Search service for built-in AI enrichment pipelines and no cluster operations. Self-hosting on VMs is cheaper at steady scale but shifts patching/failover onto the team.",
+                    "costEstimate": {
+                        "min": 60,
+                        "max": 400 if is_high_scale else 150,
+                        "assumptions": "2-3 self-managed VMs running Elasticsearch/OpenSearch, plus managed disk storage -- cheaper than the managed service but with no managed failover/patching.",
+                    },
+                }
+            ],
+            {
+                "min": 75 if is_high_scale else 25,
+                "max": 600 if is_high_scale else 150,
+                "assumptions": (
+                    "Standard tier, multiple search units/partitions for high query/index volume."
+                    if is_high_scale
+                    else "Basic tier, single search unit for light indexing/query volume."
+                ),
+            },
+        )
+
+    if component_type == "analytics":
+        return _mapping(
+            "Azure Synapse Analytics",
+            [
+                {
+                    "serviceName": "Azure SQL Data Warehouse (Legacy Dedicated SQL Pool)",
+                    "reason": "Chose Synapse Analytics as the current, actively developed unification of SQL/Spark analytics over an ADLS Gen2 lake. The legacy dedicated SQL pool product this superseded is still available but no longer where Microsoft invests.",
+                    "costEstimate": {
+                        "min": 180,
+                        "max": 900 if is_high_scale else 400,
+                        "assumptions": "A small dedicated SQL pool (DW100c) running continuously, billed regardless of query volume.",
+                    },
+                }
+            ],
+            {
+                "min": 90,
+                "max": 500 if is_high_scale else 200,
+                "assumptions": "Synapse serverless SQL pool billed per TB of data scanned, plus the ADLS Gen2 storage the workspace requires -- scales to near-zero between queries.",
+            },
+        )
+
+    if component_type == "ml":
+        return _mapping(
+            "Azure Machine Learning (Managed Online Endpoint)",
+            [
+                {
+                    "serviceName": "Self-Hosted Inference Server (Triton on Azure VMs)",
+                    "reason": "Chose a managed AML online endpoint for built-in autoscaling and traffic-split deployments without operating the serving stack directly. A self-hosted Triton server is cheaper at high, steady request volume but requires operating GPU VM capacity and model deployment tooling yourselves.",
+                    "costEstimate": {
+                        "min": 150,
+                        "max": 1200 if is_high_scale else 400,
+                        "assumptions": "Dedicated GPU/CPU VM(s) running a self-managed Triton Inference Server.",
+                    },
+                }
+            ],
+            {
+                "min": 60,
+                "max": 900 if is_high_scale else 200,
+                "assumptions": (
+                    "GPU-backed compute instance for lower-latency inference under real request volume."
+                    if is_high_scale
+                    else "CPU-backed compute instance -- sufficient for lightweight models at low request volume, and materially cheaper than a GPU instance."
+                ),
+            },
+        )
+
+    if component_type == "workflow":
+        return _mapping(
+            "Azure Logic Apps",
+            [
+                {
+                    "serviceName": "Azure Durable Functions",
+                    "reason": "Chose Logic Apps for its visual designer and large library of pre-built connectors, a good fit for an approval/business process that mixes internal steps with external SaaS calls. Durable Functions is the better fit when the workflow is mostly custom code with only a few external integrations.",
+                    "costEstimate": {
+                        "min": 0,
+                        "max": 60 if is_high_scale else 10,
+                        "assumptions": "Consumption-plan Durable Functions billed per execution/duration -- no fixed baseline cost.",
+                    },
+                }
+            ],
+            {
+                "min": 5,
+                "max": 100 if is_high_scale else 25,
+                "assumptions": "Consumption-plan Logic Apps billed per action executed ($0.000025/action) -- no fixed baseline cost, scales with actual executions.",
             },
         )
 
@@ -1615,6 +1799,98 @@ def _gcp_mapping(
             },
         )
 
+    if component_type == "search":
+        return _mapping(
+            "Elasticsearch/OpenSearch on GKE (Self-Managed -- No First-Party Managed Equivalent)",
+            [
+                {
+                    "serviceName": "Vertex AI Search",
+                    "reason": "Chose self-hosted Elasticsearch/OpenSearch on GKE because it's a direct, well-understood equivalent to AWS OpenSearch/Azure Cognitive Search for classic catalog/log/document full-text search. Vertex AI Search is Google's real managed offering here, but it's built around AI-powered/semantic (RAG-style) search over a specific data-store shape -- a stronger fit if the use case is genuinely conversational/semantic search rather than classic keyword/faceted lookup.",
+                    "costEstimate": {
+                        "min": 50,
+                        "max": 400 if is_high_scale else 150,
+                        "assumptions": "Vertex AI Search billed per query + per GB indexed -- no cluster to size, but priced for AI-powered search, not classic full-text lookup.",
+                    },
+                }
+            ],
+            {
+                "min": 90 if is_high_scale else 30,
+                "max": 700 if is_high_scale else 180,
+                "assumptions": (
+                    "GKE node pool costs for a multi-node Elasticsearch/OpenSearch StatefulSet sized for high query/index volume -- GCP has no first-party managed service comparable to AWS OpenSearch/Azure Cognitive Search."
+                    if is_high_scale
+                    else "GKE node pool costs for a small self-managed Elasticsearch/OpenSearch deployment -- GCP has no first-party managed service comparable to AWS OpenSearch/Azure Cognitive Search."
+                ),
+            },
+        )
+
+    if component_type == "analytics":
+        return _mapping(
+            "Google BigQuery",
+            [
+                {
+                    "serviceName": "Google Cloud SQL Analytics Read Replica",
+                    "reason": "Chose BigQuery -- genuinely the strongest fit of any provider here, since it's serverless-by-default and purpose-built for exactly this OLAP/reporting workload. A Cloud SQL read replica is cheaper for very light reporting needs but is still a row-store, not a real columnar warehouse.",
+                    "costEstimate": {
+                        "min": 35,
+                        "max": 280 if is_high_scale else 90,
+                        "assumptions": "A dedicated read-replica Cloud SQL instance for reporting queries, isolated from the primary's write path.",
+                    },
+                }
+            ],
+            {
+                "min": 20,
+                "max": 400 if is_high_scale else 120,
+                "assumptions": "BigQuery on-demand pricing billed per TB scanned, plus storage -- scales to near-zero between queries, no cluster to provision or size.",
+            },
+        )
+
+    if component_type == "ml":
+        return _mapping(
+            "Vertex AI (Online Prediction)",
+            [
+                {
+                    "serviceName": "Self-Hosted Inference Server (Triton on GCE)",
+                    "reason": "Chose a managed Vertex AI endpoint for built-in autoscaling and traffic-split deployments without operating the serving stack directly. A self-hosted Triton server on Compute Engine is cheaper at high, steady request volume but requires operating GPU VM capacity and model deployment tooling yourselves.",
+                    "costEstimate": {
+                        "min": 150,
+                        "max": 1200 if is_high_scale else 400,
+                        "assumptions": "Dedicated GPU/CPU Compute Engine instance(s) running a self-managed Triton Inference Server.",
+                    },
+                }
+            ],
+            {
+                "min": 60,
+                "max": 900 if is_high_scale else 200,
+                "assumptions": (
+                    "GPU-backed instance for lower-latency inference under real request volume."
+                    if is_high_scale
+                    else "CPU-backed instance -- sufficient for lightweight models at low request volume, and materially cheaper than a GPU instance."
+                ),
+            },
+        )
+
+    if component_type == "workflow":
+        return _mapping(
+            "Google Cloud Workflows",
+            [
+                {
+                    "serviceName": "Google Cloud Composer (Managed Apache Airflow)",
+                    "reason": "Chose Cloud Workflows for a lightweight, serverless orchestrator that scales to zero between executions -- a good fit for an application-triggered multi-step process. Cloud Composer is the better fit for scheduled data-pipeline orchestration with a large DAG library, but runs on a standing, materially more expensive Airflow environment.",
+                    "costEstimate": {
+                        "min": 300,
+                        "max": 900 if is_high_scale else 450,
+                        "assumptions": "Cloud Composer's smallest environment tier, billed continuously regardless of how many workflows actually run.",
+                    },
+                }
+            ],
+            {
+                "min": 0,
+                "max": 60 if is_high_scale else 10,
+                "assumptions": "Cloud Workflows billed per step executed (first 5,000 steps/month free) -- no fixed baseline cost, scales with actual executions.",
+            },
+        )
+
     return _mapping(f"GCP Mapped Service ({component_type})", [], {"min": 0, "max": 0, "assumptions": "Generic GCP component."})
 
 
@@ -2002,6 +2278,90 @@ def _kubernetes_mapping(component_type: str, component_id: str, is_high_scale: b
             },
         )
 
+    if component_type == "search":
+        return _mapping(
+            "Elasticsearch/OpenSearch (Self-Hosted, Helm Chart)",
+            [
+                {
+                    "serviceName": "External Managed Search (e.g. OpenSearch Service/Cognitive Search) via K8s Secret",
+                    "reason": "Chose self-hosted Elasticsearch/OpenSearch to keep the search index inside the cluster's own infrastructure footprint. An external managed service removes cluster-sizing and shard-rebalancing responsibility entirely.",
+                    "costEstimate": {
+                        "min": 60,
+                        "max": 400 if is_high_scale else 150,
+                        "assumptions": "External managed search service billed by whichever cloud host the cluster runs on, connected in via a Kubernetes Secret holding provider credentials.",
+                    },
+                }
+            ],
+            {
+                "min": 30,
+                "max": 250 if is_high_scale else 80,
+                "assumptions": "Elasticsearch/OpenSearch StatefulSet (multi-node cluster for HA) via a Helm chart, with persistent volumes for index storage.",
+            },
+        )
+
+    if component_type == "analytics":
+        return _mapping(
+            "No Managed Equivalent -- External Network Destination (e.g. Redshift/BigQuery/Synapse via ExternalName Service)",
+            [
+                {
+                    "serviceName": "Self-Hosted OLAP Engine (e.g. ClickHouse, Helm Chart)",
+                    "reason": "A self-hosted OLAP engine keeps analytical queries inside the cluster's own infrastructure, at the cost of operating a genuinely different, heavier stateful workload than anything else this cluster runs. In practice, reaching an external managed warehouse is almost always the more sensible choice.",
+                    "costEstimate": {
+                        "min": 150,
+                        "max": 700 if is_high_scale else 300,
+                        "assumptions": "ClickHouse StatefulSet (multi-node cluster) with persistent volumes -- a materially heavier operational footprint than the rest of this cluster's stateful workloads.",
+                    },
+                }
+            ],
+            {
+                "min": 20,
+                "max": 400 if is_high_scale else 120,
+                "assumptions": "No in-cluster analytics/data-warehouse workload -- this is a network destination billed by whichever external managed warehouse the cluster is configured to reach, connected in via an ExternalName Service + Kubernetes Secret.",
+            },
+        )
+
+    if component_type == "ml":
+        return _mapping(
+            "KServe (or Seldon Core) on the Cluster",
+            [
+                {
+                    "serviceName": "External Managed Inference Endpoint (e.g. SageMaker/Vertex AI) via K8s Secret",
+                    "reason": "Chose KServe/Seldon Core to keep model serving inside the cluster's own infrastructure and autoscaling machinery (including scale-to-zero). An external managed endpoint removes GPU-node capacity planning entirely, at the cost of a dependency outside the cluster.",
+                    "costEstimate": {
+                        "min": 60,
+                        "max": 900 if is_high_scale else 200,
+                        "assumptions": "External managed inference endpoint billed by whichever cloud host the cluster runs on, reached from in-cluster pods over a private network path.",
+                    },
+                }
+            ],
+            {
+                "min": 60,
+                "max": 900 if is_high_scale else 200,
+                "assumptions": "KServe InferenceService running on GPU/CPU node pool capacity provisioned as part of the cluster -- cost tracks whichever node pool the model actually schedules onto.",
+            },
+        )
+
+    if component_type == "workflow":
+        return _mapping(
+            "Argo Workflows",
+            [
+                {
+                    "serviceName": "External Managed Orchestrator (e.g. Step Functions/Cloud Workflows) via K8s Secret",
+                    "reason": "Chose Argo Workflows for a Kubernetes-native orchestrator defined declaratively as cluster config (CRDs), with no external dependency. An external managed orchestrator removes the operational burden of running the Argo controller, at the cost of a dependency outside the cluster.",
+                    "costEstimate": {
+                        "min": 0,
+                        "max": 60 if is_high_scale else 10,
+                        "assumptions": "External managed orchestrator billed by whichever cloud host the cluster runs on, invoked from in-cluster pods over a private network path.",
+                    },
+                }
+            ],
+            {
+                "min": 10,
+                "max": 100 if is_high_scale else 30,
+                "assumptions": "Argo Workflows controller + UI running within existing cluster capacity; individual workflow steps run as regular pods, so cost tracks pod resource requests, not a separate execution fee.",
+            },
+        )
+
     return _mapping(
         f"Kubernetes Mapped Workload ({component_type})", [], {"min": 0, "max": 0, "assumptions": "Generic in-cluster workload."}
     )
@@ -2361,6 +2721,90 @@ def _private_mapping(component_type: str, component_id: str, is_high_scale: bool
                 "min": 60 if is_high_scale else 25,
                 "max": 200 if is_high_scale else 70,
                 "assumptions": "Dedicated VM running a self-managed message bus. An external delivery provider (email/SMS/push gateway) is still required and billed separately -- nothing on-premises can deliver directly to end-user inboxes/devices.",
+            },
+        )
+
+    if component_type == "search":
+        return _mapping(
+            "Self-Hosted Elasticsearch/OpenSearch on Dedicated VM(s)",
+            [
+                {
+                    "serviceName": "SQL Full-Text Search Extension (e.g. PostgreSQL tsvector)",
+                    "reason": "Chose a dedicated Elasticsearch/OpenSearch cluster for real faceting, relevance scoring, and scale beyond what a relational database's built-in full-text extension handles well. A database extension avoids new infrastructure entirely but degrades quickly past a modest catalog size or query complexity.",
+                    "costEstimate": {
+                        "min": 0,
+                        "max": 0,
+                        "assumptions": "No separate infrastructure cost -- runs inside the existing database, at the cost of materially weaker search relevance/faceting than a dedicated search engine.",
+                    },
+                }
+            ],
+            {
+                "min": 200 if is_high_scale else 80,
+                "max": 800 if is_high_scale else 300,
+                "assumptions": "Dedicated VM(s) running a self-managed Elasticsearch/OpenSearch cluster. Failover, shard rebalancing, and version upgrades are manual operational responsibilities.",
+            },
+        )
+
+    if component_type == "analytics":
+        return _mapping(
+            "No Managed Equivalent On-Premises -- Network Destination Reached Over the Corporate Network/VPN",
+            [
+                {
+                    "serviceName": "Self-Hosted OLAP Engine (e.g. ClickHouse) on Dedicated Hardware",
+                    "reason": "A self-hosted OLAP engine keeps analytical data on-premises, matching this deployment's general data-residency posture, at the cost of a genuinely heavier operational footprint than most other components here.",
+                    "costEstimate": {
+                        "min": 800 if is_high_scale else 300,
+                        "max": 3000 if is_high_scale else 1200,
+                        "assumptions": "Dedicated hardware sized for a self-managed columnar OLAP engine -- no managed-service licensing, but no turnkey HA/patching either.",
+                    },
+                }
+            ],
+            {
+                "min": 0,
+                "max": 0,
+                "assumptions": "Flag: no data-warehouse hardware provisioned by this design -- analytics is assumed to be a network destination (an existing enterprise data warehouse appliance or reporting server) reached over the corporate network/VPN, not something this design stands up.",
+            },
+        )
+
+    if component_type == "ml":
+        return _mapping(
+            "Self-Hosted Inference Server (e.g. Triton), No Managed Equivalent",
+            [
+                {
+                    "serviceName": "Cloud-Hosted Managed Inference Endpoint (Hybrid, Over the Internet)",
+                    "reason": "Chose a self-hosted Triton server to keep inference traffic (and any regulated data it touches) entirely on-premises. A cloud-hosted managed endpoint removes GPU-fleet operational burden entirely, at the cost of sending inference requests off-premises.",
+                    "costEstimate": {
+                        "min": 60,
+                        "max": 900 if is_high_scale else 200,
+                        "assumptions": "Cloud-hosted managed inference endpoint pricing, plus egress from the private network to reach it.",
+                    },
+                }
+            ],
+            {
+                "min": 500 if is_high_scale else 200,
+                "max": 2500 if is_high_scale else 900,
+                "assumptions": "Dedicated GPU-equipped server(s) running a self-managed Triton Inference Server. No managed autoscaling -- capacity must be pre-provisioned for peak inference load.",
+            },
+        )
+
+    if component_type == "workflow":
+        return _mapping(
+            "Self-Hosted Orchestrator (e.g. Apache Airflow/Temporal) on Dedicated VM(s)",
+            [
+                {
+                    "serviceName": "Hand-Rolled State Tracking in Application Code",
+                    "reason": "Chose a real orchestrator (Airflow/Temporal) for durable execution history, retries, and error handling as first-class features. Hand-rolled state tracking avoids new infrastructure but reimplements those guarantees ad hoc, and usually less reliably, in application code.",
+                    "costEstimate": {
+                        "min": 0,
+                        "max": 0,
+                        "assumptions": "No separate infrastructure cost -- cost shows up as engineering time spent reimplementing retry/error-handling logic that a real orchestrator provides out of the box.",
+                    },
+                }
+            ],
+            {
+                "min": 100 if is_high_scale else 40,
+                "max": 400 if is_high_scale else 150,
+                "assumptions": "Dedicated VM(s) running a self-managed Airflow/Temporal cluster (plus its own backing database). Flag: no managed HA -- clustering and upgrades are manual operational responsibilities.",
             },
         )
 

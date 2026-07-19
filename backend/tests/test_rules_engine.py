@@ -453,3 +453,184 @@ class TestEveryComponentHasReasoning:
         assert len(result["components"]) > 0
         for c in result["components"]:
             assert isinstance(c.get("reasoning"), str) and c["reasoning"].strip() != ""
+
+
+class TestSearchRule:
+    def test_triggered_by_search_keyword(self):
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(functional=["Users can search the product catalog"])
+        result = run_rules_engine(req)
+
+        assert "search" in component_ids(result)
+        assert "Rule-Search-FullText" in result["rulesTrace"]
+        search = next(c for c in result["components"] if c["id"] == "search")
+        assert search["type"] == "search"
+        assert {"from": "compute", "to": "search", "protocol": "HTTPS"} in result["connections"]
+
+    def test_triggered_by_faceted_search_phrase(self):
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(functional=["Shoppers can use faceted search to filter results"])
+        result = run_rules_engine(req)
+
+        assert "search" in component_ids(result)
+
+    def test_not_triggered_without_search_signal(self):
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements()
+        result = run_rules_engine(req)
+
+        assert "search" not in component_ids(result)
+        assert "Rule-Search-FullText" not in result["rulesTrace"]
+
+    def test_search_distinct_from_database_type(self):
+        """A search-triggering project still gets the ordinary "database" component too -- search
+        is additive, not a replacement for the transactional store."""
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(functional=["Users can search their orders"])
+        result = run_rules_engine(req)
+
+        types = component_types(result)
+        assert "search" in types
+        assert "database" in types
+
+
+class TestAnalyticsRule:
+    def test_triggered_by_reporting_keyword_at_high_scale(self):
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(
+            functional=["Admins can view analytics dashboards and reports"],
+            expectedScale="high scale, 2 million users",
+        )
+        result = run_rules_engine(req)
+
+        assert "analytics" in component_ids(result)
+        assert "Rule-Analytics-HighScaleReporting" in result["rulesTrace"]
+        assert {"from": "database", "to": "analytics", "protocol": "ETL"} in result["connections"]
+
+    def test_not_triggered_at_low_scale_despite_keyword(self):
+        """The exact scope discipline this rule enforces: a small project's 'generate a report'
+        need does not warrant a real data warehouse."""
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(
+            functional=["Admins can view basic reporting"],
+            expectedScale="1,000 users",
+        )
+        result = run_rules_engine(req)
+
+        assert "analytics" not in component_ids(result)
+        assert "Rule-Analytics-HighScaleReporting" not in result["rulesTrace"]
+
+    def test_not_triggered_at_high_scale_without_keyword(self):
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(expectedScale="high scale, 1 million users")
+        result = run_rules_engine(req)
+
+        assert "analytics" not in component_ids(result)
+
+    def test_triggered_by_data_warehouse_keyword(self):
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(
+            functional=["The system feeds a data warehouse for business intelligence"],
+            expectedScale="100,000 monthly active users",
+        )
+        result = run_rules_engine(req)
+
+        assert "analytics" in component_ids(result)
+
+
+class TestMlRule:
+    def test_triggered_by_recommendation_keyword(self):
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(functional=["Users get personalized product recommendations"])
+        result = run_rules_engine(req)
+
+        assert "ml" in component_ids(result)
+        assert "Rule-Ml-InferenceEndpoint" in result["rulesTrace"]
+        ml = next(c for c in result["components"] if c["id"] == "ml")
+        assert ml["type"] == "ml"
+        assert {"from": "compute", "to": "ml", "protocol": "HTTPS"} in result["connections"]
+
+    def test_triggered_by_ai_powered_keyword(self):
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(functional=["An AI-powered assistant helps users draft messages"])
+        result = run_rules_engine(req)
+
+        assert "ml" in component_ids(result)
+
+    def test_not_triggered_without_ml_signal(self):
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements()
+        result = run_rules_engine(req)
+
+        assert "ml" not in component_ids(result)
+        assert "Rule-Ml-InferenceEndpoint" not in result["rulesTrace"]
+
+
+class TestWorkflowRule:
+    def test_triggered_by_workflow_keyword(self):
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(functional=["Admins configure a multi-step approval process"])
+        result = run_rules_engine(req)
+
+        assert "workflow" in component_ids(result)
+        assert "Rule-Workflow-Orchestration" in result["rulesTrace"]
+        workflow = next(c for c in result["components"] if c["id"] == "workflow")
+        assert workflow["type"] == "workflow"
+        assert {"from": "compute", "to": "workflow", "protocol": "HTTPS"} in result["connections"]
+
+    def test_triggered_by_orchestration_keyword(self):
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(functional=["The system runs a data-processing pipeline"])
+        result = run_rules_engine(req)
+
+        assert "workflow" in component_ids(result)
+
+    def test_triggered_by_queue_plus_notification_secondary_heuristic(self):
+        """The documented secondary heuristic: a queue already exists AND a notification component
+        also exists (two independent async stages chained together), even with no explicit
+        workflow keyword in the functional text."""
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(
+            functional=["Background jobs process uploads and email users a confirmation"]
+        )
+        result = run_rules_engine(req)
+
+        assert "queue" in component_ids(result)
+        assert "notification" in component_ids(result)
+        assert "workflow" in component_ids(result)
+        assert "Rule-Workflow-Orchestration" in result["rulesTrace"]
+
+    def test_not_triggered_by_queue_alone(self):
+        """Queue without a chained notification/fan-out step must NOT trigger workflow -- the
+        secondary heuristic requires both signals, not just background processing alone."""
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(functional=["Background jobs resize uploaded images"])
+        result = run_rules_engine(req)
+
+        assert "queue" in component_ids(result)
+        assert "notification" not in component_ids(result)
+        assert "workflow" not in component_ids(result)
+
+    def test_not_triggered_without_any_signal(self):
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements()
+        result = run_rules_engine(req)
+
+        assert "workflow" not in component_ids(result)
+        assert "Rule-Workflow-Orchestration" not in result["rulesTrace"]
