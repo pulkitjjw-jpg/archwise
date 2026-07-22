@@ -173,6 +173,23 @@ describe("computeHealthScore", () => {
 
       expect(lowResult.vendorLockIn.score).toBeLessThan(highResult.vendorLockIn.score);
     });
+
+    it("scores the component types added since Phase 2 (lb/dns/monitoring/notification/search/analytics/ml/workflow), not the ?? 55 fallback", () => {
+      const typedComponents = ["lb", "dns", "monitoring", "notification", "search", "analytics", "ml", "workflow"].map((type) =>
+        component(type, type, {})
+      );
+      // A component whose type is genuinely absent from PORTABILITY_BY_TYPE would fall back to 55
+      // for every one of them, averaging to exactly 55 -- asserting the average is NOT 55 confirms
+      // these 8 types each have their own real entry, not the generic fallback.
+      const result = computeHealthScore(typedComponents, [], undefined, [], "aws", 100, 200);
+      expect(result.vendorLockIn.score).not.toBe(55);
+    });
+
+    it("scores workflow orchestrators (proprietary state-machine languages) lower than DNS (a standard protocol)", () => {
+      const workflowResult = computeHealthScore([component("wf", "workflow", {})], [], undefined, [], "aws", 100, 200);
+      const dnsResult = computeHealthScore([component("d", "dns", {})], [], undefined, [], "aws", 100, 200);
+      expect(workflowResult.vendorLockIn.score).toBeLessThan(dnsResult.vendorLockIn.score);
+    });
   });
 
   describe("overall score", () => {

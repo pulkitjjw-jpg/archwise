@@ -17,6 +17,59 @@ export type LldConfig = {
   reasoning: Record<string, string>;
 };
 
+// AWS/Azure/GCP rule-set label per provider -- mirrors backend/app/services/lld_rules.py's
+// identically-named constant exactly (see that file for why WAF is LLD-only config on the "lb"/
+// "cdn" branches rather than its own component type).
+const WAF_RULE_SET_BY_PROVIDER: Record<string, string> = {
+  aws: "AWS Managed Rules - Core Rule Set + SQL Injection Rule Set",
+  azure: "Azure-managed Default Rule Set (DRS)",
+  gcp: "Google Cloud Armor - OWASP Top 10 preconfigured rules",
+};
+
+/** Shared helper for the "lb" and "cdn" cases below -- mirrors the backend's `_waf_lld_config`
+ * exactly (see that function's docstring for the enablement reasoning). Returns the config/
+ * reasoning key-value pairs to merge in for the wafEnabled decision. */
+function wafLldConfig(
+  provider: string,
+  isHighScale: boolean,
+  isHighSecurity: boolean,
+  industryContext?: IndustryContext
+): LldConfig {
+  const industry = industryContext?.industry ?? "none";
+  const shouldEnable = isHighScale || isHighSecurity || industry === "fintech" || industry === "healthtech";
+
+  const config: Record<string, string> = { wafEnabled: shouldEnable ? "true" : "false" };
+  const reasoning: Record<string, string> = {};
+
+  if (shouldEnable) {
+    config.wafRuleSet = WAF_RULE_SET_BY_PROVIDER[provider] ?? "Provider-managed OWASP Top 10 rule set";
+    config.rateLimitPerIP = "2000 requests / 5 min";
+
+    const reasons: string[] = [];
+    if (isHighScale) {
+      reasons.push(
+        "the workload is high-scale, where a WAF's marginal per-request inspection cost is worth it to absorb a larger volume of malicious/bot traffic"
+      );
+    }
+    if (isHighSecurity) {
+      reasons.push(
+        "the project's compliance/security posture calls for defense-in-depth at the edge, not just application-layer controls"
+      );
+    }
+    if (industry === "fintech" || industry === "healthtech") {
+      reasons.push(
+        `the project is flagged as ${industry}, where a WAF in front of the public edge is close to a baseline expectation rather than optional hardening`
+      );
+    }
+    reasoning.wafEnabled = `Enabled because ${reasons.join("; and ")}.`;
+  } else {
+    reasoning.wafEnabled =
+      "Disabled -- at this scale and sensitivity, the added cost and operational overhead (rule tuning, false-positive management) of a WAF is a reasonable trade-off to skip for now, not a security gap. Revisit if scale or compliance requirements change.";
+  }
+
+  return { config, reasoning };
+}
+
 export function runLldRulesEngine(
   provider: string,
   componentType: string,
@@ -86,7 +139,20 @@ export function runLldRulesEngine(
   const reasoning: Record<string, string> = {};
 
   switch (componentType) {
-    case "cdn":
+    case "realtime":
+      config.connectionModel = "Persistent bidirectional (WebSocket)";
+      config.idleTimeoutSec = "600s (10 min)";
+      config.maxConcurrentConnections = isHighScale ? "10000" : "1000";
+      config.messageBroadcastMode = "Fan-out via managed pub/sub backplane";
+
+      reasoning.maxConcurrentConnections = isHighScale
+        ? "Sized for a high-traffic real-time workload with many simultaneous open connections."
+        : "Modest connection ceiling appropriate for lower expected concurrent real-time usage.";
+      reasoning.messageBroadcastMode =
+        "A managed pub/sub backplane is required once there's more than one server instance, so a message sent to one connection can still reach clients connected to a different instance.";
+      break;
+
+    case "cdn": {
       config.priceClass = isHighScale ? "PriceClass_All" : "PriceClass_100";
       config.ipv6Enabled = "true";
       config.originShield = isHighScale ? "Enabled" : "Disabled";
@@ -98,6 +164,89 @@ export function runLldRulesEngine(
       reasoning.originShield = isHighScale
         ? "Enabled Origin Shield to protect backend servers from high-frequency cache misses."
         : "Disabled Origin Shield as scale is moderate, avoiding extra gateway pricing.";
+
+      const waf = wafLldConfig(provider, isHighScale, isHighSecurity, industryContext);
+      Object.assign(config, waf.config);
+      Object.assign(reasoning, waf.reasoning);
+      break;
+    }
+
+    case "lb": {
+      // Same is_serverless recompute as the "compute" case below -- a serviceNameOverride
+      // (manual service-swap) or the deterministic scale/budget/team signal both need to agree on
+      // whether this "lb" resolves to an ALB-style load balancer (container compute) or an
+      // API-gateway-style managed gateway (serverless compute), since the two have genuinely
+      // different config shapes.
+      let isServerless = isLowBudget && (teamLower.includes("junior") || teamLower.includes("small") || teamLower === "not_specified");
+      if (serviceNameOverride) {
+        const svcLower = serviceNameOverride.toLowerCase();
+        if (svcLower.includes("api gateway") || svcLower.includes("api management")) {
+          isServerless = true;
+        } else if (svcLower.includes("load balanc") || svcLower.includes("application gateway") || svcLower === "alb") {
+          isServerless = false;
+        }
+      }
+
+      if (isServerless) {
+        config.gatewayType = "HTTP API (Regional)";
+        config.throttlingBurstLimit = isHighScale ? "5000" : "1000";
+        config.throttlingRateLimit = isHighScale ? "2000" : "500";
+        config.corsPolicy = "Restricted to configured origin(s), not wildcard";
+        config.tlsPolicy = "TLS 1.2+";
+
+        reasoning.throttlingBurstLimit = isHighScale
+          ? "A higher burst ceiling absorbs legitimate traffic spikes without rejecting real requests at high expected scale."
+          : "A modest burst ceiling is appropriate for lower expected traffic, and doubles as a cheap first line of defense against a runaway client retry loop.";
+        reasoning.corsPolicy =
+          "A wildcard CORS policy on a public API gateway is a common source of unintended cross-origin access -- restricting to known origins up front is the safer default.";
+        reasoning.tlsPolicy =
+          "The managed gateway terminates TLS itself, so this is the one place a minimum protocol version needs to be enforced for the whole public API surface.";
+      } else {
+        config.healthCheckPath = "/health";
+        config.healthCheckIntervalSec = isHighScale ? "15" : "30";
+        config.healthCheckTimeoutSec = "5";
+        config.healthyThresholdCount = "2";
+        config.unhealthyThresholdCount = isHighScale ? "3" : "5";
+        config.idleTimeoutSec = "60";
+        config.listenerProtocol = "HTTPS";
+        config.listenerPort = "443";
+        config.tlsPolicy = "TLS 1.2+ (Modern Security Policy)";
+
+        reasoning.healthCheckIntervalSec = isHighScale
+          ? "More frequent health checks pull a failing instance out of rotation faster at high scale, where a slow instance affects more concurrent users."
+          : "A standard interval is sufficient at lower scale, and avoids piling unnecessary health-check traffic onto each instance.";
+        reasoning.unhealthyThresholdCount = isHighScale
+          ? "A lower unhealthy threshold removes a failing instance from rotation faster, trading a slightly higher chance of a false-positive removal for reduced blast radius at high scale."
+          : "A higher threshold avoids flapping a healthy-but-momentarily-slow instance in and out of rotation on a single transient failure.";
+        reasoning.listenerProtocol =
+          "TLS terminates at the load balancer rather than on individual compute instances, so the certificate is issued, rotated, and audited in exactly one place.";
+      }
+
+      const waf = wafLldConfig(provider, isHighScale, isHighSecurity, industryContext);
+      Object.assign(config, waf.config);
+      Object.assign(reasoning, waf.reasoning);
+      break;
+    }
+
+    case "dns":
+      // Deliberately does NOT include the backend's Phase 5 DR-tier-conditional
+      // routingPolicy/secondaryRegion/failoverThreshold enrichment -- that depends on
+      // determine_dr_strategy(), which has no client-side equivalent here (this file only ever
+      // recomputes the plain scale/budget/security signals, not the DR/account-strategy NFR
+      // signals layered on top in later phases). This preview always shows the "Simple" routing
+      // baseline; the real persisted architecture (backend-generated) is the source of truth for
+      // DR-aware routing.
+      config.hostedZoneType = "Public";
+      config.recordType = "Alias record to the load balancer/CDN endpoint (not a raw CNAME/IP)";
+      config.routingPolicy = "Simple";
+      config.ttlSeconds = "300";
+
+      reasoning.recordType =
+        "An alias-style record points directly at the managed load balancer/CDN endpoint without pinning to an IP address that provider can change at any time.";
+      reasoning.routingPolicy =
+        "Simple routing is correct today because there's only one region/endpoint to route traffic to.";
+      reasoning.ttlSeconds =
+        "A short TTL keeps DNS propagation fast if the target ever needs to change, at the cost of a modest increase in DNS query volume.";
       break;
 
     case "compute": {
@@ -301,6 +450,124 @@ export function runLldRulesEngine(
       reasoning.method = "Safe Harbor is the more auditable of HIPAA's two de-identification standards and doesn't require a statistician's expert determination.";
       break;
 
+    case "monitoring":
+      config.logRetentionDays = isHighSecurity ? "365 (regulatory)" : "30";
+      config.alertingPhilosophy =
+        "Alert on symptoms (error rate, latency, saturation), not causes -- paging on every CPU blip creates alert fatigue that buries the alert that actually matters.";
+      config.tracingEnabled = "true";
+      config.tracingSampleRate = isHighScale ? "5% (sampled)" : "100% (full trace)";
+      config.metricNamespace = "app/production";
+
+      reasoning.logRetentionDays = isHighSecurity
+        ? "Extended retention aligns with regulatory record-keeping expectations for compliance-sensitive workloads."
+        : "30 days is enough to debug most incidents while keeping storage costs down; extend it if a compliance requirement says otherwise.";
+      reasoning.tracingSampleRate = isHighScale
+        ? "Tracing every single request at high request volume gets expensive fast, both in storage and in the tracing backend's own ingestion cost -- a 5% sample still surfaces the same latency/error patterns statistically, at a fraction of the cost."
+        : "Traffic is low enough that tracing every request is still cheap, and full fidelity makes debugging any single request trivial.";
+      reasoning.alertingPhilosophy = "A small number of high-signal alerts that actually get acted on beats a large number that get muted.";
+      break;
+
+    case "notification": {
+      const funcStr = requirements.functional.join(" ").toLowerCase();
+      const channels: string[] = [];
+      if (funcStr.includes("sms") || funcStr.includes("text message")) channels.push("SMS");
+      if (funcStr.includes("push notification") || funcStr.includes("push")) channels.push("Push");
+      if (funcStr.includes("email")) channels.push("Email");
+      const inferred = channels.length > 0;
+      const resolvedChannels = inferred ? channels : ["Email"];
+
+      config.deliveryChannels = resolvedChannels.join(", ");
+      config.retryPolicy = "3 attempts, exponential backoff (1m / 5m / 15m)";
+      config.deadLetterHandling =
+        "Failed deliveries after the final retry route to a dead-letter queue, retained 14 days for manual inspection/replay";
+
+      reasoning.deliveryChannels = inferred
+        ? "Inferred directly from the stated functional requirements' mention of these channels."
+        : "Defaulted to email -- the stated functional requirements didn't call out a specific channel (SMS/push); confirm this matches the actual product need.";
+      reasoning.retryPolicy = "A few retries with backoff absorb a transient provider hiccup without hammering the delivery provider over a permanent failure.";
+      reasoning.deadLetterHandling =
+        "A notification that fails every retry needs to land somewhere reviewable -- a silent failure here is exactly the kind of gap a user only discovers when someone complains they never got the email.";
+      break;
+    }
+
+    case "search": {
+      config.indexCount = isHighScale ? "Multiple indices, sharded by entity type (products, orders, etc.)" : "Single index, default sharding";
+      config.shardCount = isHighScale ? "5 primary shards + 1 replica each" : "1 primary shard + 1 replica";
+      config.instanceSize = isHighScale ? "3x r6g.large.search (dedicated master + data nodes)" : "1x t3.small.search (single node)";
+
+      const industry = industryContext?.industry ?? "none";
+      const needsPiiRedaction = isHighSecurity || industry === "fintech" || industry === "healthtech";
+      config.piiRedactionRequired = needsPiiRedaction ? "true" : "false";
+
+      reasoning.shardCount = isHighScale
+        ? "More shards spread indexing/query load across nodes at high volume, at the cost of more per-shard overhead."
+        : "A single shard is enough at this volume and avoids the per-shard overhead of an over-sharded small index.";
+      reasoning.instanceSize = isHighScale
+        ? "A dedicated master node keeps cluster-state management off the data nodes once query/index volume is high enough to matter."
+        : "A single node is sufficient at this volume; add dedicated master nodes if the index grows.";
+      reasoning.piiRedactionRequired = needsPiiRedaction
+        ? "Search results surface indexed field values verbatim, so if any indexed content includes PII/PHI (e.g. user-generated reviews, support tickets), the ingestion pipeline feeding this index must redact it before indexing -- a genuinely different compliance boundary than the primary database, which has its own access controls this index doesn't inherit."
+        : "No regulated/sensitive-data signal detected for this project -- revisit if indexed content later includes PII (e.g. user-generated content).";
+      break;
+    }
+
+    case "analytics":
+      config.scalingMode = isLowBudget
+        ? "On-demand serverless (compute scales to zero between queries)"
+        : "Provisioned (reserved capacity for sustained, predictable query load)";
+      config.partitionStrategy = "Partitioned by ingestion date (daily), enabling partition pruning on time-range queries";
+      config.retentionPolicy = isHighSecurity ? "Indefinite (regulatory/analytical history retained)" : "2 years, then archived to cold storage";
+      config.etlSyncFrequency = isHighScale ? "Near-real-time change data capture (CDC) from the primary database" : "Nightly batch ETL from the primary database";
+
+      reasoning.scalingMode = isLowBudget
+        ? "On-demand serverless avoids paying for standing compute capacity on a tight budget, at the cost of less predictable per-query latency than a provisioned warehouse."
+        : "Provisioned capacity gives predictable query latency for a sustained reporting workload, at the cost of paying for it whether or not queries are actually running.";
+      reasoning.etlSyncFrequency = isHighScale
+        ? "At this scale, a nightly batch lag is too stale for the reporting/analytics use case -- CDC keeps the warehouse close to real-time."
+        : "A nightly batch sync is simple to operate and matches most reporting use cases' actual freshness requirements at this scale.";
+      reasoning.retentionPolicy = isHighSecurity
+        ? "Extended retention aligns with regulatory record-keeping expectations for compliance-sensitive workloads."
+        : "A multi-year window balances useful trend analysis against unbounded storage growth.";
+      break;
+
+    case "ml": {
+      config.instanceType = isHighScale ? "GPU-backed (e.g. ml.g5.xlarge)" : "CPU-backed (e.g. ml.m5.large)";
+      config.autoScaling = isHighScale ? "Target-tracking on InvocationsPerInstance, 2-10 instances" : "Fixed 1 instance (no autoscaling)";
+
+      const industry = industryContext?.industry ?? "none";
+      const modelSeesRegulatedData = isHighSecurity || industry === "fintech" || industry === "healthtech";
+      config.dataComplianceBoundary = modelSeesRegulatedData
+        ? "true -- PHI/PII may reach this model, extending the compliance boundary to include the inference endpoint"
+        : "false -- no regulated-data signal detected for this project";
+
+      reasoning.instanceType = isHighScale
+        ? "GPU inference cuts per-request latency materially for real-time recommendation/classification traffic at this volume, at a real cost premium over CPU."
+        : "CPU inference is cheaper and sufficient for lighter models at this request volume; revisit if latency becomes a problem.";
+      reasoning.autoScaling = isHighScale
+        ? "Autoscaling absorbs request-volume spikes without over-provisioning for peak load at all times."
+        : "A single fixed instance is simplest and cheapest at this request volume; add autoscaling once traffic grows.";
+      reasoning.dataComplianceBoundary = modelSeesRegulatedData
+        ? "If the features sent to this model include any PHI/PII (not just an opaque user ID), the inference endpoint itself falls inside the same compliance boundary as the database it draws from -- encryption in transit, access logging, and data-residency requirements apply here too, not just at the primary data store."
+        : "No regulated-data signal detected for this project -- revisit this if the model's input features start including PHI/PII rather than anonymized/derived signals.";
+      break;
+    }
+
+    case "workflow":
+      config.executionType = isHighScale
+        ? "Express (high-volume, short-duration, at-least-once)"
+        : "Standard (durable, full execution history up to 1 year)";
+      config.retryPolicy = "3 retries per state with exponential backoff; unhandled errors route to a catch-all error handler";
+      config.executionHistoryRetention = isHighSecurity ? "90 days" : "30 days";
+
+      reasoning.executionType = isHighScale
+        ? "Express trades Standard's exactly-once execution history for materially lower per-execution cost, which matters once invocation volume is genuinely high."
+        : "Standard's full execution history is worth the extra cost at this volume -- useful for auditing exactly what happened in a given approval/business-process run.";
+      reasoning.retryPolicy = "A few retries with backoff absorb a transient failure in one step without requiring the whole process to restart from the beginning.";
+      reasoning.executionHistoryRetention = isHighSecurity
+        ? "Extended retention aligns with regulatory record-keeping expectations for a compliance-sensitive process."
+        : "30 days is enough to debug a recent failed execution while keeping storage costs down.";
+      break;
+
     default:
       config.genericType = "Generic Config";
       reasoning.genericType = "Standard deployment config.";
@@ -313,9 +580,12 @@ export function runLldRulesEngine(
   if (industryContext && industryContext.industry !== "none") {
     const standard = industryContext.industry === "fintech" ? "PCI-DSS" : "HIPAA";
 
-    if (["database", "storage", "cache"].includes(componentType)) {
+    if (["database", "storage", "cache", "analytics"].includes(componentType)) {
       config.encryptionInTransit = "TLS 1.2+ (Enforced)";
-      reasoning.encryptionInTransit = `Mandatory for ${standard} compliance — encryption in transit is not optional for regulated data, regardless of scale.`;
+      reasoning.encryptionInTransit =
+        componentType === "analytics"
+          ? `Mandatory for ${standard} compliance — encryption in transit is not optional for regulated data, regardless of scale. This applies to the analytics warehouse too, since it holds a real (if delayed) copy of the same regulated data.`
+          : `Mandatory for ${standard} compliance — encryption in transit is not optional for regulated data, regardless of scale.`;
     }
 
     if (componentType === "database" && industryContext.industry === "fintech") {
@@ -343,6 +613,16 @@ function runKubernetesLld(
   const reasoning: Record<string, string> = {};
 
   switch (componentType) {
+    case "realtime":
+      config.replicas = isHighScale ? "4" : "2";
+      config.namespace = "app";
+      config.sessionAffinity = "ClientIP (sticky sessions required for WebSocket)";
+      config.backplane = "Redis Pub/Sub (cross-pod message fan-out)";
+      reasoning.sessionAffinity =
+        "A WebSocket connection is stateful and pinned to one pod — without sticky sessions, the Ingress could route a client's next request to a pod it has no open connection with.";
+      reasoning.backplane = "A shared pub/sub backplane lets a message published from any pod reach clients connected to any other pod.";
+      break;
+
     case "cdn":
       config.ingressClass = "nginx";
       config.tlsMode = "cert-manager (Let's Encrypt)";
@@ -350,6 +630,32 @@ function runKubernetesLld(
       config.namespace = "ingress-system";
       reasoning.replicas = "Two Ingress-NGINX replicas avoid a single point of failure for all cluster traffic entry.";
       reasoning.tlsMode = "cert-manager automates certificate issuance and renewal rather than requiring manual cert rotation.";
+      config.wafNote =
+        "Not natively available -- consider a self-hosted ModSecurity/ingress-level WAF (e.g. OWASP CRS via ModSecurity-nginx) if this workload's scale/compliance profile warrants it.";
+      break;
+
+    case "lb":
+      config.replicas = isHighScale ? "3" : "2";
+      config.namespace = "ingress-system";
+      config.healthCheckPath = "/healthz";
+      config.idleTimeoutSec = "60";
+      config.tlsMode = "cert-manager (Let's Encrypt)";
+      reasoning.replicas = isHighScale
+        ? "Three replicas spread across nodes tolerate a node failure without dropping the cluster's single entry point for all traffic."
+        : "Two replicas is the minimum that avoids the Ingress controller itself becoming a single point of failure.";
+      reasoning.healthCheckPath =
+        "Ingress-NGINX health-checks each backend Service's endpoints directly via Kubernetes readiness probes, not a separate synthetic external check.";
+      config.wafNote =
+        "Not natively available -- consider a self-hosted ModSecurity/ingress-level WAF (e.g. OWASP CRS via ModSecurity-nginx) if this workload's scale/compliance profile warrants it.";
+      break;
+
+    case "dns":
+      config.deploymentMode = "ExternalDNS Operator (In-Cluster)";
+      config.namespace = "ingress-system";
+      config.syncPolicy = "upsert-only (never deletes records it didn't create)";
+      reasoning.deploymentMode =
+        "ExternalDNS watches Ingress/Service resources and syncs their hostnames to an external DNS provider automatically -- the standard Kubernetes-native way to avoid manually updating DNS records on every deploy.";
+      reasoning.syncPolicy = "upsert-only is the safer default -- it will never delete a DNS record it doesn't already track as its own, even if the matching Ingress is removed.";
       break;
 
     case "compute": {
@@ -464,6 +770,61 @@ function runKubernetesLld(
       reasoning.deploymentMode = "Runs as a scheduled batch job against new PHI records rather than an always-on Deployment, since de-identification doesn't need to be real-time.";
       break;
 
+    case "monitoring":
+      config.namespace = "monitoring";
+      config.deploymentMode = "kube-prometheus-stack (Helm chart: Prometheus + Grafana + Alertmanager)";
+      config.retentionDays = isHighSecurity ? "90" : "15";
+      config.tracingSampleRate = isHighScale ? "5% (sampled, via OpenTelemetry Collector)" : "100% (full trace)";
+      reasoning.retentionDays = isHighSecurity
+        ? "Extended in-cluster retention for compliance-sensitive workloads -- consider remote-writing to a long-term store (e.g. Thanos/Mimir) beyond this window."
+        : "Short retention keeps Prometheus' local storage footprint small; extend it or add remote-write if longer history is needed.";
+      reasoning.tracingSampleRate = isHighScale
+        ? "Sampling keeps the OpenTelemetry Collector's ingestion volume manageable at high request rates."
+        : "Full-fidelity tracing is still cheap to store at this request volume.";
+      break;
+
+    case "notification":
+      config.namespace = "app";
+      config.deploymentMode =
+        "NATS JetStream (Helm chart) + a small notification-dispatch Deployment calling the external delivery provider's API";
+      config.retryPolicy = "3 attempts, exponential backoff";
+      reasoning.deploymentMode =
+        "JetStream durably queues the fan-out event; the dispatch Deployment is what actually calls the configured external email/SMS/push provider, since nothing in-cluster can deliver to an end-user inbox or phone directly.";
+      break;
+
+    case "search":
+      config.replicas = isHighScale ? "3 (multi-node cluster, quorum-based)" : "1 (single node)";
+      config.storageSize = isHighScale ? "200Gi" : "50Gi";
+      config.namespace = "data";
+      reasoning.replicas = isHighScale
+        ? "A 3-node cluster tolerates a single node failure without losing quorum for index writes."
+        : "A single node is sufficient at this volume; a node failure means reindexing from the source of truth, not permanent data loss, since this is a derived index.";
+      break;
+
+    case "analytics":
+      config.deploymentMode = "External (ExternalName Service + Secret) -- no in-cluster analytics/data-warehouse equivalent";
+      config.namespace = "data";
+      reasoning.deploymentMode =
+        "A real OLAP data warehouse is a genuinely different, heavier stateful workload than anything else this cluster self-hosts -- this is modeled as a network destination outside the cluster (a managed warehouse or an existing enterprise one), reached via a Kubernetes Secret holding its connection credentials.";
+      break;
+
+    case "ml":
+      config.deploymentMode = "KServe InferenceService (or Seldon Core)";
+      config.replicas = isHighScale ? "2" : "1";
+      config.namespace = "ml";
+      reasoning.deploymentMode =
+        "KServe wraps model serving in a Kubernetes-native CRD with built-in autoscaling (including scale-to-zero), so the endpoint doesn't need a hand-rolled Deployment + HPA.";
+      reasoning.namespace = "A dedicated 'ml' namespace keeps GPU-scheduling and model-serving RBAC scoped separately from the general 'app' namespace.";
+      break;
+
+    case "workflow":
+      config.deploymentMode = "Argo Workflows (Helm chart)";
+      config.namespace = "workflows";
+      reasoning.deploymentMode =
+        "Argo Workflows defines each step as a Kubernetes-native CRD (a real pod per step), so retries/error-handling/execution history live in cluster-native resources rather than an external managed service.";
+      reasoning.namespace = "A dedicated 'workflows' namespace keeps the orchestrator's own controller/RBAC scoped separately from the workloads it triggers.";
+      break;
+
     default:
       config.genericType = "Generic in-cluster workload";
       config.namespace = "app";
@@ -493,10 +854,38 @@ function runPrivateCloudLld(
   const reasoning: Record<string, string> = {};
 
   switch (componentType) {
+    case "realtime":
+      config.vmSize = "4 vCPU / 8GB RAM";
+      config.vmCount = isHighScale ? "3 (clustered, sticky-session reverse proxy)" : "2";
+      config.scalingMode = "Manual (no autoscaler) — capacity must be pre-provisioned for peak concurrent connections";
+      reasoning.scalingMode =
+        "Private infrastructure has no elastic capacity pool — the number of simultaneously open WebSocket connections is capped by whatever's pre-provisioned.";
+      break;
+
     case "cdn":
       config.vmSize = "2 vCPU / 4GB RAM";
       config.scalingMode = "Manual (no autoscaler)";
       reasoning.scalingMode = "No CDN edge network on-premises — traffic capacity is whatever the reverse-proxy VM(s) can handle, sized ahead of time.";
+      config.wafNote =
+        "Not natively available -- consider a self-hosted ModSecurity/ingress-level WAF (e.g. OWASP CRS via ModSecurity-nginx) if this workload's scale/compliance profile warrants it.";
+      break;
+
+    case "lb":
+      config.vmSize = "4 vCPU / 8GB RAM";
+      config.vmCount = "2 (active/passive failover pair)";
+      config.healthCheckPath = "/health";
+      config.haMode = "Manual failover (keepalived/VRRP, or a documented manual DNS cutover)";
+      reasoning.haMode =
+        "On-premises load balancer HA requires a manually configured VRRP/keepalived pair or a documented, tested failover runbook — nothing here does this automatically.";
+      config.wafNote =
+        "Not natively available -- consider a self-hosted ModSecurity/ingress-level WAF (e.g. OWASP CRS via ModSecurity-nginx) if this workload's scale/compliance profile warrants it.";
+      break;
+
+    case "dns":
+      config.deploymentMode = "Manual record management against the existing corporate DNS/BIND server";
+      config.ttlSeconds = "300";
+      reasoning.deploymentMode =
+        "Flagging explicitly: there is no automation syncing load balancer/VM changes to DNS records here — every change, including any future failover routing, is a manual step against the existing DNS server.";
       break;
 
     case "compute": {
@@ -553,6 +942,46 @@ function runPrivateCloudLld(
     case "deidentification":
       config.vmSize = "4 vCPU / 8GB RAM";
       config.schedulingMode = "Scheduled batch job (cron)";
+      break;
+
+    case "monitoring":
+      config.vmSize = "4 vCPU / 8GB RAM";
+      config.deploymentMode = "Self-hosted Prometheus + Grafana (or ELK), dedicated VM";
+      config.retentionDays = isHighSecurity ? "90" : "15";
+      reasoning.deploymentMode = "No managed observability platform on-premises -- log/metric storage capacity must be sized and monitored like any other stateful service here.";
+      break;
+
+    case "notification":
+      config.vmCount = "1-2 (self-managed message bus)";
+      config.retryPolicy = "3 attempts, exponential backoff";
+      config.externalDependencyFlag = "An external delivery provider (email/SMS/push gateway) is required -- nothing on-premises can deliver directly to end users";
+      reasoning.externalDependencyFlag = "Flagging explicitly: the message bus only handles internal fan-out; actual delivery to a real inbox/phone always exits through an external provider.";
+      break;
+
+    case "search":
+      config.vmSize = isHighScale ? "8 vCPU / 32GB RAM" : "4 vCPU / 16GB RAM";
+      config.vmCount = isHighScale ? "3 (clustered)" : "1";
+      reasoning.vmCount = "A 3-node cluster tolerates a single node failure; a single node at lower scale means reindexing from the source of truth on failure, not permanent data loss.";
+      break;
+
+    case "analytics":
+      config.deploymentMode =
+        "No managed equivalent on-premises -- typically a network destination reached over the corporate network/VPN (e.g. an existing enterprise data warehouse appliance)";
+      reasoning.deploymentMode =
+        "Flagging explicitly: this design does not provision analytics/data-warehouse hardware -- it assumes one already exists on the corporate network, or that provisioning it is a separate, larger undertaking outside this architecture's scope.";
+      break;
+
+    case "ml":
+      config.vmSize = isHighScale ? "GPU-equipped VM (e.g. NVIDIA T4/A10) recommended" : "CPU-only VM acceptable at this request volume";
+      config.deploymentMode = "Self-hosted inference server (e.g. NVIDIA Triton), no managed equivalent";
+      reasoning.deploymentMode =
+        "On-premises has no managed autoscaling or model-versioning tooling -- capacity must be pre-provisioned for peak inference load, and deployment/rollback is a manual operational process.";
+      break;
+
+    case "workflow":
+      config.deploymentMode = "Self-hosted orchestrator (e.g. Apache Airflow / Temporal) on dedicated VM(s)";
+      config.vmCount = isHighScale ? "2 (HA pair)" : "1";
+      reasoning.vmCount = "An HA pair avoids the orchestrator itself becoming a single point of failure for every process it coordinates once scale is high enough to matter.";
       break;
 
     default:

@@ -155,6 +155,29 @@ const PORTABILITY_BY_TYPE: Record<string, number> = {
   "audit-log": 45,
   "phi-vault": 35,
   deidentification: 45,
+  // Load balancing and DNS are both widely standardized concepts (every provider's LB/API-gateway
+  // maps onto the same basic model, and DNS itself is a standard protocol) -- comparatively
+  // portable, similar to cdn/compute above.
+  lb: 65,
+  dns: 80,
+  // Monitoring/notification: the underlying pattern (metrics/logs/traces; fan-out to email/SMS/
+  // push) is portable, but the actual managed-service integration and dashboards/alert rules are
+  // provider-specific and need real rework to migrate -- moderate portability.
+  monitoring: 60,
+  notification: 55,
+  // Search (OpenSearch/Elasticsearch) is itself a portable open-source technology used across
+  // every provider (including self-hosted) -- comparatively portable, similar to queue/cache.
+  search: 65,
+  // Analytics warehouses (Redshift/Synapse/BigQuery) differ meaningfully in SQL dialect, pricing
+  // model, and ingestion mechanics -- moderate lock-in, similar to a relational database.
+  analytics: 45,
+  // ML inference endpoints (SageMaker/Azure ML/Vertex AI) are quite provider-specific in their
+  // deployment/serving APIs even though the underlying model format may be portable -- comparable
+  // lock-in to a managed identity service.
+  ml: 35,
+  // Workflow orchestrators (Step Functions/Logic Apps/Cloud Workflows) each use their own
+  // proprietary state-machine definition language -- among the more locked-in component types.
+  workflow: 30,
 };
 
 function scoreVendorLockIn(components: HSComponent[], provider: string): HealthScoreDimension {
