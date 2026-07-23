@@ -19,7 +19,7 @@
     "@sentry/nextjs": "^10.65.0",
     "elkjs": "^0.11.1",
     "next": "16.2.6",
-    "react": "19.2.6",
+    "react": "19.2.8",
     "react-dom": "19.2.6",
     "react-markdown": "^10.1.0",
     "react-zoom-pan-pinch": "^4.0.3"
@@ -34,7 +34,7 @@
     "@testing-library/user-event": "^14.6.1",
     "@types/dagre": "^0.7.54",
     "@types/node": "22.19.15",
-    "@types/react": "19.2.14",
+    "@types/react": "19.2.17",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "^6.0.3",
     "eslint": "9.39.4",
