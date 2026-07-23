@@ -6,32 +6,70 @@ class Settings(BaseSettings):
 
     database_url: str
     openrouter_api_key: str
-    # Ordered, comma-separated OpenRouter model slugs every LLM call in the backend falls back
-    # through (see app/services/llm.py's _call_llm_with_fallback_chain, the single shared call
-    # site every brainstorm/extraction/generation/RAG-citation function routes through). Each
-    # model gets exactly ONE attempt -- on any failure (network error, timeout, unparseable
-    # output) the chain moves to the next slug immediately, never retrying the same model. The
-    # last entry is treated as the paid "last resort" tier and its use is logged at WARNING so
-    # free-tier insufficiency is visible in monitoring. One env var, so re-ordering/swapping
-    # models is a config change, never a code change -- confirm every slug against OpenRouter's
-    # own model list (https://openrouter.ai/api/v1/models) before changing this, provider model
-    # strings are not guessable and a wrong slug silently drops that whole tier.
+    # Optional direct Google Gemini API key (ai.google.dev / Google AI Studio), NOT the same key
+    # as any Gemini access already going through OpenRouter -- this is a separate, DEDICATED free
+    # quota per Google Cloud project, not shared with every other OpenRouter user hitting the same
+    # free model. See llm.py's GEMINI_DIRECT_PREFIX/_call_single_model for how a "gemini-direct:"
+    # prefixed chain entry gets routed to Google's own OpenAI-compatible endpoint using this key
+    # instead of the OpenRouter one. Optional/empty-string default (same "still starts without it"
+    # pattern as resend_api_key) -- a "gemini-direct:" model in the chain simply fails its one
+    # attempt and moves to the next tier if this is unset, exactly like any other misconfigured
+    # tier, never a startup error.
+    gemini_api_key: str = ""
+    # Ordered, comma-separated model slugs every LLM call in the backend falls back through (see
+    # app/services/llm.py's _call_llm_with_fallback_chain, the single shared call site every
+    # brainstorm/extraction/generation/RAG-citation function routes through). Each model gets
+    # exactly ONE attempt -- on any failure (network error, timeout, unparseable output) the chain
+    # moves to the next slug immediately, never retrying the same model. The last entry is treated
+    # as the paid "last resort" tier and its use is logged at WARNING so free-tier insufficiency is
+    # visible in monitoring. One env var, so re-ordering/swapping models is a config change, never
+    # a code change.
+    #
+    # A "gemini-direct:" prefix routes that one entry to Google's own dedicated free quota instead
+    # of OpenRouter's shared one (see gemini_api_key above) -- tried first since a per-project quota
+    # (Flash-Lite: 15 RPM/1,000 RPD; Flash: 10 RPM/250 RPD, as of the model's own current published
+    # limits -- Google revises these without notice, re-verify at ai.google.dev/gemini-api/docs/
+    # rate-limits before assuming they still hold) isn't contended by every other OpenRouter user
+    # hitting the same free model at once, unlike the plain OpenRouter free slugs below it.
+    #
+    # Uses "-latest" alias model names (gemini-flash-lite-latest/gemini-flash-latest), NOT a pinned
+    # version like "gemini-2.5-flash-lite" -- confirmed live (2026-07-22) that a newly-created API
+    # key gets a hard 404 on the pinned 2.5-series names ("no longer available to new users"), even
+    # though GET /v1beta/models still lists them for older keys; the "-latest" aliases exist
+    # specifically so Google can move what they point to without every caller's config going stale
+    # -- exactly the dead-slug problem this whole chain has been fixed for twice already this
+    # session (see the note below on the OpenRouter free slugs). Confirmed working live against a
+    # real key for both the brainstorm-turn AND architecture-generation call shapes before this was
+    # made the default.
+    #
+    # openai/gpt-oss-120b:free and qwen/qwen3-coder:free (both previously in this chain) were
+    # confirmed DEAD as of 2026-07-22 -- OpenRouter now 404s them with "this model is unavailable
+    # for free, use this slug instead: <paid slug>" -- replaced with openai/gpt-oss-20b:free (the
+    # actual current free variant) and nvidia/nemotron-3-nano-30b-a3b:free. Confirm every slug
+    # against OpenRouter's own model list (https://openrouter.ai/api/v1/models) before changing
+    # this -- provider model strings are not guessable and a wrong slug silently 404s that whole
+    # tier every single attempt, never just occasionally.
     llm_model_chain: str = (
-        "openai/gpt-oss-120b:free,"
+        "gemini-direct:gemini-flash-lite-latest,"
+        "gemini-direct:gemini-flash-latest,"
         "google/gemma-4-31b-it:free,"
         "nvidia/nemotron-3-ultra-550b-a55b:free,"
-        "qwen/qwen3-coder:free,"
+        "openai/gpt-oss-20b:free,"
+        "nvidia/nemotron-3-nano-30b-a3b:free,"
         "google/gemini-2.5-flash"
     )
     # Subset of the chain above (comma-separated, must match slugs exactly) that gets an extra
     # validation + auto-fix pass before its output is trusted, instead of being accepted or
-    # rejected outright like every other tier. Evaluated against openai/gpt-oss-120b:free and
-    # confirmed as the free-tier model most prone to subtly malformed JSON in practice.
+    # rejected outright like every other tier. Evaluated against openai/gpt-oss-120b:free (now
+    # replaced/removed from the chain above) and confirmed as the free-tier model most prone to
+    # subtly malformed JSON in practice.
     llm_validated_models: str = "google/gemma-4-31b-it:free"
     # Fast/free model used ONLY to reformat/repair a validated tier's malformed output (fix small
     # JSON syntax problems or fill 1-2 missing fields) -- never asked to regenerate content from
     # scratch, so it can be small and quick rather than matching the primary call's capability.
-    llm_validation_fix_model: str = "openai/gpt-oss-120b:free"
+    # Was openai/gpt-oss-120b:free -- confirmed dead (see llm_model_chain's own note above),
+    # updated to the current free variant.
+    llm_validation_fix_model: str = "openai/gpt-oss-20b:free"
     # Per-model-attempt timeout. Deliberately NOT "a few seconds" flat: real successful calls
     # (e.g. architecture generation on Gemini) have taken ~15s even when working correctly, and a
     # too-aggressive timeout would falsely cascade away from a model that was simply still

@@ -21,6 +21,8 @@ import { computeHealthScore, type HealthScore } from "@/lib/health-score";
 import { getDrBadge } from "@/lib/dr-strategy";
 import { getRedundancyBadge, isRedundantConfig } from "@/lib/redundancy";
 import { getAccountStrategyBanner } from "@/lib/account-strategy";
+import { isSecurityFindingFixable } from "@/lib/security-fix";
+import { chunkStoryText } from "@/lib/text-chunking";
 import { useStagedLoadingMessage } from "@/app/hooks/useStagedLoadingMessage";
 import { useGrowthTrigger } from "@/app/contexts/GrowthTriggerContext";
 import { FIELD_EXPLANATIONS } from "@/lib/field-explanations";
@@ -36,6 +38,7 @@ import {
   type DiagramLayout,
   type FlowBookendNode,
 } from "@/lib/diagram-layout";
+import HoverTooltip from "./HoverTooltip";
 import InfoTooltip from "./InfoTooltip";
 import SourceCitations, { type Citation } from "./SourceCitations";
 import BudgetInput from "./BudgetInput";
@@ -1782,6 +1785,25 @@ export default function ArchitectureWorkspace({
   const [journeyVerificationCache, setJourneyVerificationCache] = useState<Record<string, JourneyVerification>>({});
   const [journeyLoading, setJourneyLoading] = useState(false);
   const [showFlowSteps, setShowFlowSteps] = useState(false);
+  // On-canvas security-finding callouts (off by default, same "opt-in overlay" precedent as
+  // showFlowSteps above) -- a dense diagram with many flagged components can otherwise get
+  // cluttered/overlapping, so this lets the user toggle the always-visible callouts on only when
+  // they actually want to see which component each finding is about, and keep the diagram clean
+  // otherwise. The side panel list is unaffected either way.
+  const [showSecurityCallouts, setShowSecurityCallouts] = useState(false);
+  // "Fix this" quick action state (see handleApplySecurityFix below) -- confirmingFixKey gates a
+  // lightweight inline "Apply this fix?" step before anything is sent, matching this app's
+  // established "never silently mutate" convention (What-If/Regenerate/Growth-trigger all stage
+  // before an explicit apply) without a full diff-preview round trip for a single-field patch.
+  const [confirmingFixKey, setConfirmingFixKey] = useState<string | null>(null);
+  const [applyingFixKey, setApplyingFixKey] = useState<string | null>(null);
+  const [fixError, setFixError] = useState("");
+  // Short-lived, session-only "what did Fix This actually change" record -- see
+  // handleApplySecurityFix's own comment for why this exists (the finding disappearing from the
+  // list confirms IT'S fixed, but not what the old/new value was). Newest first; dismissible.
+  const [recentFixes, setRecentFixes] = useState<
+    { key: string; findingTitle: string; componentName: string; changes: { parameter: string; oldVal: string; newVal: string }[] }[]
+  >([]);
   const [flowStepsExpanded, setFlowStepsExpanded] = useState(false);
   const journeyKey = architecture ? `${architecture.id}:${activeProvider}` : null;
   const currentJourney = journeyKey ? journeyCache[journeyKey] : undefined;
@@ -2514,6 +2536,52 @@ export default function ArchitectureWorkspace({
     }
   };
 
+  // "Fix this" quick action on a security finding -- see src/lib/security-fix.ts's
+  // isSecurityFindingFixable for which findings get a button at all, and
+  // backend/app/services/security_rules.py's FIX_HANDLERS for the actual fix values (computed
+  // server-side; this component never knows or sends one, only which finding to fix). Key format
+  // "componentId::findingTitle" since one component can have more than one open finding.
+  //
+  // The finding disappears from currentSecurityFindings the instant the fix is applied (it's no
+  // longer generated) -- which answers "is it fixed?" but not "what was it, and what changed?".
+  // The backend's response already includes a full before/after diff (the exact same
+  // compute_architecture_diff the "What Changed in Version X" panel elsewhere on this page
+  // renders from, since this endpoint builds one the same way save_manual_architecture does) --
+  // recentFixes pulls the specific field(s) THIS fix touched out of that diff and keeps a
+  // short-lived, dismissible record so the user gets immediate old-value -> new-value confirmation
+  // right where they clicked, without having to go find the full diff panel themselves.
+  const handleApplySecurityFix = async (componentId: string, findingTitle: string, componentName: string) => {
+    const key = `${componentId}::${findingTitle}`;
+    try {
+      setApplyingFixKey(key);
+      setFixError("");
+      const res = await fetch(`/api/projects/${projectId}/architectures/security-fix`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ componentId, findingTitle, provider: activeProvider }),
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || errData.error || "Failed to apply this fix");
+      }
+      const data = await res.json();
+      const modifiedEntry = data.architecture?.reasoning?.diff?.modified?.find((m: any) => m.id === componentId);
+      const providerPrefix = `${activeProvider.toUpperCase()} `;
+      const relevantChanges =
+        modifiedEntry?.changes?.filter((c: any) => typeof c.parameter === "string" && c.parameter.startsWith(providerPrefix)) || [];
+      setRecentFixes((prev) => [
+        { key, findingTitle, componentName, changes: relevantChanges },
+        ...prev.filter((f) => f.key !== key),
+      ]);
+      setConfirmingFixKey(null);
+      await loadArchitecture(data.architecture.version);
+    } catch (err: any) {
+      setFixError(err.message || "Something went wrong applying this fix.");
+    } finally {
+      setApplyingFixKey(null);
+    }
+  };
+
   useEffect(() => {
     if (!imageExportOpen) return;
     const onClickOutside = (e: MouseEvent) => {
@@ -2805,6 +2873,31 @@ export default function ArchitectureWorkspace({
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
+      {/* Fixed, always-visible action bar for an unsaved "Regenerate Design" preview -- the
+          inline Apply/Discard buttons further down (right after the diff) are easy to miss if the
+          diff is long or the user has scrolled elsewhere, and losing an unsaved preview because
+          the controls to keep it were never seen is a real (reported) way to lose real work. This
+          duplicates the exact same handlers so behavior is identical either way. */}
+      {regeneratePreview && (
+        <div className="fixed bottom-6 left-1/2 z-50 flex -translate-x-1/2 items-center gap-3 rounded-2xl border border-line-strong bg-ink px-4 py-3 text-white shadow-xl animate-fadeIn">
+          <Icon icon="mdi:eye-outline" width={14} height={14} className="flex-none text-white/70" />
+          <span className="text-xs font-bold">Regenerated design ready — nothing is saved until you apply it.</span>
+          <button
+            onClick={handleGenerate}
+            disabled={generating}
+            className="rounded-xl bg-success px-3 py-1.5 text-xs font-bold uppercase text-white shadow-sm transition hover:opacity-90 active:scale-95 disabled:opacity-40"
+          >
+            {generating ? "Saving..." : "✓ Apply as New Version"}
+          </button>
+          <button
+            onClick={() => setRegeneratePreview(null)}
+            className="rounded-xl bg-white/10 px-3 py-1.5 text-xs font-bold uppercase text-white shadow-sm transition hover:bg-white/20 active:scale-95"
+          >
+            Discard
+          </button>
+        </div>
+      )}
+
       {/* Workspace Header */}
       <div className="border-b border-line bg-white px-6 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
@@ -2814,7 +2907,7 @@ export default function ArchitectureWorkspace({
           </p>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center justify-end gap-3">
           <div className="flex bg-paper p-1 rounded-xl border border-line shadow-sm">
             <button
               onClick={() => setViewMode("diagram")}
@@ -3977,6 +4070,35 @@ export default function ArchitectureWorkspace({
                     </div>
                     {securityFindingsExpanded && (
                       <div className="border-t border-line px-4 py-3">
+                        {recentFixes.length > 0 && (
+                          <div className="mb-3 space-y-2 border-b border-line pb-3">
+                            {recentFixes.map((rf) => (
+                              <div key={rf.key} className="rounded-xl border border-success/25 bg-success-soft/40 p-3 text-xs">
+                                <div className="flex items-start justify-between gap-2">
+                                  <span className="flex items-start gap-1.5 font-bold text-ink">
+                                    <Icon icon="mdi:check-circle-outline" width={14} height={14} className="mt-0.5 flex-none text-success" />
+                                    Fixed: {rf.findingTitle}
+                                  </span>
+                                  <button
+                                    onClick={() => setRecentFixes((prev) => prev.filter((f) => f.key !== rf.key))}
+                                    className="flex-none text-ink-faint hover:text-ink"
+                                    aria-label="Dismiss"
+                                  >
+                                    <Icon icon="mdi:close" width={13} height={13} />
+                                  </button>
+                                </div>
+                                <p className="mt-1 text-[11px] font-semibold text-ink-muted">On {rf.componentName}</p>
+                                {rf.changes.map((ch, cIdx) => (
+                                  <p key={cIdx} className="mt-1 text-[11px]">
+                                    <span className="font-semibold text-ink-faint">{ch.parameter}: </span>
+                                    <span className="text-ink-faint line-through">{ch.oldVal}</span>{" "}
+                                    <span className="font-semibold text-ink">➜ {ch.newVal}</span>
+                                  </p>
+                                ))}
+                              </div>
+                            ))}
+                          </div>
+                        )}
                         {sortedSecurityFindings.length === 0 ? (
                           <p className="text-xs text-ink-muted">
                             No security gaps detected by this design&apos;s automated checks for {PROVIDER_LABELS[activeProvider]}.
@@ -4022,6 +4144,55 @@ export default function ArchitectureWorkspace({
                                   <Icon icon="mdi:wrench-outline" width={12} height={12} className="mt-0.5 flex-none text-ink-faint" />
                                   {f.recommendation}
                                 </p>
+                                {f.componentId &&
+                                  (() => {
+                                    const targetComponent = architecture.hld.components.find((c) => c.id === f.componentId);
+                                    if (!targetComponent || !isSecurityFindingFixable(targetComponent.type, f.title, activeProvider)) {
+                                      return null;
+                                    }
+                                    const key = `${f.componentId}::${f.title}`;
+                                    const isConfirming = confirmingFixKey === key;
+                                    const isApplying = applyingFixKey === key;
+                                    return (
+                                      <div className="mt-2">
+                                        {!isConfirming ? (
+                                          <button
+                                            onClick={() => {
+                                              setFixError("");
+                                              setConfirmingFixKey(key);
+                                            }}
+                                            className="inline-flex items-center gap-1 rounded-full border border-success/30 bg-success-soft px-2 py-0.5 text-[10px] font-bold text-success hover:border-success"
+                                          >
+                                            <Icon icon="mdi:auto-fix" width={11} height={11} />
+                                            Fix this
+                                          </button>
+                                        ) : (
+                                          <div className="flex flex-col gap-1.5">
+                                            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-success/30 bg-success-soft/60 px-2 py-1.5">
+                                              <span className="text-[10px] font-semibold text-ink">Apply this fix now?</span>
+                                              <button
+                                                onClick={() => handleApplySecurityFix(f.componentId!, f.title, f.componentName || f.componentId!)}
+                                                disabled={isApplying}
+                                                className="rounded-full bg-success px-2 py-0.5 text-[10px] font-bold text-white transition disabled:opacity-50"
+                                              >
+                                                {isApplying ? "Applying..." : "Yes, fix it"}
+                                              </button>
+                                              <button
+                                                onClick={() => setConfirmingFixKey(null)}
+                                                disabled={isApplying}
+                                                className="rounded-full bg-ink-muted px-2 py-0.5 text-[10px] font-bold text-white transition disabled:opacity-50"
+                                              >
+                                                Cancel
+                                              </button>
+                                            </div>
+                                            {fixError && confirmingFixKey === key && (
+                                              <p className="text-[10px] font-semibold text-danger">{fixError}</p>
+                                            )}
+                                          </div>
+                                        )}
+                                      </div>
+                                    );
+                                  })()}
                               </div>
                             ))}
                           </div>
@@ -4162,9 +4333,39 @@ export default function ArchitectureWorkspace({
                             <Icon icon="mdi:palette-outline" width={13} height={13} />
                             <span className="text-[9px] font-bold uppercase tracking-wide">Flow steps</span>
                           </button>
-                          {showFlowSteps && currentJourney && currentJourney.length > 0 && (
+                          {/* On-canvas security-finding callouts toggle -- only shown when there's
+                              actually something to toggle. Same off-by-default, opt-in overlay
+                              pattern as Flow steps above, so a dense diagram stays clean until the
+                              user explicitly asks to see which components have open findings. */}
+                          {currentSecurityFindings.length > 0 && (
+                            <button
+                              onClick={() => setShowSecurityCallouts((v) => !v)}
+                              className={`flex items-center gap-1.5 rounded-lg border px-2 py-1.5 shadow-sm transition ${
+                                showSecurityCallouts
+                                  ? "border-danger bg-danger text-white"
+                                  : "border-line-strong bg-panel text-ink-muted hover:text-ink"
+                              }`}
+                            >
+                              <Icon icon="mdi:shield-search-outline" width={13} height={13} />
+                              <span className="text-[9px] font-bold uppercase tracking-wide">
+                                Security findings ({currentSecurityFindings.length})
+                              </span>
+                            </button>
+                          )}
+                          {showFlowSteps && journeyLoading && (
+                            <div className="flex w-[220px] items-center gap-2 rounded-lg border border-line-strong bg-panel px-2.5 py-2 shadow-sm text-[9.5px] font-semibold text-ink-muted">
+                              <span className="h-3 w-3 flex-none animate-spin rounded-full border-2 border-accent border-t-transparent" />
+                              Generating flow steps from the AI…
+                            </div>
+                          )}
+                          {showFlowSteps && !journeyLoading && (!currentJourney || currentJourney.length === 0) && (
+                            <div className="w-[220px] rounded-lg border border-line-strong bg-panel px-2.5 py-2 shadow-sm text-[9.5px] font-semibold text-ink-muted">
+                              No flow could be generated yet for this provider.
+                            </div>
+                          )}
+                          {showFlowSteps && !journeyLoading && currentJourney && currentJourney.length > 0 && (
                             <div
-                              className={`flex flex-col gap-1.5 rounded-lg border border-line-strong bg-panel px-2.5 py-2 shadow-sm ${
+                              className={`flex flex-col gap-1.5 rounded-lg border border-line-strong bg-panel px-2.5 py-2 shadow-sm animate-fadeIn ${
                                 flowStepsExpanded ? "w-[340px]" : "w-[220px]"
                               }`}
                             >
@@ -4229,6 +4430,130 @@ export default function ArchitectureWorkspace({
                                     : `${currentJourneyVerification.issues.length} issue(s)`}
                                 </div>
                               )}
+                            </div>
+                          )}
+                          {/* Security findings on-canvas panel -- a per-node floating text box was
+                              tried first and rejected (real screenshots showed it overlapping
+                              neighboring nodes in a dense diagram, making both unreadable). This
+                              is the SAME "one static panel in the corner, not attached to
+                              individual nodes" pattern Flow Steps already uses successfully above
+                              -- each row is a compact title + severity + a chip that jumps to and
+                              highlights the affected node (that highlight itself is the
+                              hasFindingHighlight border/ring computed per-node below, in the main
+                              node-render loop). Full description/recommendation text stays in the
+                              existing collapsible side panel; this is a quick at-a-glance +
+                              act-on-it surface, kept deliberately compact. */}
+                          {showSecurityCallouts && (currentSecurityFindings.length > 0 || recentFixes.length > 0) && (
+                            <div className="flex max-h-[70vh] w-[260px] flex-col gap-1.5 overflow-y-auto rounded-lg border border-line-strong bg-panel px-2.5 py-2 shadow-sm animate-fadeIn">
+                              <span className="text-[9px] font-extrabold uppercase tracking-wide text-ink-faint">
+                                {currentSecurityFindings.length} security finding{currentSecurityFindings.length === 1 ? "" : "s"}
+                              </span>
+                              {/* Recently fixed trail -- see recentFixes' own declaration for why
+                                  this exists: a fixed finding vanishes from the list above, but
+                                  the user still needs to see WHAT it was and what changed. */}
+                              {recentFixes.length > 0 && (
+                                <div className="flex flex-col gap-1 border-b border-line pb-1.5">
+                                  {recentFixes.map((rf) => (
+                                    <div key={rf.key} className="rounded-md border border-success/30 bg-success-soft/50 px-2 py-1.5">
+                                      <div className="flex items-start justify-between gap-1.5">
+                                        <span className="flex items-start gap-1 text-[9.5px] font-bold leading-snug text-ink">
+                                          <Icon icon="mdi:check-circle-outline" width={12} height={12} className="mt-0.5 flex-none text-success" />
+                                          Fixed: {rf.findingTitle}
+                                        </span>
+                                        <button
+                                          onClick={() => setRecentFixes((prev) => prev.filter((f) => f.key !== rf.key))}
+                                          className="flex-none text-ink-faint hover:text-ink"
+                                          aria-label="Dismiss"
+                                        >
+                                          <Icon icon="mdi:close" width={11} height={11} />
+                                        </button>
+                                      </div>
+                                      <p className="mt-0.5 text-[9px] font-semibold text-ink-muted">{rf.componentName}</p>
+                                      {rf.changes.map((ch, cIdx) => (
+                                        <p key={cIdx} className="mt-0.5 text-[9px] leading-snug">
+                                          <span className="font-semibold text-ink-faint">{ch.parameter}: </span>
+                                          <span className="text-ink-faint line-through">{ch.oldVal}</span>{" "}
+                                          <span className="text-ink">➜ {ch.newVal}</span>
+                                        </p>
+                                      ))}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                              {currentSecurityFindings.map((f, idx) => {
+                                const key = `${f.componentId}::${f.title}`;
+                                const isConfirming = confirmingFixKey === key;
+                                const isApplying = applyingFixKey === key;
+                                const targetComponent = f.componentId ? layoutComponents.find((c) => c.id === f.componentId) : undefined;
+                                const targetType = targetComponent && !("kind" in targetComponent) ? targetComponent.type : undefined;
+                                const fixable = f.componentId && targetType && isSecurityFindingFixable(targetType, f.title, activeProvider);
+                                return (
+                                  <div key={idx} className="rounded-md border border-line-strong bg-paper/60 px-2 py-1.5">
+                                    <div className="flex items-start justify-between gap-1.5">
+                                      <span className="text-[10px] font-bold leading-snug text-ink">{f.title}</span>
+                                      <span
+                                        className={`flex-none rounded-full px-1.5 py-0.5 text-[7.5px] font-extrabold uppercase ${
+                                          f.severity === "high"
+                                            ? "bg-danger text-white"
+                                            : f.severity === "medium"
+                                              ? "bg-warning text-white"
+                                              : "bg-line-strong text-ink-muted"
+                                        }`}
+                                      >
+                                        {f.severity}
+                                      </span>
+                                    </div>
+                                    {f.componentName && f.componentId && (
+                                      <button
+                                        onClick={() => setSelectedNodeId(f.componentId!)}
+                                        className="mt-1 inline-flex items-center gap-1 rounded-full border border-line-strong bg-white px-1.5 py-0.5 text-[9px] font-semibold text-ink-muted transition hover:border-accent hover:text-accent-ink"
+                                      >
+                                        <Icon icon="mdi:cube-outline" width={10} height={10} />
+                                        {f.componentName}
+                                      </button>
+                                    )}
+                                    {fixable && (
+                                      <div className="mt-1.5">
+                                        {!isConfirming ? (
+                                          <button
+                                            onClick={() => {
+                                              setFixError("");
+                                              setConfirmingFixKey(key);
+                                            }}
+                                            className="inline-flex items-center gap-1 rounded-full border border-success/30 bg-success-soft px-2 py-0.5 text-[9px] font-bold text-success hover:border-success"
+                                          >
+                                            <Icon icon="mdi:auto-fix" width={10} height={10} />
+                                            Fix this
+                                          </button>
+                                        ) : (
+                                          <div className="flex flex-col gap-1">
+                                            <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-success/30 bg-success-soft/60 px-1.5 py-1">
+                                              <span className="text-[9px] font-semibold text-ink">Apply now?</span>
+                                              <button
+                                                onClick={() => handleApplySecurityFix(f.componentId!, f.title, f.componentName || f.componentId!)}
+                                                disabled={isApplying}
+                                                className="rounded-full bg-success px-1.5 py-0.5 text-[9px] font-bold text-white transition disabled:opacity-50"
+                                              >
+                                                {isApplying ? "Applying..." : "Yes"}
+                                              </button>
+                                              <button
+                                                onClick={() => setConfirmingFixKey(null)}
+                                                disabled={isApplying}
+                                                className="rounded-full bg-ink-muted px-1.5 py-0.5 text-[9px] font-bold text-white transition disabled:opacity-50"
+                                              >
+                                                Cancel
+                                              </button>
+                                            </div>
+                                            {fixError && confirmingFixKey === key && (
+                                              <p className="text-[9px] font-semibold text-danger">{fixError}</p>
+                                            )}
+                                          </div>
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
                             </div>
                           )}
                         </div>
@@ -4348,6 +4673,19 @@ export default function ArchitectureWorkspace({
                                   >
                                     <animate attributeName="stroke-dashoffset" values="56;0" dur="3s" repeatCount="indefinite" />
                                   </path>
+                                  {/* Traveling flow dot -- the marching-dash animation above is a
+                                      subtle, always-on "something moves here" cue; this is a much
+                                      more obvious one on top of it, same offset-path + flow-dot
+                                      keyframe technique as the marketing homepage's hero diagram
+                                      (see HeroDiagram.tsx / globals.css), reused here since it's
+                                      the same idea: real request traffic flowing through the
+                                      design. Staggered by edge index so a dense diagram doesn't
+                                      have every dot pulse in lockstep. */}
+                                  <circle
+                                    r={4}
+                                    fill={stepColor || "var(--color-accent)"}
+                                    style={{ offsetPath: `path("${d}")`, animation: `flow-dot 2.4s linear ${(idx % 6) * 0.4}s infinite` }}
+                                  />
                                   {edgeInfo && midPoint && (
                                     <g>
                                       <circle cx={midPoint.x} cy={midPoint.y} r={8} fill={edgeInfo.color} stroke="white" strokeWidth={1.5} />
@@ -4427,16 +4765,12 @@ export default function ArchitectureWorkspace({
                                     width={coord.width}
                                     height={coord.height}
                                   >
-                                    <div className="flex h-full w-full items-center gap-2.5 rounded-2xl border-2 border-dashed border-white/30 bg-ink px-3 py-2 shadow-sm">
-                                      <div className="flex h-9 w-9 flex-none items-center justify-center rounded-lg bg-white/15">
-                                        <Icon icon={bookendIcon} width={20} height={20} className="text-white" />
-                                      </div>
-                                      <div className="min-w-0 flex-1">
-                                        <div className="truncate text-[9.5px] font-bold uppercase tracking-wide text-white/50">
-                                          {bookendLabel}
+                                    <div className="flex h-full w-full items-center justify-center">
+                                      <HoverTooltip text={`${bookendLabel}: ${node.name}`}>
+                                        <div className="flex h-14 w-14 flex-none items-center justify-center rounded-2xl border-2 border-dashed border-white/30 bg-ink shadow-sm">
+                                          <Icon icon={bookendIcon} width={32} height={32} className="text-white" />
                                         </div>
-                                        <div className="truncate text-[12.5px] font-bold text-white">{node.name}</div>
-                                      </div>
+                                      </HoverTooltip>
                                     </div>
                                   </foreignObject>
                                 );
@@ -4461,6 +4795,51 @@ export default function ArchitectureWorkspace({
                               // "dns" component, since that's the single source of truth
                               // lld_rules.py's Phase 5 DR enrichment writes to (see dr-strategy.ts).
                               const drBadge = node.type === "dns" ? getDrBadge(mapping?.lld?.config) : null;
+
+                              // Security findings highlight (on-canvas, opt-in via
+                              // showSecurityCallouts) -- a per-node floating text box was tried
+                              // first and rejected: in a dense diagram it overlapped neighboring
+                              // nodes and made both unreadable (confirmed via real screenshots).
+                              // Instead: a subtle border/ring on the node itself (same mechanism
+                              // as isSelected/isComplianceNode below), plus the actual finding
+                              // text + Fix button lives in ONE consolidated panel in the top-left
+                              // legend -- same "static panel, not attached to individual nodes"
+                              // pattern Flow Steps already uses successfully. Reuses the exact
+                              // same currentSecurityFindings data the side panel already renders.
+                              const nodeFindings = currentSecurityFindings.filter((f) => f.componentId === node.id);
+                              const hasFindingHighlight = showSecurityCallouts && nodeFindings.length > 0;
+                              const highestFindingSeverity = nodeFindings.some((f) => f.severity === "high")
+                                ? "high"
+                                : nodeFindings.some((f) => f.severity === "medium")
+                                  ? "medium"
+                                  : "low";
+
+                              // Consolidated hover tooltip -- name/service plus every active
+                              // badge's own explanation, folded into one bigger tooltip instead of
+                              // several tiny separate ones a user would have to hover individually
+                              // (each badge still ALSO keeps its own `title` for a screen-reader/
+                              // no-JS fallback, this is just the primary on-hover surface now).
+                              const tooltipLines = [`${node.name} — ${serviceName}`];
+                              if (isComplianceNode(node.type)) {
+                                tooltipLines.push(
+                                  "🛡️ Compliance/security component — required by a regulation (e.g. PCI-DSS or HIPAA) detected in your requirements."
+                                );
+                              }
+                              if (isOverride) {
+                                tooltipLines.push("✎ Manually added or edited by a user, not generated by the rules engine.");
+                              }
+                              if (redundancyBadge) {
+                                tooltipLines.push(`⧉ Deployed redundantly (${redundancyBadge}) — see this component's LLD detail for the exact config driving it.`);
+                              }
+                              if (drBadge) {
+                                tooltipLines.push(`🌐 Multi-region disaster recovery is active (${drBadge}) — see this component's LLD detail for the exact config driving it.`);
+                              }
+                              if (hasFindingHighlight) {
+                                tooltipLines.push(
+                                  `⚠ ${nodeFindings.length} open security finding${nodeFindings.length === 1 ? "" : "s"} — see the Security Findings panel for details.`
+                                );
+                              }
+                              const tooltipText = tooltipLines.join("\n");
 
                               return (
                                 <g key={node.id}>
@@ -4513,30 +4892,38 @@ export default function ArchitectureWorkspace({
                                     onPointerDown={(e) => handleNodePointerDown(e, node.id)}
                                     onPointerMove={handleNodePointerMove}
                                     onPointerUp={(e) => handleNodePointerUp(e, node.id)}
-                                    title="Drag to reposition"
-                                    className={`group relative flex h-full w-full cursor-grab items-center gap-2.5 rounded-2xl border bg-panel px-3 py-2 shadow-sm transition-all active:cursor-grabbing ${
-                                      isSelected
-                                        ? "border-accent ring-2 ring-accent-soft"
-                                        : isComplianceNode(node.type)
-                                          ? "border-warning/50 hover:border-warning"
-                                          : "border-line-strong hover:border-ink-faint"
-                                    } ${isOverride ? "border-dashed" : ""} ${draggingNodeId === node.id ? "opacity-80 shadow-lg" : ""}`}
+                                    className={`group relative flex h-full w-full cursor-grab items-center justify-center active:cursor-grabbing ${draggingNodeId === node.id ? "opacity-80" : ""}`}
                                   >
-                                    <div className={`flex h-9 w-9 flex-none items-center justify-center rounded-lg ${PROVIDER_SOFT_BG[activeProvider]}`}>
-                                      <Icon icon={resolveServiceIcon(serviceName, node.type)} width={20} height={20} />
-                                    </div>
-                                    <div className="min-w-0 flex-1">
-                                      <div className="truncate text-[9.5px] font-bold uppercase tracking-wide text-ink-faint">
-                                        {node.name}
+                                    {/* Icon-only card -- no more white bordered box around it; the icon's own
+                                        provider-tinted square IS the visual node now, sized up a little since it
+                                        no longer has to share the box with two lines of text. The full name/
+                                        service text (plus every active badge's own explanation, see tooltipText
+                                        above) lives in the hover tooltip and the `aria-label` below, never lost,
+                                        just not permanently on-screen. */}
+                                    <HoverTooltip text={tooltipText}>
+                                      <div
+                                        className={`flex h-14 w-14 flex-none items-center justify-center rounded-2xl shadow-sm transition-all group-hover:shadow-md ${PROVIDER_SOFT_BG[activeProvider]} ${
+                                          isSelected
+                                            ? "border border-accent ring-2 ring-accent-soft"
+                                            : hasFindingHighlight
+                                              ? highestFindingSeverity === "high"
+                                                ? "border-2 border-danger ring-4 ring-danger/40"
+                                                : highestFindingSeverity === "medium"
+                                                  ? "border-2 border-warning ring-4 ring-warning/40"
+                                                  : "border-2 border-ink-muted ring-4 ring-ink-muted/30"
+                                              : isComplianceNode(node.type)
+                                                ? "border border-warning/50 group-hover:border-warning"
+                                                : "border border-transparent"
+                                        } ${isOverride ? "border-dashed" : ""} ${draggingNodeId === node.id ? "shadow-lg" : ""}`}
+                                      >
+                                        <Icon icon={resolveServiceIcon(serviceName, node.type)} width={32} height={32} />
                                       </div>
-                                      <div className="truncate text-[12.5px] font-bold text-ink">{serviceName}</div>
-                                    </div>
+                                    </HoverTooltip>
 
-                                    {isComplianceNode(node.type) && (
-                                      <span title="Compliance/security component — required by a regulation (e.g. PCI-DSS or HIPAA) detected in your requirements.">
-                                        <Icon icon="mdi:shield-check-outline" width={15} height={15} className="flex-none text-warning" />
-                                      </span>
-                                    )}
+                                    {/* No separate compliance badge icon -- that state is already visible via
+                                        the warning-colored border above and spelled out in the hover tooltip
+                                        (tooltipLines), and every diagram corner is already spoken for by the
+                                        other badges below. */}
                                     {isOverride && (
                                       <span
                                         title="Manually added or edited by a user, not generated by the rules engine."
@@ -4559,6 +4946,20 @@ export default function ArchitectureWorkspace({
                                         className="absolute -bottom-1.5 -left-1.5 flex h-4 flex-none items-center justify-center rounded-full bg-accent px-1.5 text-[8px] font-black text-white ring-2 ring-panel"
                                       >
                                         {drBadge}
+                                      </span>
+                                    )}
+                                    {hasFindingHighlight && (
+                                      <span
+                                        title={`${nodeFindings.length} open security finding${nodeFindings.length === 1 ? "" : "s"} on this component -- see the Security Findings panel (top-left) or the side panel below for details.`}
+                                        className={`absolute -left-1.5 -top-1.5 flex h-5 w-5 flex-none items-center justify-center rounded-full text-white ring-2 ring-panel ${
+                                          highestFindingSeverity === "high"
+                                            ? "bg-danger"
+                                            : highestFindingSeverity === "medium"
+                                              ? "bg-warning"
+                                              : "bg-ink-muted"
+                                        }`}
+                                      >
+                                        <Icon icon="mdi:shield-alert-outline" width={12} height={12} />
                                       </span>
                                     )}
 
@@ -4610,9 +5011,28 @@ export default function ArchitectureWorkspace({
                     </div>
                   ) : currentFlowStory ? (
                     <>
-                      <p className="mt-3 text-sm text-ink-muted leading-relaxed whitespace-pre-line">
-                        {currentFlowStory}
-                      </p>
+                      {/* Same information as before, verbatim -- chunkStoryText splits on real
+                          paragraph breaks when the LLM actually wrote any, but falls back to
+                          sentence-grouping when it didn't (confirmed in practice: the generation
+                          prompt asks for "a few short paragraphs" but a real response can still
+                          come back as one single unbroken block -- a paragraph-only split
+                          silently did nothing for that case, which was the actual bug). Each chunk
+                          gets its own numbered, colored step card, matching the same visual
+                          language User Journey / Flow Steps numbering already uses (getStepColor)
+                          -- purely a presentation change, nothing here summarizes or drops text. */}
+                      <div className="mt-3 space-y-2.5">
+                        {chunkStoryText(currentFlowStory).map((paragraph, idx) => (
+                            <div key={idx} className="flex items-start gap-2.5 rounded-2xl border border-line bg-white/70 p-3 shadow-sm">
+                              <span
+                                className="mt-0.5 flex h-5 w-5 flex-none items-center justify-center rounded-full text-[10px] font-extrabold text-white"
+                                style={{ backgroundColor: getStepColor(idx) }}
+                              >
+                                {idx + 1}
+                              </span>
+                              <p className="text-sm leading-relaxed text-ink-muted">{paragraph}</p>
+                            </div>
+                          ))}
+                      </div>
                       <SourceCitations sources={currentFlowStorySources} />
                     </>
                   ) : (

@@ -404,6 +404,28 @@ class AppSetting(Base):
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
     )
     app_name: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'Archwise'"))
+    # Admin-editable usage-limit numbers (see usage_limits.py's check_and_increment) -- flat
+    # columns on this same single row, not a KV expansion: still one setting per column, just more
+    # of them, consistent with this table staying "single-row, not a generic store." Free defaults
+    # match the numbers already live before this column existed (6/2/2, just now resetting weekly
+    # instead of being a lifetime cap). Paid core defaults are 5/10/15, not a flat 5/5/5 -- revised
+    # after reasoning through a real architect's work day: regenerating/iterating an existing
+    # project happens far more often than starting brand-new ones, so architecture_generations and
+    # growth_trigger_updates get more daily headroom than brainstorm_sessions.
+    free_brainstorm_sessions_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("6"))
+    free_architecture_generations_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("2"))
+    free_growth_trigger_updates_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("2"))
+    paid_brainstorm_sessions_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("5"))
+    paid_architecture_generations_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("10"))
+    paid_growth_trigger_updates_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("15"))
+    # Advanced AI features -- paid-only, hard-blocked for free (see check_feature_access), so there
+    # is no free_* counterpart for any of these: free simply never reaches the limit check at all.
+    paid_whatif_simulator_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("15"))
+    paid_component_suggestions_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("15"))
+    paid_chat_proposals_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("15"))
+    paid_proposal_refinements_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("25"))
+    paid_requirement_suggestions_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("20"))
+    paid_executive_summary_exports_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("5"))
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=text("clock_timestamp()")
     )
@@ -441,10 +463,20 @@ class AuditLog(Base):
 
 
 class UsageCounter(Base):
-    """Lifetime usage against the free-tier caps, one row per user -- for the future billing-
-    enforcement pass (not yet read/written anywhere; this pass only lands the schema). `plan` is
-    plain text ("free" today, "paid" later) rather than an enum since plans may grow, same
-    reasoning as AuditLog.action."""
+    """Rolling-window usage against the plan-appropriate caps (see usage_limits.py's
+    check_and_increment/check_feature_access for the actual enforcement) -- one row per user.
+    `plan` is plain text ("free"/"paid") rather than an enum since plans may grow, same reasoning
+    as AuditLog.action. `window_started_at` anchors ONE shared reset window covering every counter
+    below together (not a separate window per metric) -- free resets every 7 days, paid every 1
+    day; both periods and the actual limit numbers live on AppSetting, admin-editable, not
+    hardcoded here. `bypass_limits` is the per-user "full access" override for non-admin testers
+    (friends/colleagues trying the product pre-launch) -- distinct from `User.is_admin`, which
+    bypasses unconditionally and separately; this flag grants the same bypass without any
+    /admin/* access.
+
+    The 6 `..._used` columns below the core 3 back check_feature_access's paid-only "advanced AI
+    features" -- free tier never increments these (it's blocked before the counter is even
+    touched), so they only ever move for paid/admin/override users."""
 
     __tablename__ = "usage_counters"
 
@@ -457,12 +489,47 @@ class UsageCounter(Base):
     brainstorm_sessions_used: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     architecture_generations_used: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     growth_trigger_updates_used: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    whatif_simulator_used: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    component_suggestions_used: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    chat_proposals_used: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    proposal_refinements_used: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    requirement_suggestions_used: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    executive_summary_exports_used: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     plan: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'free'"))
+    bypass_limits: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    window_started_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
+    )
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
     )
 
     user: Mapped["User"] = relationship(back_populates="usage_counter")
+
+
+class Feedback(Base):
+    """User-submitted feedback from the /help page -- deliberately no relationship back to User
+    (same precedent as AuditLog/LlmUsageLog: a pure log-like table, not something joined against
+    in normal query paths). `email` is snapshotted at submission time rather than joined live, same
+    "mirrored from Clerk at row-creation" precedent as User.email itself, so an admin reading old
+    feedback still sees who said it even after an email change or account deletion (`user_id` is
+    ON DELETE SET NULL, not CASCADE -- the feedback itself stays readable). `category` is free
+    text, nullable, same not-an-enum reasoning as AuditLog.action/UsageCounter.plan."""
+
+    __tablename__ = "feedback"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    email: Mapped[str] = mapped_column(Text, nullable=False)
+    category: Mapped[str | None] = mapped_column(Text, nullable=True)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
+    )
 
 
 class ApiKey(Base):

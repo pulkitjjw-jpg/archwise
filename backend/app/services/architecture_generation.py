@@ -130,20 +130,63 @@ async def generate_architecture_bundle(
     # Merge deterministic industry-rule risks in alongside whatever the LLM itself surfaced.
     enriched["risks"] = (enriched.get("risks") or []) + industry_result["risks"]
 
-    # 4b. Re-attach the deterministic rule-engine's "alternatives" (each with its own costEstimate)
-    # onto the LLM's output, plus the Kubernetes/private mappings computed in step 2b.
+    # 4b. Re-attach the deterministic rule-engine's "alternatives" and "costEstimate" (both
+    # unconditionally re-attached now -- see validate_and_generate_architecture's prompt, which no
+    # longer asks the LLM to repeat cost figures at all, only real pricing-table data) onto the
+    # LLM's output, plus the Kubernetes/private mappings computed in step 2b.
+    #
+    # Merge sparse "lld.configOverrides" back onto the baseline's own full "lld.config" -- the
+    # prompt no longer asks the LLM to retype every baseline config value verbatim (previously the
+    # dominant share of this call's output tokens: a real 12-component architecture carries ~189
+    # config key/value pairs across 3 providers, virtually all of them already correct as-is from
+    # lld_rules.py). A component with NO baseline counterpart (a genuinely new one the LLM decided
+    # to add) has nothing to merge onto, so its own full "lld.config" (if given) is used as-is.
     baseline_by_id = {c["id"]: c for c in mapped_baseline_components}
     for c in enriched["components"]:
         baseline_component = baseline_by_id.get(c["id"])
-        if not baseline_component or not c.get("cloudMappings"):
+        if not c.get("cloudMappings"):
             continue
         for prov in ("aws", "azure", "gcp"):
-            if c["cloudMappings"].get(prov) and baseline_component["cloudMappings"].get(prov):
-                c["cloudMappings"][prov]["alternatives"] = baseline_component["cloudMappings"][prov]["alternatives"]
+            provider_mapping = c["cloudMappings"].get(prov)
+            if not provider_mapping:
+                continue
+            baseline_provider_mapping = (baseline_component or {}).get("cloudMappings", {}).get(prov)
+            if baseline_provider_mapping:
+                provider_mapping["alternatives"] = baseline_provider_mapping["alternatives"]
+                provider_mapping["costEstimate"] = baseline_provider_mapping["costEstimate"]
+            else:
+                # A genuinely new component the LLM added has no baseline mapping to re-attach --
+                # the prompt no longer asks the LLM for costEstimate at all (see its own docstring),
+                # so compute it the same deterministic way every baseline component's own cost
+                # figure was computed, rather than leaving it missing.
+                fresh_mapping = get_cloud_mapping(prov, c["type"], c["id"], reqs_context, dr_strategy)
+                provider_mapping["alternatives"] = fresh_mapping["alternatives"]
+                provider_mapping["costEstimate"] = fresh_mapping["costEstimate"]
+
+            lld = provider_mapping.get("lld") or {}
+            overrides = lld.pop("configOverrides", None)
+            if baseline_provider_mapping:
+                baseline_config = baseline_provider_mapping.get("lld", {}).get("config", {})
+                lld["config"] = {**baseline_config, **(overrides or {})}
+            elif overrides and not lld.get("config"):
+                # A genuinely new component that mistakenly used configOverrides anyway (no
+                # baseline to overlay onto) -- fall back to treating the overrides as the full
+                # config rather than silently dropping the LLM's only config data for this one.
+                lld["config"] = overrides
+            provider_mapping["lld"] = lld
+
         extra = extra_provider_mappings_by_id.get(c["id"])
         if extra:
             c["cloudMappings"]["kubernetes"] = extra["kubernetes"]
             c["cloudMappings"]["private"] = extra["private"]
+        elif not baseline_component:
+            # Pre-existing gap, surfaced (not introduced) by this same change's new test coverage:
+            # extra_provider_mappings_by_id is only ever built from the baseline components (step
+            # 2b, above), so a genuinely new component the LLM adds never had kubernetes/private
+            # mappings computed for it at all -- it would go missing from those two provider tabs
+            # entirely. Compute them the same way step 2b does for every baseline component.
+            c["cloudMappings"]["kubernetes"] = build_cloud_mapping("kubernetes", c, reqs_context, industry_context, dr_strategy)
+            c["cloudMappings"]["private"] = build_cloud_mapping("private", c, reqs_context, industry_context, dr_strategy)
 
     # 5. Diff against the previous components deterministically in Python (never from the LLM),
     # so costDelta is always present and before/after values always come from real component data.

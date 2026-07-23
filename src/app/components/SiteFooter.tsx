@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { LogoMark } from "./LogoMark";
 
 const COLUMNS = [
   {
@@ -13,6 +14,8 @@ const COLUMNS = [
     links: [
       { href: "/about", label: "About" },
       { href: "/contact", label: "Contact" },
+      { href: "/how-to-use", label: "How to Use" },
+      { href: "/help", label: "Help & FAQ" },
     ],
   },
   {
@@ -35,7 +38,10 @@ export default function SiteFooter({ appName = "Archwise" }: { appName?: string 
     <footer className="mt-24 border-t border-line pt-10 pb-6 text-xs text-ink-faint">
       <div className="grid gap-8 sm:grid-cols-[1.3fr_repeat(3,1fr)]">
         <div>
-          <span className="text-sm font-black tracking-tight text-ink">{appName}</span>
+          <span className="inline-flex items-center gap-1.5 text-sm font-black tracking-tight text-ink">
+            <LogoMark className="h-5 w-5" />
+            {appName}
+          </span>
           <p className="mt-2 max-w-[220px] leading-relaxed">
             AI-reasoned multi-cloud architecture, from a plain-language idea.
           </p>

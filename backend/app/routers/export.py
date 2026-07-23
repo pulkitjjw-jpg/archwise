@@ -12,6 +12,7 @@ from app.services import export_generation
 from app.services.email import ExportEmailError, send_export_email
 from app.services.export_generation import VALID_PROVIDERS, ExportGenerationError
 from app.services.jobs import enqueue_export_job, get_export_file, get_job_status
+from app.services.usage_limits import check_feature_access
 
 router = APIRouter()
 
@@ -61,11 +62,19 @@ async def create_export_job(
 
     # Fail fast on "no architecture yet" before a job is even queued -- same reasoning as the
     # free-tier cap check in architectures.py's generate_architecture, just for a different
-    # precondition (export has no usage cap of its own).
+    # precondition (export has no usage cap of its own, except executive-summary below).
     try:
         await export_generation.latest_architecture(project, db)
     except ExportGenerationError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+
+    # Only executive-summary makes a real LLM call (terraform/kubernetes are pure, free, in-
+    # process generation, see this route's own docstring above) -- gated here, before the job is
+    # queued, same "fail fast before the real work" precedent as the check above. This route never
+    # otherwise commits, so committing right here is what makes the increment/window-reset stick.
+    if payload.format == "executive-summary":
+        await check_feature_access(db, project.user_id, "executive_summary_exports")
+        await db.commit()
 
     job_id = await enqueue_export_job(project_id=str(project.id), format=payload.format, provider=payload.provider)
     return {"jobId": job_id, "status": "pending"}
@@ -146,6 +155,11 @@ async def email_export(
         content_type, label = SERVER_GENERATED_FORMATS[payload.format]
         try:
             if payload.format == "executive-summary":
+                # Same gate as create_export_job above, for the exact same reason -- this is the
+                # other route that can trigger this real, uncached LLM call. This route never
+                # otherwise commits, so committing right here is what makes it stick.
+                await check_feature_access(db, project.user_id, "executive_summary_exports")
+                await db.commit()
                 attachment_bytes, filename = await export_generation.build_executive_summary_pdf_bytes(
                     payload.provider, project, db
                 )

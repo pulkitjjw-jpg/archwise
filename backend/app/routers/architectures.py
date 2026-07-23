@@ -16,6 +16,7 @@ from app.schemas import (
     ManualArchitectureRequest,
     ProposeChangesRequest,
     RefineProposalRequest,
+    SecurityFixRequest,
     WhatIfPreviewRequest,
 )
 from app.serializers import serialize_architecture
@@ -37,9 +38,10 @@ from app.services.llm import (
     propose_component_changes,
     refine_component_proposal,
 )
+from app.services.nfr_signals import determine_dr_strategy
 from app.services.path_verification import verify_journey_path
-from app.services.security_rules import run_security_rules
-from app.services.usage_limits import check_and_increment
+from app.services.security_rules import FIX_HANDLERS, run_security_rules
+from app.services.usage_limits import check_and_increment, check_feature_access
 from app.services.validation import validate_architecture_layout
 
 router = APIRouter()
@@ -447,6 +449,12 @@ async def propose_architecture_changes(
     existing_components = record.hld.get("components", [])
     existing_connections = record.hld.get("connections", [])
 
+    # This route never otherwise commits (preview-only, nothing persisted) -- committing right
+    # here is what makes the increment/window-reset actually stick, same reasoning as
+    # generate_architecture's check_and_increment call.
+    await check_feature_access(db, project.user_id, "chat_proposals")
+    await db.commit()
+
     raw_proposals = await propose_component_changes(
         payload.description,
         existing_components,
@@ -488,6 +496,12 @@ async def get_whatif_suggestions(
             status_code=400, detail="Please finish setting up your requirements before trying What-If scenarios."
         )
 
+    # This route never otherwise commits (preview-only) -- committing right here is what makes the
+    # increment/window-reset actually stick, same reasoning as generate_architecture's
+    # check_and_increment call.
+    await check_feature_access(db, project.user_id, "whatif_simulator")
+    await db.commit()
+
     suggestions = await generate_whatif_suggestions(
         reqs.functional,
         reqs.non_functional,
@@ -528,6 +542,12 @@ async def get_component_suggestions(
         raise HTTPException(
             status_code=400, detail="Please finish setting up your requirements before getting component suggestions."
         )
+
+    # This route never otherwise commits (stateless, not persisted) -- committing right here is
+    # what makes the increment/window-reset actually stick, same reasoning as
+    # generate_architecture's check_and_increment call.
+    await check_feature_access(db, project.user_id, "component_suggestions")
+    await db.commit()
 
     suggestions = await generate_component_suggestions(
         [c.model_dump() for c in payload.components],
@@ -634,6 +654,12 @@ async def refine_proposal(
     reqs_context = {"functional": reqs.functional, "nonFunctional": reqs.non_functional}
     industry_context = reqs.industry_context or DEFAULT_INDUSTRY_CONTEXT
     existing_components = record.hld.get("components", [])
+
+    # This route never otherwise commits (preview-only) -- committing right here is what makes the
+    # increment/window-reset actually stick, same reasoning as generate_architecture's
+    # check_and_increment call.
+    await check_feature_access(db, project.user_id, "proposal_refinements")
+    await db.commit()
 
     result = await refine_component_proposal(
         payload.originalProposal.model_dump(),
@@ -856,9 +882,19 @@ async def save_manual_architecture(
 
     # 6b. Same deterministic security-posture audit as auto-generate -- must be recomputed here
     # too since manual edits (add/remove/rewire components) can change findings just as much as
-    # a fresh generation can.
+    # a fresh generation can. dr_strategy is recomputed from the same latest requirements
+    # apply_security_fix (below) uses, so a manual edit that strips DR config back out is
+    # correctly re-flagged here too -- previously this call omitted dr_strategy entirely
+    # (defaulting to "none"), which silently made the DR-related finding never fire on this path.
+    dr_strategy = determine_dr_strategy(reqs.non_functional, industry_context)
     security_findings = {
-        prov: run_security_rules(compiled_components, connections, industry_context, prov)
+        prov: run_security_rules(
+            compiled_components,
+            connections,
+            industry_context,
+            prov,
+            dr_strategy if prov in ("aws", "azure", "gcp") else "none",
+        )
         for prov in ("aws", "azure", "gcp", "kubernetes", "private")
     }
 
@@ -889,6 +925,118 @@ async def save_manual_architecture(
     await db.flush()
 
     # 8. Update project's current version
+    project.current_version = next_version
+
+    await db.commit()
+
+    return {"architecture": serialize_architecture(record)}
+
+
+@router.post("/projects/{project_id}/architectures/security-fix", status_code=201)
+async def apply_security_fix(
+    payload: SecurityFixRequest,
+    project: Project = Depends(get_editable_project),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """"Fix this" quick action on a security finding (see security_rules.py's FIX_HANDLERS docstring
+    for which findings this covers and why the others are deliberately excluded). Patches ONE LLD
+    config field (or small related bundle, e.g. WAF's rule-set/rate-limit alongside wafEnabled) on
+    ONE component for ONE provider, then saves a new architecture version -- same
+    recompute-findings-and-version pattern as save_manual_architecture above, just driven by a
+    (componentId, findingTitle, provider) triple instead of a full components/connections payload,
+    so the client never needs to know or send the actual fix value."""
+    latest_arch = await _latest_architecture(db, project.id)
+    if not latest_arch:
+        raise HTTPException(status_code=400, detail="No architecture exists yet for this project.")
+
+    reqs = (
+        await db.execute(
+            select(Requirement)
+            .where(Requirement.project_id == project.id)
+            .order_by(Requirement.version.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if not reqs:
+        raise HTTPException(status_code=400, detail="Please finish setting up your requirements first.")
+
+    components = latest_arch.hld.get("components", [])
+    connections = latest_arch.hld.get("connections", [])
+    industry_context = reqs.industry_context
+
+    target = next((c for c in components if c.get("id") == payload.componentId), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="Component not found in the current architecture.")
+
+    handler = FIX_HANDLERS.get((target.get("type"), payload.findingTitle))
+    if not handler:
+        raise HTTPException(status_code=400, detail="No automated fix is available for this finding.")
+
+    dr_strategy = determine_dr_strategy(reqs.non_functional, industry_context)
+    current_mapping = (target.get("cloudMappings") or {}).get(payload.provider) or {}
+    current_config = (current_mapping.get("lld") or {}).get("config") or {}
+    patch = handler(target.get("type"), payload.provider, current_config, dr_strategy)
+    if not patch:
+        raise HTTPException(
+            status_code=400, detail="No automated fix is available for this finding on this provider."
+        )
+
+    # Apply the patch to a copy of the target component's LLD config for this one provider --
+    # every other component, and every other provider's mapping on this same component, is
+    # untouched.
+    new_components = []
+    for c in components:
+        if c.get("id") != payload.componentId:
+            new_components.append(c)
+            continue
+        new_cloud_mappings = {**(c.get("cloudMappings") or {})}
+        provider_mapping = {**(new_cloud_mappings.get(payload.provider) or {})}
+        lld = {**(provider_mapping.get("lld") or {})}
+        lld["config"] = {**(lld.get("config") or {}), **patch}
+        provider_mapping["lld"] = lld
+        new_cloud_mappings[payload.provider] = provider_mapping
+        new_components.append({**c, "cloudMappings": new_cloud_mappings})
+
+    # A security fix always applies to an EXISTING architecture (checked above), so this is never
+    # the project's first-ever version -- same "growth_trigger_updates" bucket save_manual_
+    # architecture uses for any non-first save.
+    await check_and_increment(db, project.user_id, "growth_trigger_updates")
+
+    security_findings = {
+        prov: run_security_rules(
+            new_components,
+            connections,
+            industry_context,
+            prov,
+            dr_strategy if prov in ("aws", "azure", "gcp") else "none",
+        )
+        for prov in ("aws", "azure", "gcp", "kubernetes", "private")
+    }
+
+    next_version = _next_version(latest_arch)
+    diff = compute_architecture_diff(
+        new_components,
+        components,
+        {"defaultAddedReasoning": "Manually added by user.", "defaultChangeReasoning": "Security-finding quick fix applied."},
+    )
+
+    record = Architecture(
+        project_id=project.id,
+        version=next_version,
+        hld={"components": new_components, "connections": connections},
+        reasoning={
+            "decisions": latest_arch.reasoning.get("decisions", []),
+            "assumptions": latest_arch.reasoning.get("assumptions", []),
+            "risks": latest_arch.reasoning.get("risks", []),
+            "recommendation": latest_arch.reasoning.get("recommendation"),
+            "diff": diff,
+        },
+        cloud_provider=latest_arch.cloud_provider,
+        security_findings=security_findings,
+    )
+    db.add(record)
+    await db.flush()
+
     project.current_version = next_version
 
     await db.commit()

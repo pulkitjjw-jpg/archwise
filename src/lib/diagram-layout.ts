@@ -6,8 +6,15 @@
 // around nodes and each other, not just between dagre's virtual dummy nodes.
 import ELK, { type ElkNode } from "elkjs/lib/elk.bundled.js";
 
-export const DIAGRAM_NODE_WIDTH = 208;
-export const DIAGRAM_NODE_HEIGHT = 68;
+// Icon-only square (was 208x68 with inline name/service text) -- the name is now shown via a
+// custom hover tooltip (HoverTooltip.tsx) instead of taking up permanent on-screen space, per
+// live feedback that the wide labeled cards ate too much of the canvas. PNG export's own
+// captioned rendering (see diagram-export.ts's buildPlainDiagramSvg) draws its text label BELOW
+// this same box rather than beside it, so it still needs to stay a real value here, not something
+// export overrides. Bumped 64->72 (icon glyph itself 28->32) per follow-up feedback asking for a
+// somewhat bigger icon.
+export const DIAGRAM_NODE_WIDTH = 72;
+export const DIAGRAM_NODE_HEIGHT = 72;
 
 export type DiagramLayout = {
   nodes: Record<string, { x: number; y: number; width: number; height: number }>;

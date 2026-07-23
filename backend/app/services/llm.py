@@ -17,6 +17,13 @@ from app.models import LlmUsageLog
 logger = logging.getLogger("app.services.llm")
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+# Google's own OpenAI-compatible endpoint (ai.google.dev/gemini-api/docs/openai) -- same request/
+# response wire format as OpenRouter/OpenAI, just a different base URL and API key. A chain entry
+# prefixed with GEMINI_DIRECT_PREFIX routes here instead, using settings.gemini_api_key (a
+# DEDICATED per-project free quota, not the shared OpenRouter free pool -- see that setting's own
+# docstring for why this is tried first in the default chain).
+GEMINI_DIRECT_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+GEMINI_DIRECT_PREFIX = "gemini-direct:"
 
 _LEAKED_APOLOGY_RE = re.compile(r"^\s*(apolog|i apologize|i'm sorry|my apologies|sorry[,!]? )", re.IGNORECASE)
 _FENCE_OPEN_JSON_RE = re.compile(r"^```json\s*", re.IGNORECASE)
@@ -27,12 +34,18 @@ _FENCE_CLOSE_RE = re.compile(r"\s*```$")
 # against that endpoint if LLM_MODEL_CHAIN changes, these are not guessable/derivable. Every
 # ":free" slug is genuinely $0/$0; an unlisted model falls back to (0.0, 0.0) in _model_pricing
 # below, which under-reports cost for a paid model that isn't in this table -- acceptable for now
-# since the chain's only paid tier (Gemini) is listed, but keep this in sync if that changes.
+# since the chain's only paid tier (Gemini via OpenRouter) is listed, but keep this in sync if that
+# changes. The "gemini-direct:" entries are treated as $0/$0 too -- genuinely free up to Google's
+# own per-project daily quota (see gemini_api_key's docstring); a request beyond that quota would
+# incur real Google billing this table does not currently account for, same known limitation as
+# every other ":free" entry's shared-pool exhaustion not being priced in either.
 MODEL_PRICING: dict[str, tuple[float, float]] = {
-    "openai/gpt-oss-120b:free": (0.0, 0.0),
+    "gemini-direct:gemini-flash-lite-latest": (0.0, 0.0),
+    "gemini-direct:gemini-flash-latest": (0.0, 0.0),
     "google/gemma-4-31b-it:free": (0.0, 0.0),
     "nvidia/nemotron-3-ultra-550b-a55b:free": (0.0, 0.0),
-    "qwen/qwen3-coder:free": (0.0, 0.0),
+    "openai/gpt-oss-20b:free": (0.0, 0.0),
+    "nvidia/nemotron-3-nano-30b-a3b:free": (0.0, 0.0),
     "google/gemini-2.5-flash": (0.0000003, 0.0000025),
 }
 
@@ -72,18 +85,37 @@ async def _call_single_model(
     Uses asyncio.wait_for for the actual deadline rather than relying on httpx's own `timeout`
     alone -- httpx's read timeout resets on every byte received, so a connection that trickles
     occasional keep-alive/partial data (observed with OpenRouter under load) can run for minutes
-    without ever tripping it. wait_for enforces a true wall-clock cap regardless."""
+    without ever tripping it. wait_for enforces a true wall-clock cap regardless.
+
+    A GEMINI_DIRECT_PREFIX-prefixed model routes to Google's own OpenAI-compatible endpoint using
+    settings.gemini_api_key instead of the `api_key` param (always the OpenRouter key, threaded in
+    by every real caller) -- the prefix is stripped before it's ever sent as the actual model name.
+    An empty/unconfigured gemini_api_key fails this one attempt cleanly (moves to the next chain
+    tier) rather than a startup error, same "optional, still starts without it" pattern as every
+    other optional secret in this codebase."""
+    is_gemini_direct = model.startswith(GEMINI_DIRECT_PREFIX)
+    if is_gemini_direct:
+        url = GEMINI_DIRECT_URL
+        effective_api_key = settings.gemini_api_key
+        effective_model = model[len(GEMINI_DIRECT_PREFIX) :]
+        if not effective_api_key:
+            raise Exception("Gemini direct API key is not configured (settings.gemini_api_key is empty).")
+    else:
+        url = OPENROUTER_URL
+        effective_api_key = api_key
+        effective_model = model
+
     try:
         response = await asyncio.wait_for(
             client.post(
-                OPENROUTER_URL,
+                url,
                 headers={
-                    "Authorization": f"Bearer {api_key}",
+                    "Authorization": f"Bearer {effective_api_key}",
                     "Content-Type": "application/json",
-                    "X-Title": "AI Cloud Architecture Generator",
+                    **({} if is_gemini_direct else {"X-Title": "AI Cloud Architecture Generator"}),
                 },
                 json={
-                    "model": model,
+                    "model": effective_model,
                     "messages": messages,
                     "response_format": {"type": "json_object"},
                 },
@@ -95,7 +127,8 @@ async def _call_single_model(
         raise Exception(f"timed out after {timeout_seconds}s")
 
     if not response.is_success:
-        raise Exception(f"OpenRouter API error: {response.status_code} - {response.text}")
+        provider_label = "Gemini direct" if is_gemini_direct else "OpenRouter"
+        raise Exception(f"{provider_label} API error: {response.status_code} - {response.text}")
 
     data = response.json()
     choices = data.get("choices")
@@ -618,10 +651,25 @@ Do not include markdown code block formatting (like ```json) in your raw respons
         ]
     )
 
+    # Only the validated-tier model(s) get a schema check inside _call_llm_with_fallback_chain --
+    # every other tier in the chain (including the FIRST one tried) only needs to produce valid
+    # JSON, by design, so it can't be rejected just for being "differently shaped" (see that
+    # function's own docstring). That tolerance means a non-validated model can return
+    # well-formed JSON that's still missing "stage" (or "message") entirely, which used to reach
+    # the router's own `next_turn["stage"]` access unguarded -- a real, confirmed bug: the
+    # conversation would silently get the router's hardcoded generic filler question forever
+    # stuck on stage="brainstorm", with no error, no "Discovery complete" banner, and no way for
+    # the user to tell "the AI is stuck" apart from "it's my turn to answer". Validating the two
+    # fields THIS caller actually depends on, here, closes that gap without loosening or tightening
+    # the shared fallback-chain function's general tolerance for its OTHER callers.
+    valid_stages = ("growth_trigger", "requirement_gathering") if is_growth_phase else ("brainstorm", "requirement_gathering")
+
     try:
         result = await _call_llm_with_fallback_chain(
             api_key, messages_for_api, "Brainstorm turn generation", expected_keys=expected_keys
         )
+        if "message" not in result or "stage" not in result or result["stage"] not in valid_stages:
+            raise ValueError(f"Brainstorm turn response missing required fields or has an invalid stage: {result!r}")
 
         if _looks_like_leaked_apology(result["message"]):
             logger.error(
@@ -630,15 +678,55 @@ Do not include markdown code block formatting (like ```json) in your raw respons
             result = await _call_llm_with_fallback_chain(
                 api_key, messages_for_api, "Brainstorm turn generation (apology cleanup)", expected_keys=expected_keys
             )
+            if "message" not in result or "stage" not in result or result["stage"] not in valid_stages:
+                raise ValueError(f"Brainstorm turn re-request also missing required fields or invalid stage: {result!r}")
+
+        # Confirmed live: a real, on-topic, non-concluding question can still come back with an
+        # empty "suggestedReplies" despite the prompt requiring 2-4 whenever isComplete is false --
+        # an instruction-compliance gap distinct from a malformed/missing-field response (message
+        # and stage are both genuinely fine here), so this does NOT fall into the except block's
+        # generic-filler fallback -- that would throw away a perfectly good message just to fix a
+        # missing quick-reply-chip list, and the filler path doesn't populate suggestedReplies
+        # either (see its own dict below), making that trade strictly worse. Re-request once,
+        # same "detect a specific known quality gap, retry once" precedent as the leaked-apology
+        # check above; if the retry ALSO comes back empty, accept the message as-is rather than
+        # keep spending calls chasing one cosmetic field.
+        if not result.get("isComplete") and not result.get("suggestedReplies"):
+            logger.error(
+                "[Brainstorm turn generation] Missing suggestedReplies on a non-concluding turn, re-requesting once"
+            )
+            retried = await _call_llm_with_fallback_chain(
+                api_key,
+                messages_for_api,
+                "Brainstorm turn generation (missing suggestions retry)",
+                expected_keys=expected_keys,
+            )
+            if (
+                "message" in retried
+                and "stage" in retried
+                and retried["stage"] in valid_stages
+                and (retried.get("isComplete") or retried.get("suggestedReplies"))
+            ):
+                result = retried
+            else:
+                logger.error(
+                    "[Brainstorm turn generation] Retry still missing suggestedReplies (or was itself invalid) -- "
+                    "keeping the original valid message rather than discarding it over one cosmetic field"
+                )
 
         return result
     except Exception as err:
         logger.error("Brainstorm turn generation exhausted the whole model fallback chain, falling back to a generic question: %s", err)
+        # "degraded": True is the signal the router forwards to the frontend (never persisted to
+        # the DB) so the chat can show a clear "I had trouble with that" state on this specific
+        # turn instead of presenting this filler as an ordinary question -- see conversations.py's
+        # create_conversation_turn and ChatArea.tsx's rendering of it.
         return {
-            "message": "Thank you for the details. Could you share a bit more about your scaling or compliance requirements?",
+            "message": "I had some trouble processing that last message clearly -- could you tell me a bit more, or try rephrasing it?",
             "isComplete": len(history) >= 6,
-            "stage": "requirement_gathering" if len(history) >= 6 else "brainstorm",
+            "stage": "requirement_gathering" if len(history) >= 6 else ("growth_trigger" if is_growth_phase else "brainstorm"),
             "knowledgeLevel": known_knowledge_level,
+            "degraded": True,
         }
 
 
@@ -1430,9 +1518,12 @@ You are a senior cloud systems architect. You are given a product name, the extr
 Your task is to:
 1. Review the baseline architecture components, connections, and their nested LLD configurations. Make adjustments if there are important nuances that the rule engine missed.
    - For 'cloudMappings.<provider>.alternatives', only output 'serviceName' and 'reason' for each entry (omit any cost data) — the server merges the baseline's own cost estimates back in afterward, so you do not need to compute or repeat them. Keep these entries brief.
+   - Do NOT repeat 'costEstimate' at all for any provider — every cost figure is computed deterministically from real pricing data and the server re-attaches it afterward regardless of what you send; omit this field entirely.
+   - CRITICAL — do not retype the baseline's LLD config values: the baseline you were given already contains each provider's complete 'lld.config' (e.g. instance size, Multi-AZ setting, backup retention), computed deterministically and almost always already correct. For an EXISTING baseline component (one whose "id" you were given), do NOT include a 'lld.config' field at all — instead, ONLY if you genuinely want to change one or more specific values from what the baseline already set, include 'lld.configOverrides': a Record<string, string> containing ONLY the key(s) whose value should change (e.g. {"minInstances": "3"} to bump just that one field) — omit this field entirely, or leave it an empty object, for the overwhelming majority of components where the baseline's config is already correct as-is. Never invent an override just to have something to say; a real, deliberate correction only.
+   - The ONE exception: if you are adding a genuinely NEW component that has no baseline counterpart (a real gap the rule engine missed), that component has no baseline config to override, so give it a full 'lld.config' Record the normal way instead of 'lld.configOverrides'.
 2. For EVERY component, write:
    - A detailed 'reasoning' trace explaining why this component is necessary and its primary design trade-offs.
-   - Inside 'cloudMappings.aws.lld.reasoning', 'cloudMappings.azure.lld.reasoning', and 'cloudMappings.gcp.lld.reasoning': write custom, short (one-line) rationale strings explaining why the specific LLD configuration values (e.g., memory size, instance class, Multi-AZ setting) are appropriate based on the requirements.
+   - Inside 'cloudMappings.aws.lld.reasoning', 'cloudMappings.azure.lld.reasoning', and 'cloudMappings.gcp.lld.reasoning': write custom, short (one-line) rationale strings explaining why the specific LLD configuration values (e.g., memory size, instance class, Multi-AZ setting) are appropriate based on the requirements — this is real, valuable narration and should still be written in full even though the config VALUES themselves are not repeated (per the configOverrides rule above).
    - EXCEPTION: for compliance components (type 'tokenization', 'audit-log', 'phi-vault', 'deidentification'), the baseline 'reasoning' and 'lld.reasoning' were already written by a deterministic compliance rule engine citing the specific regulation (PCI-DSS/HIPAA) that mandated them. Keep those as-is unless you have a specific correction — do not rewrite them at length, to keep your output concise.
 3. List any 'assumptions' or 'risks' that are present in the design due to requirements being marked as "not_specified".
 4. Determine the Recommended Cloud Provider ('aws', 'azure', or 'gcp') and write a short paragraph rationale explaining why it is recommended over the others, along with a list of key trade-offs.
@@ -1457,30 +1548,14 @@ You MUST respond with a raw JSON object matching this structure:
         "aws": {
           "serviceName": string,
           "alternatives": [ { "serviceName": string, "reason": string } ],
-          "costEstimate": { "min": number, "max": number, "assumptions": string },
           "lld": {
-            "config": Record<string, string>,
-            "reasoning": Record<string, string>
+            "configOverrides": Record<string, string> (existing baseline component -- sparse, only real changes, omit/empty for most components),
+            "config": Record<string, string> (ONLY for a genuinely new component with no baseline counterpart -- never use both configOverrides and config on the same component),
+            "reasoning": Record<string, string> (always required in full, every key -- this is real narration, not a value echo)
           }
         },
-        "azure": {
-          "serviceName": string,
-          "alternatives": [ { "serviceName": string, "reason": string } ],
-          "costEstimate": { "min": number, "max": number, "assumptions": string },
-          "lld": {
-            "config": Record<string, string>,
-            "reasoning": Record<string, string>
-          }
-        },
-        "gcp": {
-          "serviceName": string,
-          "alternatives": [ { "serviceName": string, "reason": string } ],
-          "costEstimate": { "min": number, "max": number, "assumptions": string },
-          "lld": {
-            "config": Record<string, string>,
-            "reasoning": Record<string, string>
-          }
-        }
+        "azure": { "serviceName": string, "alternatives": [...], "lld": { "configOverrides": Record<string,string>, "config": Record<string,string>, "reasoning": Record<string,string> } },
+        "gcp": { "serviceName": string, "alternatives": [...], "lld": { "configOverrides": Record<string,string>, "config": Record<string,string>, "reasoning": Record<string,string> } }
       }
     }
   ],

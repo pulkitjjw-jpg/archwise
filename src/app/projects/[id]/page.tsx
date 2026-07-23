@@ -1,4 +1,5 @@
 import { auth } from "@clerk/nextjs/server";
+import { UserButton } from "@clerk/nextjs";
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import ChatArea from "@/app/components/ChatArea";
@@ -81,7 +82,7 @@ export default async function ProjectPage({ params }: ProjectPageProps) {
           <div className="flex items-center gap-3">
             <Link
               href="/dashboard"
-              className="group flex h-10 w-10 items-center justify-center rounded-full border border-line bg-white/80 shadow-sm transition hover:bg-paper"
+              className="group flex h-10 items-center gap-2 rounded-full border border-line bg-white/80 px-4 shadow-sm transition hover:bg-paper"
             >
               <svg
                 xmlns="http://www.w3.org/2000/svg"
@@ -93,6 +94,7 @@ export default async function ProjectPage({ params }: ProjectPageProps) {
               >
                 <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18" />
               </svg>
+              <span className="text-sm font-semibold text-ink-muted group-hover:text-ink">Dashboard</span>
             </Link>
             <div>
               <div className="flex items-center gap-2">
@@ -109,15 +111,21 @@ export default async function ProjectPage({ params }: ProjectPageProps) {
             </div>
           </div>
 
-          <div className="text-left sm:text-right">
-            <p className="text-xs font-semibold uppercase tracking-wider text-ink-faint">Created At</p>
-            <p className="text-sm font-semibold text-ink-muted mt-1">
-              {new Date(project.createdAt).toLocaleDateString([], {
-                year: "numeric",
-                month: "long",
-                day: "numeric",
-              })}
-            </p>
+          <div className="flex items-center gap-4">
+            <div className="text-left sm:text-right">
+              <p className="text-xs font-semibold uppercase tracking-wider text-ink-faint">Created At</p>
+              <p className="text-sm font-semibold text-ink-muted mt-1">
+                {new Date(project.createdAt).toLocaleDateString([], {
+                  year: "numeric",
+                  month: "long",
+                  day: "numeric",
+                })}
+              </p>
+            </div>
+            {/* Same UserButton usage as dashboard/page.tsx -- lets a user sign out (or switch
+                account) directly from inside a project's workspace, without navigating back to
+                the homepage first. */}
+            <UserButton appearance={{ elements: { avatarBox: "h-9 w-9" } }} />
           </div>
         </header>
 

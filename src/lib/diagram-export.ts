@@ -202,20 +202,30 @@ function buildPlainDiagramSvg(
   for (const node of nodes) {
     const x = node.x - node.width / 2;
     const y = node.y - node.height / 2;
+    const bottom = y + node.height;
 
+    // Caption BELOW the box, centered, rather than beside the icon -- the live on-screen box
+    // shrank to an icon-only square (name/service now shown via hover only, see
+    // ArchitectureWorkspace.tsx), but a static exported image has no hover, and this export's
+    // "icon" is just a plain accent-colored circle (not the real per-service glyph), so the text
+    // label is the ONLY thing that actually distinguishes one node from another here -- dropping
+    // it would make every regular node an identical purple dot. The ~40px margin
+    // computeDiagramLayoutAsync already reserves around the whole canvas, plus ELK's own
+    // elk.spacing.nodeNode gap between same-layer siblings, is enough room for these two short
+    // lines without overlapping the next row.
     if (node.isBookend) {
       parts.push(
         `<rect x="${x}" y="${y}" width="${node.width}" height="${node.height}" rx="14" fill="#12161F" stroke="#FFFFFF" stroke-opacity="0.3" stroke-width="1.5" stroke-dasharray="4 3"/>`
       );
-      parts.push(`<circle cx="${x + 22}" cy="${y + node.height / 2}" r="10" fill="#FFFFFF" fill-opacity="0.15"/>`);
+      parts.push(`<circle cx="${node.x}" cy="${node.y}" r="16" fill="#FFFFFF" fill-opacity="0.15"/>`);
       parts.push(
-        `<text x="${x + 42}" y="${y + node.height / 2 - 6}" font-family="ui-sans-serif, system-ui, sans-serif" font-size="9" font-weight="700" letter-spacing="0.5" fill="#FFFFFF" fill-opacity="0.5">${escapeXml(
-          truncate(node.label.toUpperCase(), 24)
+        `<text x="${node.x}" y="${bottom + 12}" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="9" font-weight="700" letter-spacing="0.5" fill="#5B6472">${escapeXml(
+          truncate(node.label.toUpperCase(), 20)
         )}</text>`
       );
       parts.push(
-        `<text x="${x + 42}" y="${y + node.height / 2 + 12}" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="#FFFFFF">${escapeXml(
-          truncate(node.serviceName, 22)
+        `<text x="${node.x}" y="${bottom + 26}" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="#12161F">${escapeXml(
+          truncate(node.serviceName, 18)
         )}</text>`
       );
       continue;
@@ -226,17 +236,15 @@ function buildPlainDiagramSvg(
     parts.push(
       `<rect x="${x}" y="${y}" width="${node.width}" height="${node.height}" rx="14" fill="#FFFFFF" stroke="${borderColor}" stroke-width="1.5"${dash}/>`
     );
+    parts.push(`<circle cx="${node.x}" cy="${node.y}" r="16" fill="${node.accentHex}" fill-opacity="0.15"/>`);
     parts.push(
-      `<circle cx="${x + 22}" cy="${y + node.height / 2}" r="10" fill="${node.accentHex}" fill-opacity="0.15"/>`
-    );
-    parts.push(
-      `<text x="${x + 42}" y="${y + node.height / 2 - 6}" font-family="ui-sans-serif, system-ui, sans-serif" font-size="9" font-weight="700" letter-spacing="0.5" fill="#8891A0">${escapeXml(
-        truncate(node.label.toUpperCase(), 24)
+      `<text x="${node.x}" y="${bottom + 12}" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="9" font-weight="700" letter-spacing="0.5" fill="#8891A0">${escapeXml(
+        truncate(node.label.toUpperCase(), 20)
       )}</text>`
     );
     parts.push(
-      `<text x="${x + 42}" y="${y + node.height / 2 + 12}" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="#12161F">${escapeXml(
-        truncate(node.serviceName, 22)
+      `<text x="${node.x}" y="${bottom + 26}" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="#12161F">${escapeXml(
+        truncate(node.serviceName, 18)
       )}</text>`
     );
   }

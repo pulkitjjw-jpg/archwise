@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 import { LEGAL_PAGES } from "@/lib/legal-pages";
+import { LogoMark } from "@/app/components/LogoMark";
 
 // Deliberately a plainer, denser layout than the marketing pages (no gradient hero, no rounded-
 // [2rem] cards) -- long-form legal text reads better as simple prose than as decorated panels,
@@ -18,7 +19,8 @@ export default function LegalPageShell({
   return (
     <main className="min-h-screen bg-paper px-6 py-10 text-ink sm:py-14">
       <div className="mx-auto max-w-2xl">
-        <Link href="/" className="text-sm font-black tracking-tight text-ink">
+        <Link href="/" className="inline-flex items-center gap-1.5 text-sm font-black tracking-tight text-ink">
+          <LogoMark className="h-5 w-5" />
           Archwise
         </Link>
 

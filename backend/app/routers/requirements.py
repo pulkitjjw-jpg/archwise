@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.constants import DEFAULT_INDUSTRY_CONTEXT
+from app.constants import DEFAULT_INDUSTRY_CONTEXT, DEFAULT_NON_FUNCTIONAL, DEFAULT_PRODUCT_DOMAIN
 from app.db import get_db
 from app.dependencies import get_accessible_project, get_editable_project
 from app.models import Conversation, Project, Requirement
@@ -23,6 +23,7 @@ from app.services.llm import (
     generate_conversation_summary,
     generate_requirement_suggestions,
 )
+from app.services.usage_limits import check_feature_access
 
 router = APIRouter()
 
@@ -79,14 +80,28 @@ async def extract_requirements(
     latest = await _latest_requirement(db, project.id)
     next_version = latest.version + 1 if latest else 1
 
-    # Always insert a new record for version history
+    # Always insert a new record for version history. industry_context falls back to the same
+    # DEFAULT_INDUSTRY_CONTEXT every other write path in this file already uses (see the
+    # PUT/manual-edit/What-If-"make real" handlers below) -- this is the one write path that was
+    # missing it, and a real live run surfaced why it matters: extract_requirements_from_history
+    # can return an empty "industryContext": {} (confirmed, not just a theoretical gap), which
+    # used to get persisted as-is. The frontend then crashed hard (RequirementsPanel's industry
+    # badge assumed "industry" was always "fintech"/"healthtech"/"none", never missing/undefined)
+    # on every single load of that project, with no way to recover short of a DB fix -- a
+    # malformed extraction should never be able to brick a project this permanently.
+    # non_functional merges onto DEFAULT_NON_FUNCTIONAL (fills any of the 7 keys the extraction
+    # left out with "not_specified", this app's own real convention for "genuinely unknown" --
+    # never a silent invented value) rather than trusting extracted["nonFunctional"] to always
+    # carry every key -- confirmed live that it can come back missing some or all of them (the
+    # same "trust the shape blindly" gap industry_context just above had, for a different field
+    # on the same response).
     record = Requirement(
         project_id=project.id,
         functional=extracted["functional"],
-        non_functional=extracted["nonFunctional"],
-        industry_context=extracted["industryContext"],
+        non_functional={**DEFAULT_NON_FUNCTIONAL, **(extracted.get("nonFunctional") or {})},
+        industry_context=extracted.get("industryContext") or DEFAULT_INDUSTRY_CONTEXT,
         existing_system=extracted.get("existingSystem"),
-        product_domain=extracted["productDomain"],
+        product_domain=extracted.get("productDomain") or DEFAULT_PRODUCT_DOMAIN,
         version=next_version,
     )
     db.add(record)
@@ -108,6 +123,12 @@ async def get_requirement_suggestions(
     # the user types/selects rather than freezing at whatever was last saved. payload.functional
     # is guaranteed to be a list[str] by RequirementsPutRequest -- no runtime shape check needed.
     industry_context = payload.industryContext or DEFAULT_INDUSTRY_CONTEXT
+
+    # This route never otherwise commits (stateless, not persisted) -- committing right here is
+    # what makes the increment/window-reset actually stick, same reasoning as
+    # generate_architecture's check_and_increment call.
+    await check_feature_access(db, project.user_id, "requirement_suggestions")
+    await db.commit()
 
     # Knowledge-base RAG (Step 4 priority 3: NFR reasoning, Sommerville's requirements-engineering
     # chapters in particular). Same pattern as HLD generation -- retrieve here (router has the DB

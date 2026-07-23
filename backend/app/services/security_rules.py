@@ -259,3 +259,84 @@ def run_security_rules(
                 )
 
     return findings
+
+
+# "Fix this" quick action (routers/architectures.py's apply_security_fix) -- for a subset of the
+# findings above where the correct target LLD config value is a known, safe constant (or, for DR,
+# a value this codebase already computes elsewhere via nfr_signals.determine_dr_strategy), a
+# handler here returns the exact config patch to apply. Deliberately NOT attempted for findings
+# that would require adding a whole new component or rewiring connections (no auth component, no
+# audit-log component, public-to-datastore direct wiring) -- those are real structural edits, not
+# a one-field toggle with an unambiguous correct value, and belong to a later, more careful pass.
+#
+# Keyed by (component type, finding title). Every title above is a fixed string constant, never
+# templated beyond the component name/value that's already carried in other finding fields, so
+# exact-string matching here is safe -- if a title's wording ever changes, the lookup simply
+# misses (a "no automated fix available" response) rather than silently applying a stale/wrong fix.
+#
+# Each handler is (component_type, provider, current_config, dr_strategy) -> dict[str, str] | None
+# patch to merge into the component's LLD config for that provider, or None if no fix applies
+# (e.g. a DR fix on kubernetes/private, where no DR config convention exists in this app at all).
+
+_WAF_RULE_SET_BY_PROVIDER = {
+    "aws": "AWS Managed Rules - Core Rule Set + SQL Injection Rule Set",
+    "azure": "Azure-managed Default Rule Set (DRS)",
+    "gcp": "Google Cloud Armor - OWASP Top 10 preconfigured rules",
+}
+
+
+def _fix_encryption_in_transit(component_type, provider, current_config, dr_strategy):
+    return {"encryptionInTransit": "TLS 1.2+ (Enforced)"}
+
+
+def _fix_mfa_required(component_type, provider, current_config, dr_strategy):
+    return {"mfaRequired": "true"}
+
+
+def _fix_self_sign_up(component_type, provider, current_config, dr_strategy):
+    return {"selfSignUpEnabled": "false"}
+
+
+def _fix_waf_enabled(component_type, provider, current_config, dr_strategy):
+    rule_set = _WAF_RULE_SET_BY_PROVIDER.get(provider)
+    if not rule_set:
+        return None
+    return {"wafEnabled": "true", "wafRuleSet": rule_set, "rateLimitPerIP": "2000 requests / 5 min"}
+
+
+def _fix_multi_az(component_type, provider, current_config, dr_strategy):
+    return {"multiAZ": "true (Primary/Standby)"}
+
+
+def _fix_backup_retention(component_type, provider, current_config, dr_strategy):
+    return {"backupRetention": "30 Days"}
+
+
+def _fix_dr_database(component_type, provider, current_config, dr_strategy):
+    if dr_strategy == "none" or provider not in ("aws", "azure", "gcp"):
+        return None
+    return {"drStrategy": dr_strategy}
+
+
+def _fix_dr_dns(component_type, provider, current_config, dr_strategy):
+    if dr_strategy == "none" or provider not in ("aws", "azure", "gcp"):
+        return None
+    routing = "Failover (Active-Passive)" if dr_strategy == "pilot-light" else "Latency-based routing with health-check failover"
+    return {"routingPolicy": routing}
+
+
+FIX_HANDLERS = {
+    ("database", "Database has no explicit encryption configuration recorded"): _fix_encryption_in_transit,
+    ("cache", "Cache layer has no encryption configuration recorded"): _fix_encryption_in_transit,
+    ("auth", "Multi-factor authentication is not required"): _fix_mfa_required,
+    ("auth", "Unrestricted self-service sign-up on a sensitive-data system"): _fix_self_sign_up,
+    ("lb", "Public-facing edge has no WAF despite handling sensitive data"): _fix_waf_enabled,
+    ("cdn", "Public-facing edge has no WAF despite handling sensitive data"): _fix_waf_enabled,
+    ("database", "Database has no automatic failover configured"): _fix_multi_az,
+    ("database", "Database backup retention is effectively disabled"): _fix_backup_retention,
+    (
+        "database",
+        "No disaster-recovery strategy for a system that can't afford extended downtime",
+    ): _fix_dr_database,
+    ("dns", "No disaster-recovery strategy for a system that can't afford extended downtime"): _fix_dr_dns,
+}

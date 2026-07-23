@@ -448,7 +448,13 @@ def run_rules_engine(requirements: dict) -> dict:
         or "classification" in func_str
         or "machine learning" in func_str
         or "ai-powered" in func_str
+        or "ml-powered" in func_str
         or "personalization" in func_str
+        or "risk-scoring" in func_str
+        or "risk scoring" in func_str
+        or "risk score" in func_str
+        or "fraud detection" in func_str
+        or "anomaly detection" in func_str
     )
 
     if needs_ml:

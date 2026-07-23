@@ -27,12 +27,13 @@ infra/deployment decision (a load balancer, a public ingress, its own rate limit
 posture) that's out of scope here and unchanged by this pass.
 """
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.dependencies import get_owned_project_by_api_key, get_user_from_api_key
 from app.models import Project, User
+from app.rate_limit import limiter
 from app.routers.projects import _list_projects_for_user
 from app.serializers import serialize_project
 
@@ -40,17 +41,23 @@ router = APIRouter()
 
 
 @router.get("/public/projects")
+@limiter.limit("60/minute")
 async def list_my_projects(
-    current_user: User = Depends(get_user_from_api_key), db: AsyncSession = Depends(get_db)
+    request: Request, current_user: User = Depends(get_user_from_api_key), db: AsyncSession = Depends(get_db)
 ) -> dict:
     """Same shape/data as GET /projects (the Clerk-session version in app/routers/projects.py) --
     reuses its exact query + serialization via _list_projects_for_user rather than a parallel
-    implementation that could silently drift from it."""
+    implementation that could silently drift from it.
+
+    Rate-limited per API-key-owning user (get_user_from_api_key sets request.state.user_id, same
+    as a Clerk session does) -- this is an external, key-authenticated surface a script/CI
+    pipeline calls, so unlike a browser session it was never bounded at all before this."""
     return await _list_projects_for_user(db, current_user.id)
 
 
 @router.get("/public/projects/{project_id}")
-async def get_my_project(project: Project = Depends(get_owned_project_by_api_key)) -> dict:
+@limiter.limit("60/minute")
+async def get_my_project(request: Request, project: Project = Depends(get_owned_project_by_api_key)) -> dict:
     """Same shape as GET /projects/{project_id} -- get_owned_project_by_api_key gives the same
     404-for-both-not-found-and-not-owned ownership check as the Clerk-session
     get_owned_project, just resolved from the API key's owning user instead."""

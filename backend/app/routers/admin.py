@@ -1,5 +1,6 @@
 import logging
 import uuid
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
@@ -8,10 +9,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.db import get_db
 from app.dependencies import require_admin
-from app.models import User
-from app.routers.settings import _get_or_create_settings
-from app.schemas import UpdateAppSettingsRequest, UpdateUserAdminRequest
+from app.models import AppSetting, User
+from app.schemas import (
+    UpdateAppSettingsRequest,
+    UpdateUsageLimitsRequest,
+    UpdateUserAdminRequest,
+    UpdateUserUsageOverrideRequest,
+)
+from app.services.app_settings import get_or_create_app_settings as _get_or_create_settings
 from app.services.audit import write_audit_log
+from app.services.cache import SETTINGS_CACHE_KEY, delete_cached
+from app.services.usage_limits import get_or_create_usage_counter
 
 logger = logging.getLogger("app.routers.admin")
 
@@ -289,13 +297,17 @@ async def update_settings(
         extra_data={"old": {"appName": old_app_name}, "new": {"appName": setting.app_name}},
     )
     await db.commit()
+    await delete_cached(SETTINGS_CACHE_KEY)
     return {"appName": setting.app_name}
 
 
 @router.get("/admin/users")
 async def list_users(db: AsyncSession = Depends(get_db), _admin: User = Depends(require_admin)) -> dict:
     """Project count via a LEFT JOIN + GROUP BY (not a per-user N+1 query) -- same aggregation
-    shape as projects.py's list_projects, just keyed by user instead of by project."""
+    shape as projects.py's list_projects, just keyed by user instead of by project. Also joins
+    usage_counters so the admin panel can show plan/bypass/usage without a second round-trip per
+    user -- COALESCE'd since a user with no UsageCounter row yet (never triggered
+    get_or_create_usage_counter) should read as the same defaults that row would have had."""
     rows = (
         await db.execute(
             text(
@@ -305,10 +317,28 @@ async def list_users(db: AsyncSession = Depends(get_db), _admin: User = Depends(
                     u.email,
                     u.is_admin,
                     u.created_at,
-                    COUNT(p.id) AS project_count
+                    COUNT(p.id) AS project_count,
+                    COALESCE(uc.plan, 'free') AS plan,
+                    COALESCE(uc.bypass_limits, false) AS bypass_limits,
+                    COALESCE(uc.brainstorm_sessions_used, 0) AS brainstorm_sessions_used,
+                    COALESCE(uc.architecture_generations_used, 0) AS architecture_generations_used,
+                    COALESCE(uc.growth_trigger_updates_used, 0) AS growth_trigger_updates_used,
+                    COALESCE(uc.whatif_simulator_used, 0) AS whatif_simulator_used,
+                    COALESCE(uc.component_suggestions_used, 0) AS component_suggestions_used,
+                    COALESCE(uc.chat_proposals_used, 0) AS chat_proposals_used,
+                    COALESCE(uc.proposal_refinements_used, 0) AS proposal_refinements_used,
+                    COALESCE(uc.requirement_suggestions_used, 0) AS requirement_suggestions_used,
+                    COALESCE(uc.executive_summary_exports_used, 0) AS executive_summary_exports_used,
+                    uc.window_started_at
                 FROM users u
                 LEFT JOIN projects p ON p.user_id = u.id
-                GROUP BY u.id, u.email, u.is_admin, u.created_at
+                LEFT JOIN usage_counters uc ON uc.user_id = u.id
+                GROUP BY u.id, u.email, u.is_admin, u.created_at, uc.plan, uc.bypass_limits,
+                         uc.brainstorm_sessions_used, uc.architecture_generations_used,
+                         uc.growth_trigger_updates_used, uc.whatif_simulator_used,
+                         uc.component_suggestions_used, uc.chat_proposals_used,
+                         uc.proposal_refinements_used, uc.requirement_suggestions_used,
+                         uc.executive_summary_exports_used, uc.window_started_at
                 ORDER BY u.created_at DESC
                 """
             )
@@ -322,6 +352,22 @@ async def list_users(db: AsyncSession = Depends(get_db), _admin: User = Depends(
                 "isAdmin": row["is_admin"],
                 "createdAt": row["created_at"],
                 "projectCount": int(row["project_count"]),
+                "plan": row["plan"],
+                "bypassLimits": row["bypass_limits"],
+                "usage": {
+                    "brainstormSessions": int(row["brainstorm_sessions_used"]),
+                    "architectureGenerations": int(row["architecture_generations_used"]),
+                    "growthTriggerUpdates": int(row["growth_trigger_updates_used"]),
+                },
+                "advancedUsage": {
+                    "whatifSimulator": int(row["whatif_simulator_used"]),
+                    "componentSuggestions": int(row["component_suggestions_used"]),
+                    "chatProposals": int(row["chat_proposals_used"]),
+                    "proposalRefinements": int(row["proposal_refinements_used"]),
+                    "requirementSuggestions": int(row["requirement_suggestions_used"]),
+                    "executiveSummaryExports": int(row["executive_summary_exports_used"]),
+                },
+                "windowStartedAt": row["window_started_at"],
             }
             for row in rows
         ]
@@ -354,3 +400,189 @@ async def update_user_admin_status(
     )
     await db.commit()
     return {"id": str(target.id), "email": target.email, "isAdmin": target.is_admin}
+
+
+@router.patch("/admin/users/{user_id}/usage-override")
+async def update_user_usage_override(
+    user_id: uuid.UUID,
+    payload: UpdateUserUsageOverrideRequest,
+    db: AsyncSession = Depends(get_db),
+    admin_user: User = Depends(require_admin),
+) -> dict:
+    """Grants/revokes unrationed feature access to a non-admin user -- for friends/colleagues
+    testing pre-launch. Deliberately a separate flag from is_admin (update_user_admin_status
+    above): this never grants /admin/* access, only bypasses usage_limits.py's enforcement (see
+    check_and_increment's bypass order)."""
+    target = await db.get(User, user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    counter = await get_or_create_usage_counter(db, target.id)
+    old_bypass = counter.bypass_limits
+    counter.bypass_limits = payload.bypassLimits
+    await write_audit_log(
+        db,
+        actor_user_id=admin_user.id,
+        action="user.usage_override_enabled" if payload.bypassLimits else "user.usage_override_disabled",
+        target_type="user",
+        target_id=str(target.id),
+        extra_data={"old": {"bypassLimits": old_bypass}, "new": {"bypassLimits": counter.bypass_limits}},
+    )
+    await db.commit()
+    return {"id": str(target.id), "bypassLimits": counter.bypass_limits}
+
+
+@router.post("/admin/users/{user_id}/usage-reset")
+async def reset_user_usage(
+    user_id: uuid.UUID, db: AsyncSession = Depends(get_db), admin_user: User = Depends(require_admin)
+) -> dict:
+    """Zeroes a user's usage counters and restarts their rolling window immediately -- lets an
+    admin (or a tester the admin is helping) keep testing without waiting for the natural
+    weekly/daily reset."""
+    target = await db.get(User, user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    counter = await get_or_create_usage_counter(db, target.id)
+    old_usage = {
+        "brainstormSessions": counter.brainstorm_sessions_used,
+        "architectureGenerations": counter.architecture_generations_used,
+        "growthTriggerUpdates": counter.growth_trigger_updates_used,
+        "whatifSimulator": counter.whatif_simulator_used,
+        "componentSuggestions": counter.component_suggestions_used,
+        "chatProposals": counter.chat_proposals_used,
+        "proposalRefinements": counter.proposal_refinements_used,
+        "requirementSuggestions": counter.requirement_suggestions_used,
+        "executiveSummaryExports": counter.executive_summary_exports_used,
+    }
+    counter.brainstorm_sessions_used = 0
+    counter.architecture_generations_used = 0
+    counter.growth_trigger_updates_used = 0
+    counter.whatif_simulator_used = 0
+    counter.component_suggestions_used = 0
+    counter.chat_proposals_used = 0
+    counter.proposal_refinements_used = 0
+    counter.requirement_suggestions_used = 0
+    counter.executive_summary_exports_used = 0
+    counter.window_started_at = datetime.now(UTC)
+    await write_audit_log(
+        db,
+        actor_user_id=admin_user.id,
+        action="user.usage_reset",
+        target_type="user",
+        target_id=str(target.id),
+        extra_data={"old": old_usage},
+    )
+    await db.commit()
+    return {
+        "id": str(target.id),
+        "usage": {"brainstormSessions": 0, "architectureGenerations": 0, "growthTriggerUpdates": 0},
+        "advancedUsage": {
+            "whatifSimulator": 0,
+            "componentSuggestions": 0,
+            "chatProposals": 0,
+            "proposalRefinements": 0,
+            "requirementSuggestions": 0,
+            "executiveSummaryExports": 0,
+        },
+        "windowStartedAt": counter.window_started_at,
+    }
+
+
+def _serialize_limits(s: AppSetting) -> dict:
+    return {
+        "free": {
+            "brainstormSessions": s.free_brainstorm_sessions_limit,
+            "architectureGenerations": s.free_architecture_generations_limit,
+            "growthTriggerUpdates": s.free_growth_trigger_updates_limit,
+        },
+        "paid": {
+            "brainstormSessions": s.paid_brainstorm_sessions_limit,
+            "architectureGenerations": s.paid_architecture_generations_limit,
+            "growthTriggerUpdates": s.paid_growth_trigger_updates_limit,
+        },
+        # Advanced AI features -- paid-only (see check_feature_access), no "free" section since
+        # free tier is hard-blocked from all of these rather than given a number.
+        "paidAdvanced": {
+            "whatifSimulator": s.paid_whatif_simulator_limit,
+            "componentSuggestions": s.paid_component_suggestions_limit,
+            "chatProposals": s.paid_chat_proposals_limit,
+            "proposalRefinements": s.paid_proposal_refinements_limit,
+            "requirementSuggestions": s.paid_requirement_suggestions_limit,
+            "executiveSummaryExports": s.paid_executive_summary_exports_limit,
+        },
+    }
+
+
+@router.get("/admin/limits")
+async def get_usage_limits(db: AsyncSession = Depends(get_db), _admin: User = Depends(require_admin)) -> dict:
+    s = await _get_or_create_settings(db)
+    return _serialize_limits(s)
+
+
+@router.put("/admin/limits")
+async def update_usage_limits(
+    payload: UpdateUsageLimitsRequest, db: AsyncSession = Depends(get_db), admin_user: User = Depends(require_admin)
+) -> dict:
+    s = await _get_or_create_settings(db)
+    old = _serialize_limits(s)
+    s.free_brainstorm_sessions_limit = payload.freeBrainstormSessions
+    s.free_architecture_generations_limit = payload.freeArchitectureGenerations
+    s.free_growth_trigger_updates_limit = payload.freeGrowthTriggerUpdates
+    s.paid_brainstorm_sessions_limit = payload.paidBrainstormSessions
+    s.paid_architecture_generations_limit = payload.paidArchitectureGenerations
+    s.paid_growth_trigger_updates_limit = payload.paidGrowthTriggerUpdates
+    s.paid_whatif_simulator_limit = payload.paidWhatifSimulator
+    s.paid_component_suggestions_limit = payload.paidComponentSuggestions
+    s.paid_chat_proposals_limit = payload.paidChatProposals
+    s.paid_proposal_refinements_limit = payload.paidProposalRefinements
+    s.paid_requirement_suggestions_limit = payload.paidRequirementSuggestions
+    s.paid_executive_summary_exports_limit = payload.paidExecutiveSummaryExports
+    await write_audit_log(
+        db,
+        actor_user_id=admin_user.id,
+        action="app_setting.limits_updated",
+        target_type="app_setting",
+        target_id=str(s.id),
+        extra_data={"old": old, "new": _serialize_limits(s)},
+    )
+    await db.commit()
+    return await get_usage_limits(db, admin_user)
+
+
+@router.get("/admin/feedback")
+async def list_feedback(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+    _admin: User = Depends(require_admin),
+) -> dict:
+    """Paginated, same limit/offset/total shape as get_usage_calls above."""
+    total = (await db.execute(text("SELECT COUNT(*) FROM feedback"))).scalar_one()
+    rows = (
+        await db.execute(
+            text(
+                """
+                SELECT id, user_id, email, category, message, created_at
+                FROM feedback
+                ORDER BY created_at DESC
+                LIMIT :limit OFFSET :offset
+                """
+            ),
+            {"limit": limit, "offset": offset},
+        )
+    ).mappings().all()
+    return {
+        "feedback": [
+            {
+                "id": str(row["id"]),
+                "userId": str(row["user_id"]) if row["user_id"] else None,
+                "email": row["email"],
+                "category": row["category"],
+                "message": row["message"],
+                "createdAt": row["created_at"],
+            }
+            for row in rows
+        ],
+        "total": int(total),
+        "limit": limit,
+        "offset": offset,
+    }

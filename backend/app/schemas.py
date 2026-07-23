@@ -107,6 +107,16 @@ class ManualArchitectureRequest(BaseModel):
     connections: list[Connection]
 
 
+# "Fix this" quick action on a security finding (see security_rules.py's FIX_HANDLERS) --
+# deliberately just an identifying triple, not the finding's full text: the handler registry is
+# keyed by (component type, finding title) and looks up the CURRENT architecture/requirements
+# server-side, so the client never needs to send (or could tamper with) the actual fix value.
+class SecurityFixRequest(BaseModel):
+    componentId: str
+    findingTitle: str
+    provider: str
+
+
 # Manual Editor Controls (Workstream W) -- the client sends its CURRENT draft (which may already
 # include manual edits not yet saved), not just the last-persisted architecture, so suggestions
 # track the in-progress editing session.
@@ -185,6 +195,32 @@ class UpdateAppSettingsRequest(BaseModel):
 
 class UpdateUserAdminRequest(BaseModel):
     isAdmin: bool
+
+
+class UpdateUserUsageOverrideRequest(BaseModel):
+    bypassLimits: bool
+
+
+class UpdateUsageLimitsRequest(BaseModel):
+    freeBrainstormSessions: int = Field(ge=0)
+    freeArchitectureGenerations: int = Field(ge=0)
+    freeGrowthTriggerUpdates: int = Field(ge=0)
+    paidBrainstormSessions: int = Field(ge=0)
+    paidArchitectureGenerations: int = Field(ge=0)
+    paidGrowthTriggerUpdates: int = Field(ge=0)
+    # Advanced AI features -- paid-only (see check_feature_access), so there is no free_*
+    # counterpart for any of these.
+    paidWhatifSimulator: int = Field(ge=0)
+    paidComponentSuggestions: int = Field(ge=0)
+    paidChatProposals: int = Field(ge=0)
+    paidProposalRefinements: int = Field(ge=0)
+    paidRequirementSuggestions: int = Field(ge=0)
+    paidExecutiveSummaryExports: int = Field(ge=0)
+
+
+class FeedbackCreateRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=5000)
+    category: str | None = Field(default=None, max_length=50)
 
 
 class DeleteAccountRequest(BaseModel):

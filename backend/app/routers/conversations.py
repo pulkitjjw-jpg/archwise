@@ -61,12 +61,19 @@ async def create_conversation_turn(
     known_knowledge_level = project.knowledge_level or "unknown"
     has_existing_system = bool(project.has_existing_system)
 
-    # 4. Generate AI follow-up
+    # 4. Generate AI follow-up. This default is a last-resort safety net only -- under normal
+    # operation get_next_brainstorm_turn never raises (it has its own internal fallback that
+    # computes a sensible stage/isComplete from the conversation length), so reaching this except
+    # block below means something genuinely unexpected happened outside the LLM call itself.
+    # "degraded" is never persisted to the Conversation row -- it's a real-time-only signal in
+    # THIS response so the frontend can show a clear "I had trouble with that" state on this turn
+    # instead of presenting a generic filler as an ordinary question (see ChatArea.tsx).
     assistant_turn_data = {
-        "message": "Thank you for the input. Could you share more about your scaling or compliance requirements?",
-        "stage": "brainstorm",
+        "message": "I had some trouble processing that last message clearly -- could you tell me a bit more, or try rephrasing it?",
+        "stage": "growth_trigger" if any(h.stage == "growth_trigger" for h in history) else "brainstorm",
         "suggestedReplies": [],
     }
+    degraded = False
 
     try:
         next_turn = await get_next_brainstorm_turn(
@@ -81,11 +88,13 @@ async def create_conversation_turn(
             "stage": next_turn["stage"],
             "suggestedReplies": next_turn.get("suggestedReplies") or [],
         }
+        degraded = bool(next_turn.get("degraded"))
         detected_level = next_turn.get("knowledgeLevel")
         if known_knowledge_level == "unknown" and detected_level in ("technical", "beginner"):
             project.knowledge_level = detected_level
     except Exception as llm_err:
         logger.error("Failed to generate assistant response: %s", llm_err)
+        degraded = True
 
     # 5. Insert assistant message
     assistant_turn = Conversation(
@@ -103,4 +112,5 @@ async def create_conversation_turn(
     return {
         "userConversation": serialize_conversation(user_turn),
         "assistantConversation": serialize_conversation(assistant_turn),
+        "degraded": degraded,
     }

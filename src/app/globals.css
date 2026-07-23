@@ -43,3 +43,118 @@
 
   --font-mono-app: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
 }
+
+/* Homepage hero diagram + ambient background -- see HeroDiagram.tsx and HomeClient.tsx. Kept
+   global (not scoped via CSS modules) because Tailwind v4's arbitrary-value `animate-[...]`
+   syntax needs the keyframe name to already exist somewhere Tailwind's build can see; defining it
+   here alongside the rest of the design tokens is the simplest way to get that. */
+@keyframes draw-line {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+@keyframes node-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.55);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+@keyframes flow-dot {
+  0% {
+    offset-distance: 0%;
+    opacity: 0;
+  }
+  8% {
+    opacity: 1;
+  }
+  92% {
+    opacity: 1;
+  }
+  100% {
+    offset-distance: 100%;
+    opacity: 0;
+  }
+}
+@keyframes blob-drift {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(4%, -5%) scale(1.1);
+  }
+}
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+@keyframes float-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+@keyframes shimmer-sweep {
+  0% {
+    left: -40%;
+  }
+  45%,
+  100% {
+    left: 130%;
+  }
+}
+
+/* A periodic light-streak sweep across primary CTA buttons -- applied alongside the button's own
+   Tailwind classes, which must include `relative overflow-hidden` for the sweep to clip to the
+   button's rounded corners instead of spilling outside it. Soft edges come from `filter: blur`,
+   not gradient stops -- an earlier gradient-only version (transparent/white/transparent across a
+   wide 55%-width band) read as a hard two-tone split down the button rather than a shine, visible
+   in a live screenshot the user flagged. A narrow, blurred, rotated bar can't produce a hard edge
+   regardless of exact stop math, which is the point. */
+.shimmer-cta::after {
+  content: "";
+  position: absolute;
+  top: -60%;
+  left: -40%;
+  width: 18%;
+  height: 220%;
+  transform: rotate(20deg);
+  background: rgba(255, 255, 255, 0.35);
+  filter: blur(5px);
+  pointer-events: none;
+  animation: shimmer-sweep 3.4s ease-in-out infinite;
+}
+
+/* Accessibility: every animation on the site is either a one-shot entrance or a decorative loop,
+   never load-bearing for comprehension -- safe to collapse to their end state instantly. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

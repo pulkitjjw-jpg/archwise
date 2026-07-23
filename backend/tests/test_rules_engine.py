@@ -545,6 +545,23 @@ class TestAnalyticsRule:
 
         assert "analytics" in component_ids(result)
 
+    def test_triggered_at_high_scale_phrased_as_a_raw_number(self):
+        # Regression test: a real live end-to-end run with expectedScale phrased as "50,000+
+        # concurrent users across hospital systems in multiple regions" (a raw digit figure, not
+        # one of is_high_scale's old fixed literal substrings like "50k"/"100,000"/"high") silently
+        # suppressed the analytics component even though "analytics dashboards" was a literal,
+        # explicit functional requirement -- is_high_scale's old substring-only check missed it
+        # entirely. Now fixed via real numeric parsing (nfr_signals.parse_scale_amount).
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(
+            functional=["View analytics dashboards on population health trends"],
+            expectedScale="50,000+ concurrent users across hospital systems in multiple regions",
+        )
+        result = run_rules_engine(req)
+
+        assert "analytics" in component_ids(result)
+
 
 class TestMlRule:
     def test_triggered_by_recommendation_keyword(self):
@@ -563,6 +580,27 @@ class TestMlRule:
         from app.services.rules_engine import run_rules_engine
 
         req = make_requirements(functional=["An AI-powered assistant helps users draft messages"])
+        result = run_rules_engine(req)
+
+        assert "ml" in component_ids(result)
+
+    def test_triggered_by_risk_scoring_keyword(self):
+        # Regression test: a real live end-to-end run of a HIPAA architecture with the functional
+        # requirement "ML-powered risk-scoring for at-risk patients" silently produced no "ml"
+        # component at all, since the original keyword list only covered
+        # recommendation/prediction/classification/machine learning/ai-powered/personalization --
+        # none of which match "ML-powered" or "risk-scoring", both common real-world phrasings.
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(functional=["ML-powered risk-scoring for at-risk patients"])
+        result = run_rules_engine(req)
+
+        assert "ml" in component_ids(result)
+
+    def test_triggered_by_fraud_detection_keyword(self):
+        from app.services.rules_engine import run_rules_engine
+
+        req = make_requirements(functional=["Real-time fraud detection on every transaction"])
         result = run_rules_engine(req)
 
         assert "ml" in component_ids(result)

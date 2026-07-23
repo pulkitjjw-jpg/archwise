@@ -11,6 +11,7 @@ from app.services.nfr_signals import (
     is_budget_tight,
     is_high_scale,
     parse_budget_amount,
+    parse_scale_amount,
 )
 
 
@@ -134,6 +135,49 @@ class TestIsHighScale:
     )
     def test_low_scale_signals(self, scale_str):
         assert is_high_scale(scale_str) is False
+
+    @pytest.mark.parametrize(
+        "scale_str",
+        [
+            # Regression: a real live E2E run used exactly this phrasing -- a raw digit figure
+            # with a comma and a "+", not one of the old fixed literal substrings
+            # ("high"/"million"/"100,000"/"10k"/"50k") -- and was silently misclassified as NOT
+            # high scale, which cascaded into three separate missing features (analytics
+            # component, multi-account banner, multi-AZ redundancy badge) all gating on this one
+            # function.
+            "50,000+ concurrent users across hospital systems in multiple regions",
+            "20,000 daily active users",
+            "15000 requests per second",
+            "12,500 users",
+        ],
+    )
+    def test_high_scale_signals_phrased_as_raw_numbers(self, scale_str):
+        assert is_high_scale(scale_str) is True
+
+    def test_numeric_scale_just_under_threshold_is_not_high(self):
+        assert is_high_scale("9,000 users") is False
+
+
+class TestParseScaleAmount:
+    @pytest.mark.parametrize(
+        ("scale_str", "expected"),
+        [
+            ("50,000+ concurrent users", 50000.0),
+            ("1 million users", 1_000_000.0),
+            ("10k requests/sec", 10_000.0),
+            ("100,000 daily active users", 100_000.0),
+            ("500 users", 500.0),
+        ],
+    )
+    def test_parses_numeric_figures(self, scale_str, expected):
+        assert parse_scale_amount(scale_str) == expected
+
+    @pytest.mark.parametrize(
+        "scale_str",
+        ["not_specified", "", "small internal tool", None],
+    )
+    def test_returns_none_when_no_digits_present(self, scale_str):
+        assert parse_scale_amount(scale_str) is None
 
 
 class TestDetermineDrStrategy:

@@ -7,11 +7,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db import get_db
-from app.dependencies import get_accessible_project, get_current_user
+from app.dependencies import get_accessible_project, get_current_user, get_owned_project
 from app.models import Conversation, Project, User
 from app.rate_limit import limiter
 from app.schemas import ProjectCreateRequest
 from app.serializers import serialize_project
+from app.services.audit import write_audit_log
 from app.services.llm import get_next_brainstorm_turn
 from app.services.usage_limits import check_and_increment
 
@@ -181,3 +182,35 @@ async def get_project(project: Project = Depends(get_accessible_project)) -> dic
     # project is this one (see src/app/projects/[id]/page.tsx), so it has to allow the same
     # audience as everything else on the page.
     return {"project": serialize_project(project)}
+
+
+@router.delete("/projects/{project_id}")
+@limiter.limit("30/hour")
+async def delete_project(
+    request: Request, project: Project = Depends(get_owned_project), db: AsyncSession = Depends(get_db)
+) -> dict:
+    """Permanently deletes a project and everything nested under it (conversations, requirements,
+    architectures, share links, comments, memberships) via the same ON DELETE CASCADE foreign keys
+    DELETE /auth/me already relies on for a full account deletion -- this is that same cascade,
+    just scoped to one project instead of an entire account. Real, irreversible data loss, by
+    design.
+
+    Owner-only (get_owned_project, not get_accessible_project) -- a collaborator/member can view
+    or edit a shared project, but deleting it outright is the owner's call alone.
+
+    Deliberately no "type the project name to confirm" friction like DeleteAccountRequest has for
+    the whole account -- losing one project among possibly several is a meaningfully smaller
+    consequence than losing every project at once, so a plain confirm-dialog click (enforced
+    client-side by the dashboard) is a reasonable amount of friction here."""
+    project_name = project.name
+    await write_audit_log(
+        db,
+        actor_user_id=project.user_id,
+        action="project.deleted",
+        target_type="project",
+        target_id=str(project.id),
+        extra_data={"name": project_name},
+    )
+    await db.delete(project)
+    await db.commit()
+    return {"ok": True}

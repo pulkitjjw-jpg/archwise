@@ -37,6 +37,16 @@ const PUBLIC_PAGE_PREFIXES = [
   "/about",
   "/acceptable-use",
   "/security",
+  "/help",
+  "/how-to-use",
+  // Next.js's native metadata-file routes (app/robots.ts, app/sitemap.ts, app/icon.tsx) --
+  // crawlers and browser tabs fetch these unauthenticated, cookie-less. Without this,
+  // clerkMiddleware bounces them to /login (confirmed live: all three returned a 307 to
+  // /login?next=... before this was added -- the icon.tsx one shows up as every page's favicon
+  // silently failing to load, not just a missing crawler file), which defeats the entire point.
+  "/robots.txt",
+  "/sitemap.xml",
+  "/icon",
 ];
 
 // Surveyed the whole app before writing this: no external fonts (system stack, no next/font

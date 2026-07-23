@@ -354,7 +354,7 @@ def run_lld_rules_engine(
             reasoning["minInstances"] = (
                 "Configured min 2 instances to maintain multi-zone high availability."
                 if is_high_scale
-                else "Configured min 1 instance to satisfy tight budget goals."
+                else "Configured min 1 instance -- standard-scale traffic doesn't yet justify the redundancy overhead of a second always-on instance."
             )
             reasoning["instanceSize"] = (
                 "Allocated medium container profile (0.5 vCPU) for stable API concurrency."

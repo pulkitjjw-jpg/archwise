@@ -5,6 +5,8 @@ export const LEGAL_PAGES = [
   { href: "/about", label: "About" },
   { href: "/security", label: "Security" },
   { href: "/contact", label: "Contact" },
+  { href: "/how-to-use", label: "How to Use" },
+  { href: "/help", label: "Help & FAQ" },
   { href: "/terms", label: "Terms of Service" },
   { href: "/privacy", label: "Privacy Policy" },
   { href: "/refund-policy", label: "Refund Policy" },

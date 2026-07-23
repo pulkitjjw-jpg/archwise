@@ -64,6 +64,17 @@ type ConversationTurn = {
   // itself fails, so the message doesn't sit there looking successfully sent with no way to
   // recover the (already-cleared) input text. See sendMessage's catch block and handleRetrySend.
   failed?: boolean;
+  // Client-only -- which of the two failed?: true cases this was, so the render can show an
+  // honest, distinct message for "took too long" vs "the request errored out" instead of one
+  // generic label for both.
+  failedReason?: "timeout" | "error";
+  // Client-only, forwarded from the API response's top-level "degraded" field (never persisted
+  // on the Conversation row itself) -- true when the backend's whole model fallback chain
+  // failed or returned something unusable, so this specific assistant turn is a generic filler
+  // question rather than a real one. Without this, that filler read exactly like a normal
+  // question with no way to tell "the AI is stuck" apart from "it's my turn to answer" -- see
+  // sendMessage below and backend/app/services/llm.py's get_next_brainstorm_turn.
+  degraded?: boolean;
 };
 
 interface ChatAreaProps {
@@ -75,7 +86,23 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
   const [messages, setMessages] = useState<ConversationTurn[]>(initialConversations);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  // Set when the automatic post-brainstorm requirements extraction fails -- this call previously
+  // never checked response.ok at all, so a failure here (e.g. the whole LLM fallback chain
+  // exhausted) gave the user zero indication anything went wrong; the Requirements tab would just
+  // silently stay empty/stale with no visible cause. See the extraction call site below.
+  const [extractionError, setExtractionError] = useState("");
   const thinkingStage = useStagedLoadingMessage(sending, THINKING_STAGES, THINKING_STAGE_INTERVAL_MS);
+  // THINKING_STAGES cycles every 3s and caps at "Almost there..." indefinitely -- indistinguishable
+  // from a genuinely stuck request. This flips on once a single send has run unusually long (well
+  // past THINKING_STAGES' own normal cycle, comfortably before sendMessage's 90s hard timeout),
+  // giving the user an honest "this isn't normal anymore" signal instead of a static phrase that
+  // reads the same whether the wait is 5 seconds or 85.
+  const [takingLong, setTakingLong] = useState(false);
+  useEffect(() => {
+    if (!sending) return;
+    const timer = setTimeout(() => setTakingLong(true), 20_000);
+    return () => clearTimeout(timer);
+  }, [sending]);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const growthTrigger = useGrowthTrigger();
   const analyzingStage = useStagedLoadingMessage(
@@ -106,6 +133,7 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
 
       setInput("");
       setSending(true);
+      setTakingLong(false);
 
       const activeStage = isGrowthPhase ? "growth_trigger" : "brainstorm";
 
@@ -119,6 +147,15 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
 
       setMessages((prev) => [...prev, tempMessage]);
 
+      // A stuck/hung request previously had no client-side ceiling at all -- it just awaited the
+      // Next.js proxy's own 180s timeout, during which the typing indicator looked identical to a
+      // normal few-second wait, with no way to tell "still working" from "broken". This gives up
+      // sooner (well past any realistic multi-tier model-fallback resolution -- see
+      // llm_per_model_timeout_seconds' own docstring -- but far short of 180s) and surfaces a
+      // distinct, honest "took too long" message rather than a generic "failed to send" one.
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 90_000);
+
       try {
         const response = await fetch(`/api/projects/${projectId}/conversations`, {
           method: "POST",
@@ -130,19 +167,22 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
             message: userMessageText,
             stage: activeStage,
           }),
+          signal: controller.signal,
         });
 
         if (!response.ok) {
           throw new Error("Failed to save message");
         }
 
-        const { userConversation, assistantConversation } = await response.json();
+        const { userConversation, assistantConversation, degraded } = await response.json();
 
-        // Replace user temp message with database turn, and append assistant response
+        // Replace user temp message with database turn, and append assistant response --
+        // "degraded" (see ConversationTurn's own docstring) is never part of the persisted
+        // Conversation row, so it's attached here, client-side only, from this response.
         setMessages((prev) =>
           prev
             .map((msg) => (msg.id === tempMessage.id ? userConversation : msg))
-            .concat(assistantConversation)
+            .concat({ ...assistantConversation, degraded: Boolean(degraded) })
         );
 
         // Auto-extract requirements whenever the LLM concludes discovery has enough detail --
@@ -156,9 +196,14 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
         // that: RequirementsPanel now listens for it directly (see RequirementsPanel.tsx).
         if (assistantConversation.stage === "requirement_gathering") {
           try {
-            await fetch(`/api/projects/${projectId}/requirements`, {
+            setExtractionError("");
+            const extractRes = await fetch(`/api/projects/${projectId}/requirements`, {
               method: "POST",
             });
+            if (!extractRes.ok) {
+              const errData = await extractRes.json().catch(() => ({}));
+              throw new Error(errData.error || errData.detail || "Failed to extract your requirements.");
+            }
             window.dispatchEvent(new Event("requirementsUpdated"));
 
             // The chat-proposed-changes review flow only makes sense for a growth trigger
@@ -185,17 +230,24 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
                 }
               }
             }
-          } catch (err) {
+          } catch (err: any) {
             console.error("Auto extraction failed:", err);
+            setExtractionError(err.message || "Failed to extract your requirements.");
           }
         }
       } catch (error) {
         console.error("Error sending message:", error);
+        const isTimeout = error instanceof DOMException && error.name === "AbortError";
         // Mark the optimistic bubble as failed instead of leaving it looking identical to a
         // successfully-sent message -- the input was already cleared above, so this (plus the
-        // Retry affordance in the render below) is the user's only way to recover.
-        setMessages((prev) => prev.map((msg) => (msg.id === tempMessage.id ? { ...msg, failed: true } : msg)));
+        // Retry affordance in the render below) is the user's only way to recover. A timeout gets
+        // its own honest label rather than the generic one, since "took too long" and "the
+        // network/server rejected this outright" are different situations worth telling apart.
+        setMessages((prev) =>
+          prev.map((msg) => (msg.id === tempMessage.id ? { ...msg, failed: true, failedReason: isTimeout ? "timeout" : "error" } : msg))
+        );
       } finally {
+        clearTimeout(timeoutId);
         setSending(false);
       }
     },
@@ -205,6 +257,21 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
   const handleRetrySend = (failedMessage: ConversationTurn) => {
     setMessages((prev) => prev.filter((msg) => msg.id !== failedMessage.id));
     sendMessage(failedMessage.message);
+  };
+
+  const handleRetryExtraction = async () => {
+    try {
+      setExtractionError("");
+      const extractRes = await fetch(`/api/projects/${projectId}/requirements`, { method: "POST" });
+      if (!extractRes.ok) {
+        const errData = await extractRes.json().catch(() => ({}));
+        throw new Error(errData.error || errData.detail || "Failed to extract your requirements.");
+      }
+      window.dispatchEvent(new Event("requirementsUpdated"));
+    } catch (err: any) {
+      console.error("Requirements extraction retry failed:", err);
+      setExtractionError(err.message || "Failed to extract your requirements.");
+    }
   };
 
   const handleSend = (e: React.FormEvent) => {
@@ -277,9 +344,11 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
                 className={`max-w-[80%] rounded-[1.5rem] px-5 py-3 text-sm leading-relaxed shadow-sm ${
                   msg.failed
                     ? "bg-danger-soft text-ink border border-danger/40 rounded-br-none"
-                    : isUser
-                      ? "bg-accent text-white rounded-br-none"
-                      : "bg-paper text-ink rounded-bl-none border border-line"
+                    : msg.degraded
+                      ? "bg-warning-soft/40 text-ink border border-warning/40 rounded-bl-none"
+                      : isUser
+                        ? "bg-accent text-white rounded-br-none"
+                        : "bg-paper text-ink rounded-bl-none border border-line"
                 }`}
               >
                 <div className="font-bold text-[10px] uppercase tracking-wider mb-1 opacity-75">
@@ -290,9 +359,19 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
                 ) : (
                   <ReactMarkdown components={ASSISTANT_MARKDOWN_COMPONENTS}>{msg.message}</ReactMarkdown>
                 )}
+                {/* degraded (see ConversationTurn's own docstring): the backend's whole model
+                    fallback chain failed or returned something unusable, so this specific message
+                    is a generic filler, not a real follow-up question -- flagged here so it never
+                    reads as an ordinary part of the conversation the user is expected to just
+                    answer and move on from. */}
+                {msg.degraded && !msg.failed && (
+                  <div className="mt-2 flex items-center gap-1.5 text-[11px] font-semibold text-warning">
+                    <span>⚠ Had trouble understanding that -- feel free to add more detail or rephrase.</span>
+                  </div>
+                )}
                 {msg.failed ? (
                   <div className="mt-2 flex items-center gap-2 text-[11px] font-semibold text-danger">
-                    <span>⚠ Failed to send</span>
+                    <span>{msg.failedReason === "timeout" ? "⚠ Took too long -- the request timed out" : "⚠ Failed to send"}</span>
                     <button
                       onClick={() => handleRetrySend(msg)}
                       className="rounded-full border border-danger/40 px-2.5 py-0.5 text-danger transition hover:bg-danger/10"
@@ -333,6 +412,11 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
                 </div>
                 <span className="text-xs text-ink-muted italic">{thinkingStage}</span>
               </div>
+              {takingLong && (
+                <p className="mt-1 text-[11px] font-semibold text-warning">
+                  This is taking longer than usual -- still working, no need to resend yet.
+                </p>
+              )}
             </div>
           </div>
         )}
@@ -378,6 +462,17 @@ export default function ChatArea({ projectId, initialConversations }: ChatAreaPr
 
       {/* Message Input Form */}
       <div className="border-t border-line bg-paper/50 p-4 space-y-3">
+        {extractionError && (
+          <div className="flex items-center justify-between gap-2 rounded-xl bg-danger-soft/70 border border-danger/25 p-2 text-xs">
+            <span className="text-danger">⚠ {extractionError}</span>
+            <button
+              onClick={handleRetryExtraction}
+              className="flex-none rounded-full border border-danger/40 px-2.5 py-0.5 font-semibold text-danger transition hover:bg-danger/10"
+            >
+              Retry
+            </button>
+          </div>
+        )}
         {latestStage === "requirement_gathering" && (
           <div className="flex items-center justify-center gap-1.5 rounded-xl bg-success-soft/70 border border-success/25 p-2 text-center text-xs">
             <span className="font-semibold text-success">Discovery complete.</span>{" "}

@@ -94,19 +94,69 @@ def is_budget_tight(budget_str: str) -> bool:
     return any(keyword in budget_lower for keyword in _TIGHT_BUDGET_KEYWORDS)
 
 
+def parse_scale_amount(scale_str: str) -> float | None:
+    """Extracts the largest numeric magnitude (users/requests/etc.) out of a free-text scale
+    string, mirroring parse_budget_amount's own numeric-first approach. Handles "k"/"K" (x1,000)
+    and "m"/"million" (x1,000,000) suffixes and comma-separated figures -- e.g. "50,000+ concurrent
+    users" -> 50000.0, "1 million users" -> 1_000_000.0, "10k requests/sec" -> 10000.0.
+
+    Returns None if no digits can be extracted at all (e.g. "not_specified", "small internal tool").
+    """
+    if not scale_str:
+        return None
+
+    text = scale_str.strip().lower()
+    if text in ("", "not_specified", "not specified", "unspecified", "n/a", "none"):
+        return None
+
+    matches = re.findall(r"(\d[\d,]*(?:\.\d+)?)\s*(k|m|million)?", text)
+    amounts: list[float] = []
+    for number_part, suffix in matches:
+        cleaned = number_part.replace(",", "")
+        if not cleaned:
+            continue
+        try:
+            amount = float(cleaned)
+        except ValueError:
+            continue
+        if suffix == "k":
+            amount *= 1_000
+        elif suffix in ("m", "million"):
+            amount *= 1_000_000
+        amounts.append(amount)
+
+    if not amounts:
+        return None
+
+    return max(amounts)
+
+
+# Comfortably above "500 users"/"a few thousand" (a small project) and at or below "10k
+# requests/sec"/"100,000 daily active users" (both already-established high-scale examples) --
+# 10,000 is the boundary that keeps every existing example on its expected side.
+_HIGH_SCALE_THRESHOLD = 10_000.0
+
+
 def is_high_scale(scale_str: str) -> bool:
-    """Consolidates the scale-detection logic previously duplicated across rules_engine.py,
-    cloud_mapping.py, and lld_rules.py. Behavior is intentionally unchanged from the original
-    inline checks -- this is a pure dedup, not a fix (no equally clear bug was spotted here; see
-    the accompanying report for a note on its remaining crudeness)."""
+    """Primary path: if a numeric figure can be parsed out of the string, judge scale by that
+    number against _HIGH_SCALE_THRESHOLD -- this is what correctly recognizes "50,000+ concurrent
+    users across hospital systems in multiple regions" as high scale even though it matches none of
+    the old fixed literal substrings ("high"/"million"/"100,000"/"10k"/"50k"). That old
+    substring-only version was flagged as still-crude when nfr_signals.py first consolidated this
+    logic (see the module docstring's HIGH #1 budget fix) and this closes the same bug class for
+    scale: a real live test (a "50,000+ concurrent users" HIPAA architecture) hit it directly,
+    silently suppressing the analytics component, the multi-account banner, and the multi-AZ
+    redundancy badge all at once, since all three gate on this one function.
+
+    Fallback path: if nothing numeric parses (e.g. "high traffic expected", "not_specified"), fall
+    back to keyword matching on "high"/"million" only -- never on bare digit substrings.
+    """
+    amount = parse_scale_amount(scale_str)
+    if amount is not None:
+        return amount >= _HIGH_SCALE_THRESHOLD
+
     scale_lower = (scale_str or "").lower()
-    return (
-        "high" in scale_lower
-        or "million" in scale_lower
-        or "100,000" in scale_lower
-        or "10k" in scale_lower
-        or "50k" in scale_lower
-    )
+    return "high" in scale_lower or "million" in scale_lower
 
 
 # Free-text phrases that, if present anywhere in the NFR data, are treated as an explicit

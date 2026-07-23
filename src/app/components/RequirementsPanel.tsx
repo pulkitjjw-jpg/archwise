@@ -116,21 +116,30 @@ export default function RequirementsPanel({
   type FieldSuggestions = Partial<Record<keyof typeof editedNFR | "functional", Suggestion[]>>;
   const [fieldSuggestions, setFieldSuggestions] = useState<FieldSuggestions>({});
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
+  // Previously this had no error path at all -- a failed/non-ok response just left
+  // fieldSuggestions empty with nothing logged anywhere but the console, so the UI silently went
+  // from "Generating suggestions..." to nothing, indistinguishable from "the AI genuinely had no
+  // suggestions for this field."
+  const [suggestionsError, setSuggestionsError] = useState("");
 
   const loadSuggestions = async (functional: string[], nonFunctional: typeof editedNFR) => {
     try {
       setSuggestionsLoading(true);
+      setSuggestionsError("");
       const res = await fetch(`/api/projects/${projectId}/requirements/suggestions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ functional, nonFunctional }),
       });
-      if (res.ok) {
-        const data = await res.json();
-        setFieldSuggestions(data.suggestions || {});
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || errData.detail || "Failed to generate suggestions.");
       }
-    } catch (err) {
+      const data = await res.json();
+      setFieldSuggestions(data.suggestions || {});
+    } catch (err: any) {
       console.error("Failed to load requirement suggestions:", err);
+      setSuggestionsError(err.message || "Failed to generate suggestions.");
     } finally {
       setSuggestionsLoading(false);
     }
@@ -139,7 +148,23 @@ export default function RequirementsPanel({
   const startEditing = () => {
     if (!requirements) return;
     setEditedFunctional(requirements.functional.join("\n"));
-    setEditedNFR({ ...requirements.nonFunctional });
+    // Spread onto the same all-empty-string shape editedNFR's own useState started with, not
+    // requirements.nonFunctional directly -- a persisted record with a genuinely missing key
+    // (confirmed live, despite the type below claiming every key is always a string) would
+    // otherwise leave that one input as an uncontrolled `value={undefined}`, which React warns
+    // about loudly even though it isn't the hard crash a bare `undefined` on read (see
+    // renderNFRField above) is. The Partial<> cast is the honest type for real persisted data,
+    // not the always-fully-populated type nonFunctional otherwise claims.
+    setEditedNFR({
+      expectedScale: "",
+      readWritePattern: "",
+      dataNature: "",
+      latencySensitivity: "",
+      budget: "",
+      teamMaturity: "",
+      compliance: "",
+      ...(requirements.nonFunctional as Partial<typeof editedNFR>),
+    });
     setEditMode(true);
     setFieldSuggestions({});
     loadSuggestions(requirements.functional, requirements.nonFunctional);
@@ -284,7 +309,12 @@ export default function RequirementsPanel({
 
   // Helper to render specified vs not specified fields
   const renderNFRField = (label: string, value: string, fieldName: keyof typeof editedNFR) => {
-    const isNotSpecified = value.toLowerCase() === "not_specified" || value.toLowerCase() === "not specified";
+    // value is typed string, but that's only a compile-time claim -- a persisted record whose
+    // extraction returned an incomplete nonFunctional object (confirmed live: {} with a field
+    // missing entirely) makes this genuinely undefined at runtime. Guard the same way
+    // ArchitectureWorkspace.tsx's isScaleUnspecified/isBudgetUnspecified/isDataUnspecified
+    // already do, rather than crashing the whole page on a call site that didn't.
+    const isNotSpecified = !value || value.toLowerCase() === "not_specified" || value.toLowerCase() === "not specified";
 
     if (editMode) {
       const suggestions = fieldSuggestions[fieldName] || [];
@@ -347,6 +377,8 @@ export default function RequirementsPanel({
                 </span>
               ))}
             </div>
+          ) : suggestionsError ? (
+            <p className="text-[10px] text-danger">⚠ {suggestionsError}</p>
           ) : null}
         </div>
       );
@@ -417,10 +449,10 @@ export default function RequirementsPanel({
           <div className="flex items-center gap-2">
             <h3 className="text-xl font-bold text-ink">Your Project Details</h3>
             {requirements.industryContext &&
-              requirements.industryContext.industry !== "none" && (
+              INDUSTRY_BADGE[requirements.industryContext.industry as "fintech" | "healthtech"] && (
                 <span className="inline-flex items-center gap-1 rounded-full bg-accent-soft border border-accent/25 px-2.5 py-1 text-[10px] font-bold text-accent-ink uppercase tracking-wider">
-                  {INDUSTRY_BADGE[requirements.industryContext.industry].emoji} Industry:{" "}
-                  {INDUSTRY_BADGE[requirements.industryContext.industry].label}
+                  {INDUSTRY_BADGE[requirements.industryContext.industry as "fintech" | "healthtech"].emoji} Industry:{" "}
+                  {INDUSTRY_BADGE[requirements.industryContext.industry as "fintech" | "healthtech"].label}
                 </span>
               )}
           </div>
@@ -538,6 +570,8 @@ export default function RequirementsPanel({
                     ))}
                   </div>
                 </div>
+              ) : suggestionsError ? (
+                <p className="text-[10px] text-danger">⚠ {suggestionsError}</p>
               ) : null}
             </div>
           ) : (
