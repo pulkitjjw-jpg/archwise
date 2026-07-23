@@ -6,7 +6,12 @@ const nextConfig: NextConfig = {
   // actually uses at runtime, not the full node_modules tree) that a Docker image can COPY and
   // run directly with `node server.js`, no `npm install` needed inside the final image. Doesn't
   // change `next dev`/local behavior at all -- purely additive to what `next build` emits.
-  output: "standalone",
+  //
+  // Skipped on Vercel (VERCEL=1 is set automatically in every Vercel build) -- Vercel has its own
+  // output-tracing/packaging pipeline and explicitly documents that `output: "standalone"` is a
+  // self-hosting concern, not something its platform needs; this only matters for the Docker image
+  // built by the repo's own Dockerfile.
+  ...(process.env.VERCEL ? {} : { output: "standalone" as const }),
 };
 
 // withSentryConfig adds a build-time plugin (React component annotation, optional source map
